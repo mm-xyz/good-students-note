@@ -151,6 +151,28 @@ python3 scripts/audio/render_cut.py --session sessions/<slug>
 
 改完 cutplan 隨時重跑,一分鐘出新版。先 `--dry-run` 可只看剪輯範圍不出片。
 
+### 4.5 節目結構(選用):精華集錦 + 音樂床
+
+cutplan.md 的**播放順序 = 文件行序**,所以節目結構直接用排版表達:
+
+```markdown
+## 🎬 精華集錦
+- [x] B0512 [12:03–12:07] [Mars] (從正文複製貼上的行,可跨時間軸、順序自訂)
+- [x] B0231 [5:44–5:49] [Sarah] (每段自帶淡入淡出,--clip-fade 預設 0.25s)
+
+## 🎵 assets/opening.mp3 fadein=0.5 fadeout=2
+## 開場                       ← 一般章節照舊
+- [x] B0001 …(正文)
+## 🎵 assets/interlude.mp3 fadein=1 fadeout=1
+- [x] B0800 …(正文下半)
+## 🎵 assets/ending.mp3 fadein=1.5 fadeout=3
+```
+
+- 音樂檔放 session 目錄或 repo 根,相對路徑寫進 🎵 行;音樂與前後語音**交叉淡化**
+  (fadein/fadeout 秒數可逐行指定)
+- 同一個 block 行可同時出現在集錦與正文(集錦=複製,不影響正文)
+- `chapters.txt` 的章節時間會自動算入音樂長度;`cut_map.json` 另附 music 對照
+
 ### 5. 節奏/手感旋鈕(都有安全預設)
 
 | 旋鈕 | 預設 | 效果 |
@@ -158,6 +180,7 @@ python3 scripts/audio/render_cut.py --session sessions/<slug>
 | `--max-pause` | 1.5 | 超過此秒數的停頓才收緊;調小=節奏更緊 |
 | `--pause-keep` | 0.6 | 收緊後保留的留白;調大=呼吸感多一點 |
 | `--crossfade` | 0.04 | 接縫交疊秒數;調大=更滑順但吃一點字尾 |
+| `--clip-fade` | 0.25 | 🎬 集錦片段的淡入淡出秒數 |
 | `--loudnorm` | I=-16:TP=-1.5:LRA=11 | 響度目標;傳空字串停用 |
 | `--out` | final_cut.mp3 | 副檔名決定編碼(.mp3/.m4a/.wav) |
 

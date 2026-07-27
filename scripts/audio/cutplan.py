@@ -65,6 +65,10 @@ def write_cutplan_md(blocks: list[dict], path: Path, slug: str, srt_name: str) -
         "> 停頓不用標:render 自動把 >1.5s 的停頓收緊到 0.6s(--max-pause 可調)。",
         "> 除了加刪除線,文字與時間碼不可改動(render 會逐 block 對 SRT 驗證)。",
         "> 可在 block 前加 `## 章節標題` 行,render 會轉成 podcast chapters。",
+        "> **節目結構**(選用,播放順序=本文件行序):`## 🎬 名稱`=精華集錦區,把正文的",
+        "> block 行**複製貼上**進來(可重複、順序自訂,每段自帶淡入淡出);",
+        "> `## 🎵 音樂檔 fadein=1 fadeout=2`=音樂插入點(檔案放 session 目錄或 repo 根,",
+        "> 與前後語音交叉淡化)。典型結構:🎬集錦 → 🎵開頭 → 正文 → 🎵間奏 → 正文 → 🎵結尾。",
         "> 出片:`python3 scripts/audio/render_cut.py --session sessions/<slug>`",
         "",
     ]

@@ -35,33 +35,50 @@ LINE_RE = re.compile(r"^- \[( |x|X)\] (B\d{3,5}) \[([^\]]+)\] (.*)$")
 CHAPTER_RE = re.compile(r"^## (.+)$")
 
 
-def parse_cutplan_md(path: Path) -> tuple[dict, dict, list[dict]]:
-    """回傳 ({id: keep}, {id: raw_body}, chapters)。
+MUSIC_RE = re.compile(r"^##\s*🎵\s*(\S+)((?:\s+\w+=[\d.]+)*)\s*$")
+TEASER_RE = re.compile(r"^##\s*🎬\s*(.*)$")
 
-    raw_body = 去掉 speaker 前綴/行尾理由的正文,可能含 `~~刪除線~~` 標記;
-    刪除線在 validate_blocks 對照 cutplan.json 原文後才解析(原文可能含字面 ~~)。
+
+def parse_program(path: Path) -> list[dict]:
+    """cutplan.md → 依文件順序的節目單(2026-07-28 節目結構,播放順序=文件順序)。
+
+    items:
+      {"kind":"block", "id", "keep", "raw", "clip"}  — clip=True 表示在 🎬 集錦區
+                                                       (block 行可複製貼上、可重複出現)
+      {"kind":"music", "file", "fadein", "fadeout"}  — `## 🎵 檔案 [fadein=X fadeout=Y]`
+      {"kind":"chapter", "title"}                    — 其他 `## 標題`
+    raw = 去掉 speaker 前綴/行尾理由的正文,可能含 `~~刪除線~~`(對照 json 後才解析)。
     """
-    keeps = {}
-    texts = {}
-    chapters = []
-    pending_chapter = None
+    program = []
+    clip_mode = False
     for line in path.read_text(encoding="utf-8").splitlines():
-        mc = CHAPTER_RE.match(line.strip())
-        if mc and not line.startswith("## Cutplan"):
-            pending_chapter = mc.group(1).strip()
+        s = line.strip()
+        mm_ = MUSIC_RE.match(s)
+        if mm_:
+            params = dict(re.findall(r"(\w+)=([\d.]+)", mm_.group(2) or ""))
+            program.append({"kind": "music", "file": mm_.group(1),
+                            "fadein": float(params.get("fadein", 1.0)),
+                            "fadeout": float(params.get("fadeout", 1.5))})
+            clip_mode = False
             continue
-        m = LINE_RE.match(line.strip())
+        mt = TEASER_RE.match(s)
+        if mt:
+            clip_mode = True
+            continue
+        mc = CHAPTER_RE.match(s)
+        if mc and not s.startswith("## Cutplan"):
+            program.append({"kind": "chapter", "title": mc.group(1).strip()})
+            clip_mode = False
+            continue
+        m = LINE_RE.match(s)
         if not m:
             continue
         mark, bid, body = m.group(1), m.group(2), m.group(4)
-        keeps[bid] = mark.lower() == "x"
         body = body.rsplit(" ← ", 1)[0]
         body = re.sub(r"^\[[^\]]{1,20}\]\s*", "", body).strip()  # speaker 前綴
-        texts[bid] = body  # raw;刪除線在 main 對照 cutplan.json 原文後才解析
-        if pending_chapter is not None:
-            chapters.append({"block": bid, "title": pending_chapter})
-            pending_chapter = None
-    return keeps, texts, chapters
+        program.append({"kind": "block", "id": bid, "keep": mark.lower() == "x",
+                        "raw": body, "clip": clip_mode})
+    return program
 
 
 def parse_strikes(body: str) -> tuple[str, list[list[int]]]:
@@ -193,41 +210,42 @@ def subtract(ranges: list[list[float]], removals: list[list[float]],
     return out
 
 
-def validate_blocks(blocks: list[dict], keeps: dict, md_texts: dict,
-                    srt_text: str) -> dict:
-    """防幻覺/防手滑三道驗證,並解析字級精剪。回傳 {id: strike_spans}。
-    (1) md 與 json 的 block id 集合一致
-    (2) md 每行正文(去刪除線標記後)== json block 文字 — 只准翻勾選不准改字
+def validate_program(blocks: list[dict], program: list[dict],
+                     srt_text: str) -> None:
+    """防幻覺/防手滑驗證 + 逐出現解析字級精剪(spans 掛回 program item)。
+    (1) json 每個 block 至少在 md 出現一次;md 不得有 json 沒有的 id
+        (重複出現合法 — 🎬 集錦區可複製貼上正文的行)
+    (2) 每次出現的正文(去刪除線標記後)== json block 文字 — 不准改字
     (3) json block 文字逐字存在於來源 SRT(json 也不可竄改)
     """
-    md_ids = set(keeps)
-    json_ids = {b["id"] for b in blocks}
-    if md_ids != json_ids:
-        missing = json_ids - md_ids
-        extra = md_ids - json_ids
+    json_by_id = {b["id"]: b for b in blocks}
+    md_ids = {it["id"] for it in program if it["kind"] == "block"}
+    missing = set(json_by_id) - md_ids
+    extra = md_ids - set(json_by_id)
+    if missing or extra:
         sys.exit(f"[render] FAIL: cutplan.md 與 cutplan.json block 不一致 "
                  f"(md 缺 {sorted(missing) or '無'} / md 多 {sorted(extra) or '無'})")
     flat = re.sub(r"\s+", "", srt_text)
-    strikes = {}
-    for b in blocks:
+    for it in program:
+        if it["kind"] != "block":
+            continue
+        b = json_by_id[it["id"]]
         jt = re.sub(r"\s+", "", b["text"])
-        raw = md_texts[b["id"]]
+        raw = it["raw"]
         # 原文本身含 ~~(whisper 會轉出「哦~~」這種語氣詞)→ 該 block 不解析刪除線
         if "~~" in raw and "~~" not in b["text"]:
             clean, spans = parse_strikes(raw)
         else:
             clean, spans = raw, []
-        mt = re.sub(r"\s+", "", clean)
-        if mt != jt:
-            sys.exit(f"[render] FAIL: {b['id']} cutplan.md 文字與 cutplan.json 不符"
+        if re.sub(r"\s+", "", clean) != jt:
+            sys.exit(f"[render] FAIL: {it['id']} cutplan.md 文字與 cutplan.json 不符"
                      f"(被改過?)— cutplan 只准翻勾選/加刪除線/加理由/加章節,"
                      f"文字不可動")
-        if keeps[b["id"]] and jt and jt not in flat:
-            sys.exit(f"[render] FAIL: {b['id']} 文字不存在於來源 SRT(cutplan.json "
+        if it["keep"] and jt and jt not in flat:
+            sys.exit(f"[render] FAIL: {it['id']} 文字不存在於來源 SRT(cutplan.json "
                      f"被竄改?)— 重跑 cutplan.py prepare 再提案")
-        if spans:
-            strikes[b["id"]] = spans
-    return strikes
+        it["spans"] = spans
+        it["block"] = b
 
 
 def snap_boundaries(ranges: list[list[float]], silences: list[dict],
@@ -291,52 +309,93 @@ def refine_boundaries(ranges: list[list[float]], wav_path: Path,
     return [[a, b] for a, b in out if b - a > 0.1]
 
 
-def run_ffmpeg(src: Path, ranges: list[list[float]], out: Path, fade: float,
-               loudnorm: str | None, crossfade: float) -> list[float]:
-    """出片;回傳每個 range 在新時間軸上的起點(crossfade 會吃掉接縫時間)。
+def ffprobe_duration(path: Path) -> float:
+    out = subprocess.run(
+        ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+         "-of", "default=nw=1:nk=1", str(path)],
+        capture_output=True, text=True, check=True).stdout.strip()
+    return float(out)
 
-    波形平滑第二步:接縫用 acrossfade 交疊(前段尾與後段頭重疊 crossfade 秒
-    三角交叉淡化),房間音連續不留「洞」— 比 fade-out+fade-in 的斷點滑順。
+
+def run_ffmpeg(src: Path, segments: list[dict], out: Path, fade: float,
+               loudnorm: str | None, crossfade: float, clip_fade: float) -> list[float]:
+    """出片。segments 依播放順序,speech/music 混排(節目結構 2026-07-28):
+      {"kind":"speech","a","b","clip":bool} | {"kind":"music","path","fadein","fadeout","dur"}
+    接縫規則(acrossfade 三角交疊):speech↔speech=crossfade(40ms);任一側是 🎬
+    集錦 clip=clip_fade;任一側是 music=該音樂的 fadein/fadeout(音樂床淡入淡出)。
+    回傳每個 segment 在新時間軸上的起點。
     """
-    n = len(ranges)
-    durs = [b - a for a, b in ranges]
-    cf = min(crossfade, min(durs) / 2 - 0.005) if n > 1 else 0.0
+    n = len(segments)
+    music_paths = []
+    for s in segments:
+        if s["kind"] == "music" and s["path"] not in music_paths:
+            music_paths.append(s["path"])
+    input_idx = {p: i + 1 for i, p in enumerate(music_paths)}
+
+    durs = []
     parts = []
-    for i, (a, b) in enumerate(ranges):
-        f_in = fade if i == 0 else 0.0
-        f_out = fade if i == n - 1 else 0.0
-        seg = (f"[0:a]atrim=start={a:.3f}:end={b:.3f},asetpts=PTS-STARTPTS")
-        if f_in:
-            seg += f",afade=t=in:d={f_in:.3f}"
-        if f_out:
-            seg += f",afade=t=out:st={max(0.0, durs[i] - f_out):.3f}:d={f_out:.3f}"
-        parts.append(seg + f"[a{i}]")
+    for i, s in enumerate(segments):
+        if s["kind"] == "speech":
+            d = s["b"] - s["a"]
+            expr = (f"[0:a]atrim=start={s['a']:.3f}:end={s['b']:.3f},"
+                    f"asetpts=PTS-STARTPTS,aformat=sample_rates=48000:"
+                    f"channel_layouts=stereo")
+        else:
+            d = s["dur"]
+            expr = (f"[{input_idx[s['path']]}:a]atrim=start=0:end={d:.3f},"
+                    f"asetpts=PTS-STARTPTS,aformat=sample_rates=48000:"
+                    f"channel_layouts=stereo")
+        if i == 0:
+            f_in = s["fadein"] if s["kind"] == "music" else fade
+            expr += f",afade=t=in:d={f_in:.3f}"
+        if i == n - 1:
+            f_out = s["fadeout"] if s["kind"] == "music" else fade
+            expr += f",afade=t=out:st={max(0.0, d - f_out):.3f}:d={f_out:.3f}"
+        parts.append(expr + f"[a{i}]")
+        durs.append(d)
+
+    def joint_cf(i: int) -> float:
+        a, b = segments[i - 1], segments[i]
+        if a["kind"] == "music":
+            cf = a["fadeout"]
+        elif b["kind"] == "music":
+            cf = b["fadein"]
+        elif a.get("clip") or b.get("clip"):
+            cf = clip_fade
+        else:
+            cf = crossfade
+        return max(0.005, min(cf, durs[i - 1] / 2 - 0.005, durs[i] / 2 - 0.005))
+
+    cfs = [joint_cf(i) for i in range(1, n)]
     prev = "a0"
     for i in range(1, n):
         nxt = f"x{i}" if i < n - 1 else "cat"
-        parts.append(f"[{prev}][a{i}]acrossfade=d={cf:.3f}:c1=tri:c2=tri[{nxt}]")
+        parts.append(f"[{prev}][a{i}]acrossfade=d={cfs[i - 1]:.3f}:c1=tri:c2=tri[{nxt}]")
         prev = nxt
     if n == 1:
         parts.append("[a0]anull[cat]")
     if loudnorm:
-        # 音量一致化(EBU R128 動態 loudnorm):三人麥距/音量不同也拉齊,podcast 標準
+        # 音量一致化(EBU R128 動態 loudnorm):多人麥距/音量不同也拉齊,podcast 標準
         parts.append(f"[cat]loudnorm={loudnorm}[out]")
     else:
         parts.append("[cat]anull[out]")
-    # 新時間軸起點:每個接縫吃掉 cf 秒
+
     dst_starts = []
     acc = 0.0
     for i, d in enumerate(durs):
-        dst_starts.append(max(0.0, acc - i * cf))
+        dst_starts.append(max(0.0, acc - sum(cfs[:i])))
         acc += d
     script = out.parent / ".render_filter.txt"
     script.write_text(";\n".join(parts), encoding="utf-8")
     codec = {".wav": [],
              ".mp3": ["-c:a", "libmp3lame", "-b:a", "192k"],
              }.get(out.suffix, ["-c:a", "aac", "-b:a", "192k"])
-    cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(src),
-           "-filter_complex_script", str(script), "-map", "[out]", *codec, str(out)]
-    print(f"[render] ffmpeg {len(ranges)} ranges, crossfade {cf * 1000:.0f}ms → {out.name}")
+    cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(src)]
+    for mp in music_paths:
+        cmd += ["-i", str(mp)]
+    cmd += ["-filter_complex_script", str(script), "-map", "[out]", *codec, str(out)]
+    n_music = sum(1 for s in segments if s["kind"] == "music")
+    print(f"[render] ffmpeg {n - n_music} 段語音 + {n_music} 段音樂 → {out.name}")
     subprocess.run(cmd, check=True)
     script.unlink()
     return dst_starts
@@ -354,6 +413,8 @@ def main():
                          "傳空字串停用")
     ap.add_argument("--crossfade", type=float, default=0.04,
                     help="接縫交疊秒數(acrossfade;預設 40ms,越大越滑順但會吃字尾)")
+    ap.add_argument("--clip-fade", type=float, default=0.25,
+                    help="🎬 集錦片段的淡入淡出秒數(預設 0.25)")
     ap.add_argument("--max-pause", type=float, default=1.5,
                     help="保留段內超過此秒數的停頓自動收緊(0=停用)")
     ap.add_argument("--pause-keep", type=float, default=0.6,
@@ -366,108 +427,147 @@ def main():
         sys.exit("[render] FAIL: .cutplan_pending.json 還在 — 剪輯提案未完成,"
                  "先讓對話 agent 提案 + MM 人審 cutplan.md")
     cp = json.loads((sdir / "cutplan.json").read_text(encoding="utf-8"))
-    keeps, md_texts, chapters = parse_cutplan_md(sdir / "cutplan.md")
+    program = parse_program(sdir / "cutplan.md")
 
     spk_srt = sdir / "transcript.speakers.srt"
     srt_src = spk_srt if spk_srt.exists() else pick_transcript(sdir)
     srt_text = "".join(c["text"] for c in parse_srt(srt_src))
-    strikes = validate_blocks(cp["blocks"], keeps, md_texts, srt_text)
+    validate_program(cp["blocks"], program, srt_text)
 
-    kept = [b for b in cp["blocks"] if keeps[b["id"]]]
-    cut = [b for b in cp["blocks"] if not keeps[b["id"]]]
-    if not kept:
-        sys.exit("[render] FAIL: 沒有任何保留 block")
-
+    wp = sdir / "words.json"
+    words = json.loads(wp.read_text(encoding="utf-8")) if wp.exists() else None
     silences = []
     pj = sdir / "prosody.json"
     if pj.exists():
         silences = json.loads(pj.read_text(encoding="utf-8")).get("silences", [])
     else:
-        print("[render] ⚠ prosody.json 不存在,剪點不 snap 靜音(可能切在字中間)")
+        print("[render] ⚠ prosody.json 不存在,剪點不 snap 靜音、停頓不收緊")
 
-    ranges = [[b["start"], b["end"]] for b in kept]
-    ranges = merge_ranges(snap_boundaries(ranges, silences, args.snap_window))
+    # ── program → units(播放順序=文件順序;doc 連續且 src 時間連續的 kept
+    #    blocks 併成一個 speech unit;🎬 集錦行自成 clip units)──
+    units = []       # {"kind":"speech","start","end","items":[...],"clip"} | music
+    chapters = []    # {"title","anchor"=下一個 unit 的 index}
+    for it in program:
+        if it["kind"] == "chapter":
+            chapters.append({"title": it["title"], "anchor": len(units)})
+        elif it["kind"] == "music":
+            f = Path(it["file"])
+            path = next((c for c in (sdir / f, PROJECT_ROOT / f, f.expanduser())
+                         if c.exists()), None)
+            if not path:
+                sys.exit(f"[render] FAIL: 音樂檔不存在:{it['file']}"
+                         f"(相對 session 目錄或 repo 根都找不到)")
+            units.append({"kind": "music", "path": path.resolve(),
+                          "dur": ffprobe_duration(path),
+                          "fadein": it["fadein"], "fadeout": it["fadeout"]})
+        elif it["keep"]:
+            b = it["block"]
+            last = units[-1] if units else None
+            joinable = (last and last["kind"] == "speech"
+                        and last["clip"] == it["clip"]
+                        and 0 <= b["start"] - last["end"] < 2.0)
+            if joinable:
+                last["end"] = b["end"]
+                last["items"].append(it)
+            else:
+                units.append({"kind": "speech", "start": b["start"], "end": b["end"],
+                              "items": [it], "clip": it["clip"]})
 
-    # ── 字級精剪(~~刪除線~~)+ 停頓收緊 ──
-    wp = sdir / "words.json"
-    words = json.loads(wp.read_text(encoding="utf-8")) if wp.exists() else None
-    removals = []
-    if strikes:
-        if not words:
-            sys.exit("[render] FAIL: cutplan 有 ~~刪除線~~ 但缺 words.json(word 級"
-                     "時間軸)— 用新版 transcribe_local.py 重轉錄一次產生")
-        block_by_id = {b["id"]: b for b in cp["blocks"]}
-        n_strike = 0
-        for bid, spans in strikes.items():
-            if keeps.get(bid):
-                removals += strike_removals(block_by_id[bid], spans, words)
-                n_strike += len(spans)
-        print(f"[render] 字級精剪: {n_strike} 處刪除線")
-    if args.max_pause > 0 and silences:
-        if not words:
-            print("[render] ⚠ 無 words.json:停頓收緊沒有字邊界保護,小聲字尾"
-                  "可能被誤剪", file=sys.stderr)
-        pr = pause_removals(ranges, silences, args.max_pause, args.pause_keep, words)
-        if pr:
-            saved = sum(b - a for a, b in pr)
-            print(f"[render] 停頓收緊: {len(pr)} 處 >{args.max_pause}s 的停頓,"
-                  f"共省 {fmt_mmss(saved)}")
+    n_strike = 0
+    if any(it.get("spans") for u in units if u["kind"] == "speech"
+           for it in u["items"]) and not words:
+        sys.exit("[render] FAIL: cutplan 有 ~~刪除線~~ 但缺 words.json — "
+                 "用新版 transcribe_local.py 重轉錄一次產生")
+
+    # ── 每個 speech unit:snap → 字級精剪/停頓收緊 → 谷底 → word 保護 ──
+    segments = []
+    unit_first_seg = {}
+    n_pause = 0
+    for ui, u in enumerate(units):
+        if u["kind"] == "music":
+            unit_first_seg[ui] = len(segments)
+            segments.append(u)
+            continue
+        ranges = merge_ranges(snap_boundaries([[u["start"], u["end"]]],
+                                              silences, args.snap_window))
+        removals = []
+        for it in u["items"]:
+            if it.get("spans"):
+                removals += strike_removals(it["block"], it["spans"], words)
+                n_strike += len(it["spans"])
+        if args.max_pause > 0 and silences:
+            pr = pause_removals(ranges, silences, args.max_pause,
+                                args.pause_keep, words)
+            n_pause += len(pr)
             removals += pr
-    if removals:
-        ranges = subtract(ranges, removals)
-
-    # 波形平滑:剪點滑到 ±90ms 能量谷底 → word 邊界保護(不切在字中間)→ 合併
-    ranges = refine_boundaries(ranges, sdir / "audio16k.wav")
-    if words:
-        ranges = word_guard(ranges, words)
-    ranges = merge_ranges(ranges, min_gap=0.05)
-
-    total_src = cp["blocks"][-1]["end"] if cp["blocks"] else 0
-    removed = sum(b["end"] - b["start"] for b in cut)
-    est = sum(b - a for a, b in ranges)
-    print(f"[render] 保留 {len(kept)}/{len(cp['blocks'])} blocks → {len(ranges)} ranges;"
-          f"剪掉 {fmt_mmss(removed)},成品約 {fmt_mmss(est)}(原 {fmt_mmss(total_src)})")
-    if args.dry_run:
+        if removals:
+            ranges = subtract(ranges, removals)
+        ranges = refine_boundaries(ranges, sdir / "audio16k.wav")
+        if words:
+            ranges = word_guard(ranges, words)
+        ranges = merge_ranges(ranges, min_gap=0.05)
+        unit_first_seg[ui] = len(segments)
         for a, b in ranges:
-            print(f"  keep {fmt_mmss(a)}–{fmt_mmss(b)}")
+            segments.append({"kind": "speech", "a": a, "b": b, "clip": u["clip"]})
+
+    if not any(s["kind"] == "speech" for s in segments):
+        sys.exit("[render] FAIL: 沒有任何保留 block")
+    if n_strike:
+        print(f"[render] 字級精剪: {n_strike} 處刪除線")
+    if n_pause:
+        print(f"[render] 停頓收緊: {n_pause} 處 >{args.max_pause}s")
+
+    speech_secs = sum(s["b"] - s["a"] for s in segments if s["kind"] == "speech")
+    music_secs = sum(s["dur"] for s in segments if s["kind"] == "music")
+    n_clip = sum(1 for s in segments if s["kind"] == "speech" and s.get("clip"))
+    total_src = cp["blocks"][-1]["end"] if cp["blocks"] else 0
+    print(f"[render] {len(segments)} segments(集錦 {n_clip} 段、音樂 "
+          f"{sum(1 for s in segments if s['kind'] == 'music')} 段);語音 "
+          f"{fmt_mmss(speech_secs)} + 音樂 {fmt_mmss(music_secs)}"
+          f"(原始 {fmt_mmss(total_src)})")
+    if args.dry_run:
+        for s in segments:
+            if s["kind"] == "speech":
+                tag = " [🎬]" if s.get("clip") else ""
+                print(f"  speech {fmt_mmss(s['a'])}–{fmt_mmss(s['b'])}{tag}")
+            else:
+                print(f"  music  {s['path'].name}({fmt_mmss(s['dur'])},"
+                      f"in {s['fadein']}s/out {s['fadeout']}s)")
         return
 
     src = next(p for p in sorted(sdir.glob("source.*"))
                if p.suffix.lower() not in (".srt", ".md", ".json", ".txt"))
     out = sdir / args.out
-    # 波形平滑步驟二:接縫 crossfade 交疊(run_ffmpeg 回傳交疊後的新時間軸起點)
-    dst_starts = run_ffmpeg(src, ranges, out, args.fade, args.loudnorm or None,
-                            args.crossfade)
+    dst_starts = run_ffmpeg(src, segments, out, args.fade, args.loudnorm or None,
+                            args.crossfade, args.clip_fade)
 
-    cut_map = [{"src_start": round(a, 3), "src_end": round(b, 3),
+    cut_map = [{"src_start": round(s["a"], 3), "src_end": round(s["b"], 3),
                 "dst_start": round(d, 3)}
-               for (a, b), d in zip(ranges, dst_starts)]
-    final_dur = dst_starts[-1] + (ranges[-1][1] - ranges[-1][0])
+               for s, d in zip(segments, dst_starts) if s["kind"] == "speech"]
+    music_map = [{"file": s["path"].name, "dst_start": round(d, 3),
+                  "dur": round(s["dur"], 3)}
+                 for s, d in zip(segments, dst_starts) if s["kind"] == "music"]
+    final_dur = dst_starts[-1] + (segments[-1]["b"] - segments[-1]["a"]
+                                  if segments[-1]["kind"] == "speech"
+                                  else segments[-1]["dur"])
 
-    def to_new_time(t: float) -> float | None:
-        for r in cut_map:
-            if r["src_start"] <= t <= r["src_end"]:
-                return r["dst_start"] + (t - r["src_start"])
-        later = [r for r in cut_map if r["src_start"] > t]
-        return later[0]["dst_start"] if later else None
-
-    block_by_id = {b["id"]: b for b in cp["blocks"]}
     chap_lines = []
     for ch in chapters:
-        blk = block_by_id.get(ch["block"])
-        if blk and keeps.get(ch["block"]):
-            nt = to_new_time(blk["start"])
-            if nt is not None:
-                chap_lines.append(f"{sec_to_ts(nt).replace(',', '.')} {ch['title']}")
+        seg_i = unit_first_seg.get(ch["anchor"])
+        if seg_i is not None and seg_i < len(dst_starts):
+            chap_lines.append(
+                f"{sec_to_ts(dst_starts[seg_i]).replace(',', '.')} {ch['title']}")
 
     (sdir / "cut_map.json").write_text(json.dumps({
         "generated_at": dt.datetime.now().isoformat(timespec="seconds"),
         "final_duration_secs": round(final_dur, 3),
-        "removed_secs": round(removed, 3),
+        "speech_secs": round(speech_secs, 3),
         "ranges": cut_map,
+        "music": music_map,
     }, ensure_ascii=False, indent=2), encoding="utf-8")
     if chap_lines:
-        (sdir / "chapters.txt").write_text("\n".join(chap_lines) + "\n", encoding="utf-8")
+        (sdir / "chapters.txt").write_text("\n".join(chap_lines) + "\n",
+                                           encoding="utf-8")
         print(f"[render] chapters.txt: {len(chap_lines)} 章")
     print(f"[render] ✅ {out.name}({fmt_mmss(final_dur)})+ cut_map.json")
 
