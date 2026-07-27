@@ -70,7 +70,8 @@ python3 scripts/session.py new "諮詢錄音.m4a" \
 | 出版成可分享網頁 | (獨立指令 `publish_goodedunote.sh`,非 `--stop-at`) | `<slug>.html` + 線上網址 | 把筆記做成網頁分享(Step 5) |
 | 逐字稿分 speaker | (flag `--diarize`,非 `--stop-at`) | `speakers.json` + `transcript.speakers.srt` | 多人對談/訪談/Podcast 逐字稿 |
 | 聲音高昂精華段 | (flag `--prosody`) | `prosody.json` + `highlights.md` | 精華/預告/shorts 候選 |
-| 文字剪 Podcast | (flag `--cut`,隱含前兩者) | `cutplan.md` →(人審)→ `final_cut.m4a` | Descript 式剪輯,不進剪輯軟體 |
+| 文字剪 Podcast | (flag `--cut`,隱含前兩者) | `cutplan.md` →(人審)→ `final_cut.mp3` | Descript 式剪輯,不進剪輯軟體 |
+| 影片抽幀→帶圖筆記 | (flag `--frames`,影片限定) | `sessions/<slug>/frames/` → Obsidian 逐字稿+筆記 | 演講/課程影片(invisible-context 併入,見下) |
 
 > **音訊分析線**(`--diarize` / `--prosody` / `--cut`)是與 Phase B 平行的加值線,
 > 全本地零雲端(pyannote + librosa)。完整操作見下方
@@ -172,6 +173,27 @@ cutplan.md 的**播放順序 = 文件行序**,所以節目結構直接用排版�
   (fadein/fadeout 秒數可逐行指定)
 - 同一個 block 行可同時出現在集錦與正文(集錦=複製,不影響正文)
 - `chapters.txt` 的章節時間會自動算入音樂長度;`cut_map.json` 另附 music 對照
+
+### 4.7 影片素材:frames 線(invisible-context 併入,2026-07-28)
+
+影片(演講/課程)除了上述音訊線,還可以走抽幀→帶圖筆記:
+
+```bash
+# 一條龍:本地轉錄 + 場景偵測抽幀
+python3 scripts/session.py new "<video.mp4>" --context "講者, 專名" --stop-at phase-a --frames
+
+# 後續逐步跑(原則 9;slug = session 目錄名)
+.venv-audio/bin/python scripts/frames/screen.py "<slug>"       # LM Studio VLM 篩圖寫圖說
+.venv-audio/bin/python scripts/frames/ocr.py "<slug>"          # macOS Vision OCR + QR
+.venv-audio/bin/python scripts/frames/diagram.py "<slug>"      # 流程圖 → mermaid(選)
+.venv-audio/bin/python scripts/frames/format_text.py "<slug>"  # VLM 重排版面(選)
+python3 scripts/frames/compose.py "<slug>" --course "<課程名>" # → Obsidian 逐字稿+筆記
+```
+
+- compose 會吸收音訊線圖層:跑過 `--prosody` 就用**真實聲學停頓**、高昂段標 🔥、
+  有 speakers SRT 段落自帶講者名
+- VLM 全走本地 LM Studio(零雲端 token;`LM_STUDIO_TOKEN` 住 mars-cc/.env)
+- 詳細操作與 gotchas:`.claude/skills/invisible-context/SKILL.md`(`/invisible-context` skill)
 
 ### 5. 節奏/手感旋鈕(都有安全預設)
 
@@ -345,6 +367,8 @@ GitHub Pages 部署版:`https://shuotao.github.io/GENAI/web/studio.html`
 - **`compress_images.py`**: 出版前圖片壓縮 + EXIF 轉正
 - **`image_notes_session.py`** + **`md_to_a4_png.py`**: 好學生筆記**圖像版**兩階段工具(`/note` 生 A4 底稿 → `/好學生筆記` 逐頁生圖;僅 Web/Antigravity/Gemini CLI 可驅動)
 - **`lang/`**: 多語系轉錄/清理腳本(目前有 `it/` 義大利文、`en/` 英文、`ja/` 日文)
+- **`audio/`**(2026-07-27 新增,音訊分析線): `transcribe_local.py` 本地 mlx-whisper 轉錄(`--asr local` 預設,產 words.json)、`diarize.py` pyannote 分 speaker(+`--apply-map` 套人名)、`prosody.py` 能量/音高/語速→高昂分+highlights、`cutplan.py` 文字剪輯 checkbox 產生器、`render_cut.py` ffmpeg 出片(字級精剪/停頓收緊/波形平滑/音樂床/loudnorm);重依賴住 `.venv-audio`
+- **`frames/`**(2026-07-28 併入 invisible-context): `extract.py` 場景偵測抽幀、`screen.py` LM Studio VLM 篩圖、`ocr.py` macOS Vision OCR+QR、`diagram.py` 圖→mermaid、`format_text.py` 版面重排、`compose.py` Obsidian 逐字稿+筆記(吸收音訊線的停頓/🔥/講者圖層);產物住 `sessions/<slug>/frames/`
 
 ### 5. `/dict` - 共用詞典(2026-04 新增)
 CLI 與 Web 使用同一份字典:

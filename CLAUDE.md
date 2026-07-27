@@ -431,7 +431,13 @@ Step 5 只在 `goodedunote` 專案的 hosting 上新增/更新該篇 `<slug>/`,�
 - **防篡改**:`render_cut.py` 三道驗證(md/json block 一致、md 文字==json 文字、
   json 文字 ⊂ 來源 SRT),cutplan 只准翻勾選,文字時間碼不可動。
 - **產物**:`speakers.json`、`transcript.speakers.srt`、`prosody.json`、`highlights.md`、
-  `cutplan.md/json`、`final_cut.m4a`、`cut_map.json`、`chapters.txt`,全落 `sessions/<slug>/`。
+  `cutplan.md/json`、`final_cut.mp3`、`cut_map.json`、`chapters.txt`,全落 `sessions/<slug>/`。
+- **節目結構(2026-07-28)**:cutplan.md 播放順序=文件行序;`## 🎬`=精華集錦區
+  (block 行可複製貼上/重複)、`## 🎵 檔案 fadein= fadeout=`=音樂床、其他 `##`=章節。
+- **frames 線(2026-07-28 併入 invisible-context)**:`scripts/frames/`(extract/screen/
+  ocr/diagram/format_text/compose),產物 `sessions/<slug>/frames/`;session.py `--frames`
+  觸發抽幀,VLM 全走本地 LM Studio;compose 吸收音訊線的停頓/🔥/講者圖層;skill
+  `/invisible-context` 實體在 `.claude/skills/invisible-context/`,原 repo 已封存。
 
 ---
 
