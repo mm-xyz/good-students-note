@@ -73,11 +73,103 @@ python3 scripts/session.py new "諮詢錄音.m4a" \
 | 文字剪 Podcast | (flag `--cut`,隱含前兩者) | `cutplan.md` →(人審)→ `final_cut.m4a` | Descript 式剪輯,不進剪輯軟體 |
 
 > **音訊分析線**(`--diarize` / `--prosody` / `--cut`)是與 Phase B 平行的加值線,
-> 全本地零雲端(pyannote + librosa),需另裝 `.venv-audio`:
-> `python3.13 -m venv .venv-audio && .venv-audio/bin/pip install -r requirements-audio.txt`,
-> 且 `.env` 要有 `HF_TOKEN`(pyannote gated model,先在 [hf.co](https://hf.co/pyannote/speaker-diarization-community-1) 同意條款)。
-> 剪輯流程:`--cut` 產 `cutplan.md` → 對話 agent 提案翻勾選 → **MM 人審勾選(這步就是剪輯)** →
-> `python3 scripts/audio/render_cut.py --session sessions/<slug>` 出片(剪點自動 snap 靜音)。
+> 全本地零雲端(pyannote + librosa)。完整操作見下方
+> [🎙 Podcast 文字剪輯 — 完整流程](#-podcast-文字剪輯--完整流程)。
+
+## 🎙 Podcast 文字剪輯 — 完整流程
+
+> 核心概念:**剪輯 = 改一份 markdown**。逐字稿變成 checkbox 清單(cutplan.md),
+> 勾選=句級剪、`~~刪除線~~`=字級剪、`## 標題`=章節;改完跑 render 一分鐘出 mp3。
+> 全程本地(mlx-whisper 轉錄、pyannote 分人、librosa 情緒、ffmpeg 出片),零雲端 token。
+
+### 0. 前置(一次性)
+
+```bash
+# 音訊分析線的獨立 venv(pyannote/torch/librosa/mlx-whisper,不污染主管線)
+python3.13 -m venv .venv-audio
+.venv-audio/bin/pip install -r requirements-audio.txt
+
+# 分 speaker 用的 HF token(pyannote gated model)
+# 1) 到 https://hf.co/pyannote/speaker-diarization-community-1 登入按同意
+# 2) 到 https://hf.co/settings/tokens 開 read token
+echo "HF_TOKEN=hf_你的token" >> .env
+```
+
+### 1. 開 session(轉錄 → 分人 → 情緒 → cutplan,一條指令)
+
+```bash
+python3 scripts/session.py new EP16.wav \
+    --context "水星貓的生活實驗室, Sarah, King, Mars" \
+    --stop-at phase-a --cut --num-speakers 3
+```
+
+- `--cut` 隱含 `--diarize --prosody`;`--num-speakers` 已知人數就鎖定(準確度最好)
+- `--context` **務必放每位講者人名**:轉錄的專名辨識 + speaker 命名都靠它
+- 音檔在 Apple Silicon 上約 2 分鐘處理完 40 分鐘節目(轉錄 ~85s + 分人 ~140s + 情緒 ~105s)
+
+### 2. Speaker 命名(第一次跑完)
+
+diarize 完 speaker 叫 S1/S2/S3(S1=講最多的)。對照逐字稿開頭確認誰是誰,寫對照表:
+
+```bash
+cat > sessions/<slug>/speakers_map.json <<'EOF'
+{"S1": "Mars", "S2": "King", "S3": "Sarah"}
+EOF
+python3 scripts/audio/diarize.py --session sessions/<slug> --apply-map
+python3 scripts/audio/cutplan.py prepare --session sessions/<slug>   # 重出帶人名的 cutplan
+```
+
+(在 Claude Code 裡開 session 的話,對話 agent 會照 `.speaker_naming_pending.json`
+marker 自動判斷人名給你確認,不用手動。)
+
+### 3. 人審 cutplan.md(這一步就是剪輯)
+
+打開 `sessions/<slug>/cutplan.md`,一行一句(依原 SRT 短句):
+
+```markdown
+## 開場與本週近況                                    ← 章節標題,render 轉 podcast chapters
+- [x] B0012 [0:56–0:59] [Sarah] 好那Mars你有沒有來分享一下   ← 保留
+- [ ] B0013 [0:59–1:03] [Mars] 沒有其實就 ← 假起頭          ← 剪掉(理由選寫)
+- [x] B0014 [1:03–1:09] [Mars] 我覺得~~就是~~這幾個月解了很多心結  ← 字級精剪:剪掉「就是」
+```
+
+規則:**只准翻勾選、加刪除線、加理由(` ← 文字`)、加章節** — 動到正文或時間碼
+render 會直接 FAIL(防手滑/防 AI 幻覺)。高昂精華段參考 `highlights.md`(建議保留)。
+
+### 4. 出片
+
+```bash
+python3 scripts/audio/render_cut.py --session sessions/<slug>
+```
+
+產出 `final_cut.mp3`(192k)+ `chapters.txt`(章節,新時間軸)+ `cut_map.json`(新舊
+時間對照,之後剪 shorts/影片用)。自動處理:
+
+- **剪點平滑**:滑到波形能量谷底下刀 + word 邊界保護(絕不切在字中間)+ 接縫 40ms crossfade
+- **停頓收緊**:>1.5s 的真停頓(與字區間求差,不會誤吃小聲字尾)自動壓到 0.6s
+- **音量一致化**:EBU R128 loudnorm 拉到 podcast 標準 -16 LUFS(多人麥距不同也拉齊)
+
+改完 cutplan 隨時重跑,一分鐘出新版。先 `--dry-run` 可只看剪輯範圍不出片。
+
+### 5. 節奏/手感旋鈕(都有安全預設)
+
+| 旋鈕 | 預設 | 效果 |
+|---|---|---|
+| `--max-pause` | 1.5 | 超過此秒數的停頓才收緊;調小=節奏更緊 |
+| `--pause-keep` | 0.6 | 收緊後保留的留白;調大=呼吸感多一點 |
+| `--crossfade` | 0.04 | 接縫交疊秒數;調大=更滑順但吃一點字尾 |
+| `--loudnorm` | I=-16:TP=-1.5:LRA=11 | 響度目標;傳空字串停用 |
+| `--out` | final_cut.mp3 | 副檔名決定編碼(.mp3/.m4a/.wav) |
+
+### 產物一覽(全在 `sessions/<slug>/`,不進版控)
+
+| 檔案 | 是什麼 |
+|---|---|
+| `transcript.srt` / `words.json` | 轉錄(IMMUTABLE)/ word 級時間軸 |
+| `transcript.speakers.srt` / `speakers.json` | 帶講者標籤的逐字稿 / diarization 原始 turns |
+| `prosody.json` / `highlights.md` | 每句聲學特徵+高昂分 / 前 10% 精華段清單 |
+| `cutplan.md` / `cutplan.json` | **人審的剪輯真相源** / 機器可讀對照 |
+| `final_cut.mp3` / `chapters.txt` / `cut_map.json` | 成品 / 章節 / 新舊時間對照 |
 
 > **Phase C / Phase D(原 Step 2.2/2.5)= cleaned.md 出版前的強制門**(CLAUDE.md 原則 9):
 > 產出 cleaned.md 後,標點正規化(`scripts/normalize_punctuation.py`,§ R7)與通順/hook(§ R8)必須完成,
