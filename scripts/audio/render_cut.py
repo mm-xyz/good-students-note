@@ -221,22 +221,83 @@ def merge_ranges(ranges: list[list[float]], min_gap: float = 0.2) -> list[list[f
     return merged
 
 
+def refine_boundaries(ranges: list[list[float]], wav_path: Path,
+                      search: float = 0.09, win: float = 0.01) -> list[list[float]]:
+    """波形平滑第一步:每個剪點滑到 ±search 秒內的能量谷底(短窗 RMS 最低點)。
+
+    在能量最低的瞬間下刀,避免切在字頭/呼吸聲上。純 stdlib 讀 16k mono wav,
+    只讀剪點附近的樣本,快。wav 不存在就原樣返回。
+    """
+    if not wav_path.exists():
+        print("[render] ⚠ audio16k.wav 不存在,剪點不做波形谷底微調")
+        return ranges
+    import array
+    import wave
+
+    wf = wave.open(str(wav_path), "rb")
+    sr = wf.getframerate()
+    n_total = wf.getnframes()
+    assert wf.getsampwidth() == 2 and wf.getnchannels() == 1, "expect 16-bit mono"
+
+    def valley(t: float) -> float:
+        i0 = max(0, int((t - search) * sr))
+        i1 = min(n_total, int((t + search) * sr))
+        step = int(win * sr)
+        if i1 - i0 < step * 2:
+            return t
+        wf.setpos(i0)
+        samples = array.array("h")
+        samples.frombytes(wf.readframes(i1 - i0))
+        best_off, best_e = 0, None
+        for off in range(0, len(samples) - step, step // 2):
+            e = sum(s * s for s in samples[off:off + step])
+            if best_e is None or e < best_e:
+                best_e, best_off = e, off
+        return (i0 + best_off + step / 2) / sr
+
+    out = [[valley(a), valley(b)] for a, b in ranges]
+    wf.close()
+    return [[a, b] for a, b in out if b - a > 0.1]
+
+
 def run_ffmpeg(src: Path, ranges: list[list[float]], out: Path, fade: float,
-               loudnorm: str | None) -> None:
+               loudnorm: str | None, crossfade: float) -> list[float]:
+    """出片;回傳每個 range 在新時間軸上的起點(crossfade 會吃掉接縫時間)。
+
+    波形平滑第二步:接縫用 acrossfade 交疊(前段尾與後段頭重疊 crossfade 秒
+    三角交叉淡化),房間音連續不留「洞」— 比 fade-out+fade-in 的斷點滑順。
+    """
+    n = len(ranges)
+    durs = [b - a for a, b in ranges]
+    cf = min(crossfade, min(durs) / 2 - 0.005) if n > 1 else 0.0
     parts = []
-    labels = []
     for i, (a, b) in enumerate(ranges):
-        dur = b - a
-        f = min(fade, dur / 4)
-        parts.append(
-            f"[0:a]atrim=start={a:.3f}:end={b:.3f},asetpts=PTS-STARTPTS,"
-            f"afade=t=in:d={f:.3f},afade=t=out:st={max(0.0, dur - f):.3f}:d={f:.3f}[a{i}]")
-        labels.append(f"[a{i}]")
-    concat_out = "cat" if loudnorm else "out"
-    parts.append(f"{''.join(labels)}concat=n={len(ranges)}:v=0:a=1[{concat_out}]")
+        f_in = fade if i == 0 else 0.0
+        f_out = fade if i == n - 1 else 0.0
+        seg = (f"[0:a]atrim=start={a:.3f}:end={b:.3f},asetpts=PTS-STARTPTS")
+        if f_in:
+            seg += f",afade=t=in:d={f_in:.3f}"
+        if f_out:
+            seg += f",afade=t=out:st={max(0.0, durs[i] - f_out):.3f}:d={f_out:.3f}"
+        parts.append(seg + f"[a{i}]")
+    prev = "a0"
+    for i in range(1, n):
+        nxt = f"x{i}" if i < n - 1 else "cat"
+        parts.append(f"[{prev}][a{i}]acrossfade=d={cf:.3f}:c1=tri:c2=tri[{nxt}]")
+        prev = nxt
+    if n == 1:
+        parts.append("[a0]anull[cat]")
     if loudnorm:
         # 音量一致化(EBU R128 動態 loudnorm):三人麥距/音量不同也拉齊,podcast 標準
         parts.append(f"[cat]loudnorm={loudnorm}[out]")
+    else:
+        parts.append("[cat]anull[out]")
+    # 新時間軸起點:每個接縫吃掉 cf 秒
+    dst_starts = []
+    acc = 0.0
+    for i, d in enumerate(durs):
+        dst_starts.append(max(0.0, acc - i * cf))
+        acc += d
     script = out.parent / ".render_filter.txt"
     script.write_text(";\n".join(parts), encoding="utf-8")
     codec = {".wav": [],
@@ -244,9 +305,10 @@ def run_ffmpeg(src: Path, ranges: list[list[float]], out: Path, fade: float,
              }.get(out.suffix, ["-c:a", "aac", "-b:a", "192k"])
     cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(src),
            "-filter_complex_script", str(script), "-map", "[out]", *codec, str(out)]
-    print(f"[render] ffmpeg {len(ranges)} ranges → {out.name}")
+    print(f"[render] ffmpeg {len(ranges)} ranges, crossfade {cf * 1000:.0f}ms → {out.name}")
     subprocess.run(cmd, check=True)
     script.unlink()
+    return dst_starts
 
 
 def main():
@@ -259,6 +321,8 @@ def main():
     ap.add_argument("--loudnorm", default="I=-16:TP=-1.5:LRA=11",
                     help="EBU R128 音量一致化參數(預設 podcast 標準 -16 LUFS);"
                          "傳空字串停用")
+    ap.add_argument("--crossfade", type=float, default=0.04,
+                    help="接縫交疊秒數(acrossfade;預設 40ms,越大越滑順但會吃字尾)")
     ap.add_argument("--max-pause", type=float, default=1.5,
                     help="保留段內超過此秒數的停頓自動收緊(0=停用)")
     ap.add_argument("--pause-keep", type=float, default=0.6,
@@ -318,13 +382,31 @@ def main():
     if removals:
         ranges = subtract(ranges, removals)
 
-    # 新時間軸換算(cut_map + chapters 用)
-    cut_map = []
-    acc = 0.0
-    for a, b in ranges:
-        cut_map.append({"src_start": round(a, 3), "src_end": round(b, 3),
-                        "dst_start": round(acc, 3)})
-        acc += b - a
+    # 波形平滑步驟一:剪點滑到 ±90ms 內的能量谷底,再合併微調後靠太近的範圍
+    ranges = merge_ranges(refine_boundaries(ranges, sdir / "audio16k.wav"),
+                          min_gap=0.05)
+
+    total_src = cp["blocks"][-1]["end"] if cp["blocks"] else 0
+    removed = sum(b["end"] - b["start"] for b in cut)
+    est = sum(b - a for a, b in ranges)
+    print(f"[render] 保留 {len(kept)}/{len(cp['blocks'])} blocks → {len(ranges)} ranges;"
+          f"剪掉 {fmt_mmss(removed)},成品約 {fmt_mmss(est)}(原 {fmt_mmss(total_src)})")
+    if args.dry_run:
+        for a, b in ranges:
+            print(f"  keep {fmt_mmss(a)}–{fmt_mmss(b)}")
+        return
+
+    src = next(p for p in sorted(sdir.glob("source.*"))
+               if p.suffix.lower() not in (".srt", ".md", ".json", ".txt"))
+    out = sdir / args.out
+    # 波形平滑步驟二:接縫 crossfade 交疊(run_ffmpeg 回傳交疊後的新時間軸起點)
+    dst_starts = run_ffmpeg(src, ranges, out, args.fade, args.loudnorm or None,
+                            args.crossfade)
+
+    cut_map = [{"src_start": round(a, 3), "src_end": round(b, 3),
+                "dst_start": round(d, 3)}
+               for (a, b), d in zip(ranges, dst_starts)]
+    final_dur = dst_starts[-1] + (ranges[-1][1] - ranges[-1][0])
 
     def to_new_time(t: float) -> float | None:
         for r in cut_map:
@@ -342,30 +424,16 @@ def main():
             if nt is not None:
                 chap_lines.append(f"{sec_to_ts(nt).replace(',', '.')} {ch['title']}")
 
-    total_src = cp["blocks"][-1]["end"] if cp["blocks"] else 0
-    removed = sum(b["end"] - b["start"] for b in cut)
-    print(f"[render] 保留 {len(kept)}/{len(cp['blocks'])} blocks → {len(ranges)} ranges;"
-          f"剪掉 {fmt_mmss(removed)},成品約 {fmt_mmss(acc)}(原 {fmt_mmss(total_src)})")
-    if args.dry_run:
-        for a, b in ranges:
-            print(f"  keep {fmt_mmss(a)}–{fmt_mmss(b)}")
-        return
-
-    src = next(p for p in sorted(sdir.glob("source.*"))
-               if p.suffix.lower() not in (".srt", ".md", ".json", ".txt"))
-    out = sdir / args.out
-    run_ffmpeg(src, ranges, out, args.fade, args.loudnorm or None)
-
     (sdir / "cut_map.json").write_text(json.dumps({
         "generated_at": dt.datetime.now().isoformat(timespec="seconds"),
-        "final_duration_secs": round(acc, 3),
+        "final_duration_secs": round(final_dur, 3),
         "removed_secs": round(removed, 3),
         "ranges": cut_map,
     }, ensure_ascii=False, indent=2), encoding="utf-8")
     if chap_lines:
         (sdir / "chapters.txt").write_text("\n".join(chap_lines) + "\n", encoding="utf-8")
         print(f"[render] chapters.txt: {len(chap_lines)} 章")
-    print(f"[render] ✅ {out.name}({fmt_mmss(acc)})+ cut_map.json")
+    print(f"[render] ✅ {out.name}({fmt_mmss(final_dur)})+ cut_map.json")
 
 
 if __name__ == "__main__":
