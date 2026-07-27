@@ -111,7 +111,8 @@ def merge_ranges(ranges: list[list[float]], min_gap: float = 0.2) -> list[list[f
     return merged
 
 
-def run_ffmpeg(src: Path, ranges: list[list[float]], out: Path, fade: float) -> None:
+def run_ffmpeg(src: Path, ranges: list[list[float]], out: Path, fade: float,
+               loudnorm: str | None) -> None:
     parts = []
     labels = []
     for i, (a, b) in enumerate(ranges):
@@ -121,7 +122,11 @@ def run_ffmpeg(src: Path, ranges: list[list[float]], out: Path, fade: float) -> 
             f"[0:a]atrim=start={a:.3f}:end={b:.3f},asetpts=PTS-STARTPTS,"
             f"afade=t=in:d={f:.3f},afade=t=out:st={max(0.0, dur - f):.3f}:d={f:.3f}[a{i}]")
         labels.append(f"[a{i}]")
-    parts.append(f"{''.join(labels)}concat=n={len(ranges)}:v=0:a=1[out]")
+    concat_out = "cat" if loudnorm else "out"
+    parts.append(f"{''.join(labels)}concat=n={len(ranges)}:v=0:a=1[{concat_out}]")
+    if loudnorm:
+        # 音量一致化(EBU R128 動態 loudnorm):三人麥距/音量不同也拉齊,podcast 標準
+        parts.append(f"[cat]loudnorm={loudnorm}[out]")
     script = out.parent / ".render_filter.txt"
     script.write_text(";\n".join(parts), encoding="utf-8")
     codec = ["-c:a", "aac", "-b:a", "192k"] if out.suffix != ".wav" else []
@@ -138,6 +143,9 @@ def main():
     ap.add_argument("--out", default="final_cut.m4a")
     ap.add_argument("--snap-window", type=float, default=0.4)
     ap.add_argument("--fade", type=float, default=0.015)
+    ap.add_argument("--loudnorm", default="I=-16:TP=-1.5:LRA=11",
+                    help="EBU R128 音量一致化參數(預設 podcast 標準 -16 LUFS);"
+                         "傳空字串停用")
     ap.add_argument("--dry-run", action="store_true", help="只印剪輯範圍,不跑 ffmpeg")
     args = ap.parse_args()
 
@@ -204,7 +212,7 @@ def main():
     src = next(p for p in sorted(sdir.glob("source.*"))
                if p.suffix.lower() not in (".srt", ".md", ".json", ".txt"))
     out = sdir / args.out
-    run_ffmpeg(src, ranges, out, args.fade)
+    run_ffmpeg(src, ranges, out, args.fade, args.loudnorm or None)
 
     (sdir / "cut_map.json").write_text(json.dumps({
         "generated_at": dt.datetime.now().isoformat(timespec="seconds"),
