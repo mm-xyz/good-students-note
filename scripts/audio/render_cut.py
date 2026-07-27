@@ -31,7 +31,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from srt_utils import parse_srt, pick_transcript, fmt_mmss, sec_to_ts
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
-LINE_RE = re.compile(r"^- \[( |x|X)\] (B\d{3}) \[([^\]]+)\] (.*)$")
+LINE_RE = re.compile(r"^- \[( |x|X)\] (B\d{3,5}) \[([^\]]+)\] (.*)$")
 CHAPTER_RE = re.compile(r"^## (.+)$")
 
 
@@ -133,15 +133,46 @@ def strike_removals(block: dict, spans: list[list[int]], words: list[dict],
 
 
 def pause_removals(ranges: list[list[float]], silences: list[dict],
-                   max_pause: float, keep: float) -> list[list[float]]:
-    """保留範圍內超過 max_pause 的靜音,收緊到 keep 秒(頭尾各留一半)。"""
+                   max_pause: float, keep: float,
+                   words: list[dict] | None) -> list[list[float]]:
+    """保留範圍內超過 max_pause 的靜音,收緊到 keep 秒(頭尾各留一半)。
+
+    words 保護:RMS 門檻會把「講得小聲的字尾」誤判成靜音(EP15 0:49 事故),
+    所以每個剪除範圍先夾進「真正沒有字」的空隙 — 與任何 word 區間都不相交。
+    """
     out = []
     for a, b in ranges:
         for s in silences:
-            if s["start"] > a + 0.3 and s["end"] < b - 0.3:
-                if s["end"] - s["start"] > max_pause:
-                    out.append([s["start"] + keep / 2, s["end"] - keep / 2])
+            if not (s["start"] > a + 0.3 and s["end"] < b - 0.3):
+                continue
+            lo, hi = s["start"], s["end"]
+            if words:
+                for w in words:
+                    if w["end"] <= lo or w["start"] >= hi:
+                        continue
+                    # word 侵入靜音段:縮短靜音窗到字的邊界外
+                    if w["start"] <= lo:
+                        lo = max(lo, w["end"] + 0.05)
+                    elif w["end"] >= hi:
+                        hi = min(hi, w["start"] - 0.05)
+                    else:  # word 整個在中間 → 這段不是真停頓,放棄
+                        lo, hi = 0.0, 0.0
+                        break
+            if hi - lo > max_pause:
+                out.append([lo + keep / 2, hi - keep / 2])
     return out
+
+
+def word_guard(ranges: list[list[float]], words: list[dict],
+               margin: float = 0.03) -> list[list[float]]:
+    """最後防線:任何範圍邊界落在某個字的時間區間內 → 推到字邊界外,
+    保證不切在字中間(塞音閉鎖段的能量谷會騙過谷底偵測)。"""
+    def fix(t: float, is_start: bool) -> float:
+        for w in words:
+            if w["start"] + margin < t < w["end"] - margin:
+                return w["start"] - 0.02 if is_start else w["end"] + 0.02
+        return t
+    return [[fix(a, True), fix(b, False)] for a, b in ranges if b > a]
 
 
 def subtract(ranges: list[list[float]], removals: list[list[float]],
@@ -358,13 +389,13 @@ def main():
     ranges = merge_ranges(snap_boundaries(ranges, silences, args.snap_window))
 
     # ── 字級精剪(~~刪除線~~)+ 停頓收緊 ──
+    wp = sdir / "words.json"
+    words = json.loads(wp.read_text(encoding="utf-8")) if wp.exists() else None
     removals = []
     if strikes:
-        wp = sdir / "words.json"
-        if not wp.exists():
+        if not words:
             sys.exit("[render] FAIL: cutplan 有 ~~刪除線~~ 但缺 words.json(word 級"
                      "時間軸)— 用新版 transcribe_local.py 重轉錄一次產生")
-        words = json.loads(wp.read_text(encoding="utf-8"))
         block_by_id = {b["id"]: b for b in cp["blocks"]}
         n_strike = 0
         for bid, spans in strikes.items():
@@ -373,7 +404,10 @@ def main():
                 n_strike += len(spans)
         print(f"[render] 字級精剪: {n_strike} 處刪除線")
     if args.max_pause > 0 and silences:
-        pr = pause_removals(ranges, silences, args.max_pause, args.pause_keep)
+        if not words:
+            print("[render] ⚠ 無 words.json:停頓收緊沒有字邊界保護,小聲字尾"
+                  "可能被誤剪", file=sys.stderr)
+        pr = pause_removals(ranges, silences, args.max_pause, args.pause_keep, words)
         if pr:
             saved = sum(b - a for a, b in pr)
             print(f"[render] 停頓收緊: {len(pr)} 處 >{args.max_pause}s 的停頓,"
@@ -382,9 +416,11 @@ def main():
     if removals:
         ranges = subtract(ranges, removals)
 
-    # 波形平滑步驟一:剪點滑到 ±90ms 內的能量谷底,再合併微調後靠太近的範圍
-    ranges = merge_ranges(refine_boundaries(ranges, sdir / "audio16k.wav"),
-                          min_gap=0.05)
+    # 波形平滑:剪點滑到 ±90ms 能量谷底 → word 邊界保護(不切在字中間)→ 合併
+    ranges = refine_boundaries(ranges, sdir / "audio16k.wav")
+    if words:
+        ranges = word_guard(ranges, words)
+    ranges = merge_ranges(ranges, min_gap=0.05)
 
     total_src = cp["blocks"][-1]["end"] if cp["blocks"] else 0
     removed = sum(b["end"] - b["start"] for b in cut)

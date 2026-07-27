@@ -32,7 +32,8 @@ def build_blocks(cues: list[dict], merge_gap: float, max_block: float) -> list[d
     blocks = []
     cur = None
     for c in cues:
-        joinable = (cur is not None
+        joinable = (merge_gap > 0
+                    and cur is not None
                     and c.get("speaker") == cur["speaker"]
                     and c["start"] - cur["end"] < merge_gap
                     and c["end"] - cur["start"] <= max_block)
@@ -48,7 +49,7 @@ def build_blocks(cues: list[dict], merge_gap: float, max_block: float) -> list[d
     if cur:
         blocks.append(cur)
     for i, b in enumerate(blocks, 1):
-        b["id"] = f"B{i:03d}"
+        b["id"] = f"B{i:04d}"
         b["keep"] = True
         b["reason"] = ""
     return blocks
@@ -127,7 +128,9 @@ def main():
     sub = ap.add_subparsers(dest="cmd", required=True)
     p = sub.add_parser("prepare", help="SRT → cutplan.md/json + 提案 marker")
     p.add_argument("--session", required=True)
-    p.add_argument("--merge-gap", type=float, default=1.2)
+    p.add_argument("--merge-gap", type=float, default=0.0,
+                   help="0(預設)=依原 SRT 短句一行一句(2026-07-28 MM 拍板);"
+                        ">0 則同 speaker 間隔小於此秒數的句子併成一個 block")
     p.add_argument("--max-block", type=float, default=45.0)
     args = ap.parse_args()
     if args.cmd == "prepare":
