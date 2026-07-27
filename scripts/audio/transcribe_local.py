@@ -14,6 +14,7 @@ scripts/audio/transcribe_local.py — 本地 ASR stage(mlx-whisper,全本地零�
 """
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -47,10 +48,11 @@ def main():
     print(f"[transcribe-local] {args.model} language={args.language} …")
     result = mlx_whisper.transcribe(
         args.media, path_or_hf_repo=args.model, language=args.language,
-        verbose=False, **kw)
+        verbose=False, word_timestamps=True, **kw)
 
     cc = opencc.OpenCC("s2twp")
     blocks = []
+    words = []
     n = 0
     for seg in result["segments"]:
         text = cc.convert(seg["text"].strip())
@@ -58,11 +60,21 @@ def main():
             continue
         n += 1
         blocks.append(f"{n}\n{sec_to_ts(seg['start'])} --> {sec_to_ts(seg['end'])}\n{text}\n")
+        for w in seg.get("words", []):
+            wt = cc.convert(w["word"].strip())
+            if wt:
+                words.append({"start": round(float(w["start"]), 3),
+                              "end": round(float(w["end"]), 3), "word": wt})
     if not blocks:
         print("[transcribe-local] ERROR: 零 segment 輸出", file=sys.stderr)
         sys.exit(1)
-    Path(args.output).write_text("\n".join(blocks) + "\n", encoding="utf-8")
-    print(f"[transcribe-local] {n} segments → {args.output}")
+    out = Path(args.output)
+    out.write_text("\n".join(blocks) + "\n", encoding="utf-8")
+    # word 級時間軸(字級精剪 ~~刪除線~~ 用;與 transcript.srt 同源同輪轉錄)
+    words_path = out.parent / "words.json"
+    words_path.write_text(json.dumps(words, ensure_ascii=False), encoding="utf-8")
+    print(f"[transcribe-local] {n} segments → {args.output}"
+          f"({len(words)} words → {words_path.name})")
 
 
 if __name__ == "__main__":

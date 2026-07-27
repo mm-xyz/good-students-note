@@ -59,7 +59,10 @@ def write_cutplan_md(blocks: list[dict], path: Path, slug: str, srt_name: str) -
         f"# Cutplan — {slug}",
         "",
         f"> 來源:{srt_name}。`- [x]` = 保留,`- [ ]` = 剪掉;**改勾選就是剪輯**。",
-        "> 文字與時間碼不可改動(render 前會逐 block 對 SRT 驗證,防幻覺/手滑)。",
+        "> **字級精剪**:保留的 block 內把贅字/贅句包進 `~~刪除線~~`,render 會用",
+        "> word 級時間軸精準剪掉那幾個字(需 words.json;--asr local 自動產)。",
+        "> 停頓不用標:render 自動把 >1.5s 的停頓收緊到 0.6s(--max-pause 可調)。",
+        "> 除了加刪除線,文字與時間碼不可改動(render 會逐 block 對 SRT 驗證)。",
         "> 可在 block 前加 `## 章節標題` 行,render 會轉成 podcast chapters。",
         "> 出片:`python3 scripts/audio/render_cut.py --session sessions/<slug>`",
         "",
@@ -108,7 +111,8 @@ def prepare(args):
             "Podcast 剪輯提案待對話 agent 接手,零 API 呼叫(原則 5)。"
             "讀 cutplan.md 全部 blocks + highlights.md 高昂段,提議句級粗剪:"
             "開場寒暄/離題/假起頭/重複內容改 `- [ ]` 並在行尾加 ` ← 理由`;"
-            "highlights.md 出現的段落原則上保留。**只准翻勾選與加理由/章節標題,"
+            "highlights.md 出現的段落原則上保留;保留 block 內的贅字/口誤/假起頭"
+            "用 `~~刪除線~~` 標記字級精剪。**只准翻勾選、加刪除線、加理由/章節標題,"
             "不得改動任何 block 的文字與時間碼**(render 會逐 block 驗證,改了會 FAIL)。"
             "適當位置加 `## 章節標題` 行。完成後刪本 marker,"
             "然後回報 MM 人審 cutplan.md — 人審完才跑 render_cut.py,絕不代審。"
