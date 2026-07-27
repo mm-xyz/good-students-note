@@ -1,0 +1,13 @@
+# 音訊分析線(diarize / prosody / cut)專用依賴 — 與主管線隔離,裝進 .venv-audio
+# 主管線維持「pip install requests 就能跑」的輕量承諾;本檔的 PyTorch 生態系只有
+# 用到 --diarize / --prosody / cut render 時才需要。
+#
+# 安裝:
+#   python3.13 -m venv .venv-audio
+#   .venv-audio/bin/pip install -r requirements-audio.txt
+#
+# 注意:用 python3.13(torch 對 3.14 支援落後);pyannote community-1 模型是
+# gated model,首次使用前要在 HF 網頁同意條款 + .env 放 HF_TOKEN。
+pyannote.audio>=4.0
+librosa>=0.10
+soundfile>=0.12

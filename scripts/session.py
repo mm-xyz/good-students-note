@@ -40,6 +40,12 @@ QAQC_SCRIPT = PROJECT_ROOT / "SRT/qaqc_srt.py"
 PHASE_B_SCRIPT = PROJECT_ROOT / "scripts/qaqc_phase_b.py"
 NORMALIZE_SCRIPT = PROJECT_ROOT / "scripts/normalize_punctuation.py"
 
+# 音訊分析線(diarize/prosody/cut)— 重依賴隔離在 .venv-audio(見 requirements-audio.txt)
+AUDIO_VENV = PROJECT_ROOT / ".venv-audio/bin/python"
+DIARIZE_SCRIPT = PROJECT_ROOT / "scripts/audio/diarize.py"
+PROSODY_SCRIPT = PROJECT_ROOT / "scripts/audio/prosody.py"
+CUTPLAN_SCRIPT = PROJECT_ROOT / "scripts/audio/cutplan.py"
+
 
 # ─── Engine routing(誰在叫我?)──────────────────────────────────────
 # 規則:CLI host(Claude Code、Gemini CLI 等)用 OAuth login token 計費,絕不打
@@ -241,6 +247,50 @@ def new_session(args):
         except subprocess.CalledProcessError as e:
             print(f"[session] structured polish failed: {e}", file=sys.stderr)
             transcript_cleaned_srt = None
+
+    # 6.5 音訊分析線(diarize / prosody / cut)— 與 Phase B 平行的加值線,全本地
+    # 零 LLM(pyannote + librosa);需判斷的部分(speaker 命名、剪輯提案)照原則 5
+    # 由各腳本寫 marker 交對話 agent。--cut 隱含 --diarize --prosody
+    # (podcast 剪輯需要 speaker 標籤 + 靜音 snap)。
+    audio_stats = None
+    want_diarize = args.diarize or args.cut
+    want_prosody = args.prosody or args.cut
+    if want_diarize or want_prosody:
+        audio_stats = {}
+        if not AUDIO_VENV.exists():
+            print("[session] ⚠ .venv-audio 不存在,音訊分析線(diarize/prosody/cut)跳過。"
+                  "安裝:\n  python3.13 -m venv .venv-audio && "
+                  ".venv-audio/bin/pip install -r requirements-audio.txt",
+                  file=sys.stderr)
+            audio_stats["status"] = "skipped_no_venv"
+        else:
+            if want_diarize:
+                cmd = [str(AUDIO_VENV), str(DIARIZE_SCRIPT), "--session", str(sdir)]
+                if args.num_speakers:
+                    cmd += ["--num-speakers", str(args.num_speakers)]
+                try:
+                    run(cmd)
+                    audio_stats["diarize"] = "done_naming_pending"
+                except subprocess.CalledProcessError as e:
+                    print(f"[session] diarize failed: {e} — 續跑其餘 pipeline",
+                          file=sys.stderr)
+                    audio_stats["diarize"] = {"status": "error", "error": str(e)}
+            if want_prosody:
+                try:
+                    run([str(AUDIO_VENV), str(PROSODY_SCRIPT), "--session", str(sdir)])
+                    audio_stats["prosody"] = "done"
+                except subprocess.CalledProcessError as e:
+                    print(f"[session] prosody failed: {e} — 續跑其餘 pipeline",
+                          file=sys.stderr)
+                    audio_stats["prosody"] = {"status": "error", "error": str(e)}
+            if args.cut:
+                try:
+                    run(["python3", str(CUTPLAN_SCRIPT), "prepare",
+                         "--session", str(sdir)])
+                    audio_stats["cutplan"] = "pending_agent_proposal"
+                except subprocess.CalledProcessError as e:
+                    print(f"[session] cutplan failed: {e}", file=sys.stderr)
+                    audio_stats["cutplan"] = {"status": "error", "error": str(e)}
 
     # 7. Phase B merged → cleaned.md
     # (skipped if --stop-at transcribe/phase-a OR --skip-phase-b)
@@ -606,6 +656,7 @@ def new_session(args):
             "original_chars_no_space": original_metrics["no_space"],
             "original_chinese_chars": original_metrics["chinese"],
         },
+        "audio_analysis": audio_stats,
         "qaqc": {
             "phase_a_chars_no_space": phase_a_metrics["no_space"],
             "phase_a_chinese_chars": phase_a_metrics["chinese"],
@@ -678,6 +729,18 @@ def main():
                      help="圖片資料夾:copy 進 sessions/<slug>/images/ 並啟用"
                           "圖片理解(describe_images.py)+ 自動插圖(insert_images.py)"
                           " stages(§ S4.5.11);marker 鏈 phase-d→images→image-insert")
+    new.add_argument("--diarize", action="store_true",
+                     help="音訊分析線:pyannote speaker diarization → speakers.json + "
+                          "transcript.speakers.srt([S1] 前綴;命名走 marker 交 agent)。"
+                          "需 .venv-audio + .env 的 HF_TOKEN(gated model)")
+    new.add_argument("--prosody", action="store_true",
+                     help="音訊分析線:librosa 能量/音高/語速 → prosody.json + "
+                          "highlights.md(高昂精華段;全本地零 LLM)")
+    new.add_argument("--cut", action="store_true",
+                     help="Podcast 文字剪輯:隱含 --diarize --prosody,產 cutplan.md "
+                          "(agent 提案 → MM 人審 → render_cut.py 出片)")
+    new.add_argument("--num-speakers", type=int,
+                     help="diarize:已知講者人數就鎖定(準確度最好)")
     new.add_argument("--stop-at",
                      choices=["transcribe", "phase-a", "phase-b",
                               "phase-c", "phase-d", "images", "image-insert",
