@@ -410,6 +410,25 @@ Step 5 只在 `goodedunote` 專案的 hosting 上新增/更新該篇 `<slug>/`,�
 - **Phase C / Phase D 是 cleaned.md 出版前的強制門**(原 Step 2.2/2.5;與 Phase A/B 同屬 Step 2 內部、精修同一份 cleaned.md):SSoT [`§ R7`](./prompts/qaqc_core_rules.md) / [`§ R8`](./prompts/qaqc_core_rules.md);由 `scripts/prepublish_gate.py` 在 `publish_goodedunote.sh` 開頭把關,未過不得進 Step 5/6。
 - **Why**:2026-06 多場校稿出版時確認,批次打包、一次跑完多步會造成品質崩壞與 token 濫用;拆成獨立可驗收的 step、各自用對工具,結果才一致。
 
+### 原則 10 — 音訊分析線:全本地、判斷仍走 marker(2026-07-27 引入)
+
+`--diarize` / `--prosody` / `--cut` 是與 Phase B **平行**的加值線,吃 transcript.srt/cleaned.srt
+的時間軸,不動任何既有產物(SRT 不可變原則不受影響)。
+
+- **重依賴隔離**:pyannote/torch/librosa 住 `.venv-audio`(`requirements-audio.txt`),
+  session.py 只在用到時呼叫 `.venv-audio/bin/python`;缺 venv 印安裝指引、不擋主管線。
+  主管線「`pip install requests` 就能跑」的輕量承諾不變。
+- **全本地零雲端**:diarization(pyannote community-1,`.env` 需 `HF_TOKEN`,gated model)
+  與聲學分析(librosa)都在本機跑,音檔不出門。
+- **判斷步驟照原則 5 走 marker**:speaker 命名(`.speaker_naming_pending.json`)、
+  剪輯提案(`.cutplan_pending.json`)交對話 agent,腳本本身零 LLM 呼叫。
+- **剪輯的人審不可跳過**:cutplan.md 的勾選是 MM 的剪輯決定;agent 只提案
+  (翻勾選+理由+章節),**render 前必須 MM 人審**,agent 絕不代審直接出片。
+- **防篡改**:`render_cut.py` 三道驗證(md/json block 一致、md 文字==json 文字、
+  json 文字 ⊂ 來源 SRT),cutplan 只准翻勾選,文字時間碼不可動。
+- **產物**:`speakers.json`、`transcript.speakers.srt`、`prosody.json`、`highlights.md`、
+  `cutplan.md/json`、`final_cut.m4a`、`cut_map.json`、`chapters.txt`,全落 `sessions/<slug>/`。
+
 ---
 
 ## 核心鐵律 (Critical Rules)

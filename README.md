@@ -63,6 +63,16 @@ python3 scripts/session.py new "諮詢錄音.m4a" \
 | 加專有名詞百科補充 | `enhance` | `enhanced.md` | 主題陌生的讀者 |
 | 以某立場(身份/角色)置入的好學生筆記 | `notes` | `notes_<立場>.md` | 學習者自用 |
 | 出版成可分享網頁 | (獨立指令 `publish_goodedunote.sh`,非 `--stop-at`) | `<slug>.html` + 線上網址 | 把筆記做成網頁分享(Step 5) |
+| 逐字稿分 speaker | (flag `--diarize`,非 `--stop-at`) | `speakers.json` + `transcript.speakers.srt` | 多人對談/訪談/Podcast 逐字稿 |
+| 聲音高昂精華段 | (flag `--prosody`) | `prosody.json` + `highlights.md` | 精華/預告/shorts 候選 |
+| 文字剪 Podcast | (flag `--cut`,隱含前兩者) | `cutplan.md` →(人審)→ `final_cut.m4a` | Descript 式剪輯,不進剪輯軟體 |
+
+> **音訊分析線**(`--diarize` / `--prosody` / `--cut`)是與 Phase B 平行的加值線,
+> 全本地零雲端(pyannote + librosa),需另裝 `.venv-audio`:
+> `python3.13 -m venv .venv-audio && .venv-audio/bin/pip install -r requirements-audio.txt`,
+> 且 `.env` 要有 `HF_TOKEN`(pyannote gated model,先在 [hf.co](https://hf.co/pyannote/speaker-diarization-community-1) 同意條款)。
+> 剪輯流程:`--cut` 產 `cutplan.md` → 對話 agent 提案翻勾選 → **MM 人審勾選(這步就是剪輯)** →
+> `python3 scripts/audio/render_cut.py --session sessions/<slug>` 出片(剪點自動 snap 靜音)。
 
 > **Phase C / Phase D(原 Step 2.2/2.5)= cleaned.md 出版前的強制門**(CLAUDE.md 原則 9):
 > 產出 cleaned.md 後,標點正規化(`scripts/normalize_punctuation.py`,§ R7)與通順/hook(§ R8)必須完成,
