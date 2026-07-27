@@ -47,6 +47,10 @@ PROSODY_SCRIPT = PROJECT_ROOT / "scripts/audio/prosody.py"
 CUTPLAN_SCRIPT = PROJECT_ROOT / "scripts/audio/cutplan.py"
 LOCAL_ASR_SCRIPT = PROJECT_ROOT / "scripts/audio/transcribe_local.py"
 
+# frames 線(invisible-context 併入):影片抽幀 → VLM 篩圖 → OCR → compose
+FRAMES_EXTRACT_SCRIPT = PROJECT_ROOT / "scripts/frames/extract.py"
+VIDEO_EXTS = (".mp4", ".mov", ".mkv", ".webm", ".m4v", ".avi")
+
 
 # ─── Engine routing(誰在叫我?)──────────────────────────────────────
 # 規則:CLI host(Claude Code、Gemini CLI 等)用 OAuth login token 計費,絕不打
@@ -311,6 +315,30 @@ def new_session(args):
                 except subprocess.CalledProcessError as e:
                     print(f"[session] cutplan failed: {e}", file=sys.stderr)
                     audio_stats["cutplan"] = {"status": "error", "error": str(e)}
+
+    # 6.6 frames 線(影片抽幀;invisible-context 併入,--frames 才啟用)
+    # 抽幀後的 screen(LM Studio VLM)/ocr/compose 依原則 9 逐步執行,
+    # 由使用者或對話 agent 分階段跑(見 scripts/frames/ 各檔 docstring)。
+    frames_stats = None
+    if args.frames:
+        if ext.lower() not in VIDEO_EXTS:
+            print(f"[session] --frames 需要影片輸入({ext} 不是影片),跳過", file=sys.stderr)
+            frames_stats = {"status": "skipped_not_video"}
+        elif not AUDIO_VENV.exists():
+            print("[session] ⚠ .venv-audio 不存在,frames 線跳過(安裝見 requirements-audio.txt)",
+                  file=sys.stderr)
+            frames_stats = {"status": "skipped_no_venv"}
+        else:
+            try:
+                run([str(AUDIO_VENV), str(FRAMES_EXTRACT_SCRIPT), "--session", str(sdir)])
+                frames_stats = {"status": "extracted"}
+                print("[session] frames 下一步(逐步跑,原則 9):\n"
+                      f"  .venv-audio/bin/python scripts/frames/screen.py {slug}\n"
+                      f"  .venv-audio/bin/python scripts/frames/ocr.py {slug}\n"
+                      f"  python3 scripts/frames/compose.py {slug} --course <課程名>")
+            except subprocess.CalledProcessError as e:
+                print(f"[session] frames extract failed: {e}", file=sys.stderr)
+                frames_stats = {"status": "error", "error": str(e)}
 
     # 7. Phase B merged → cleaned.md
     # (skipped if --stop-at transcribe/phase-a OR --skip-phase-b)
@@ -677,6 +705,7 @@ def new_session(args):
             "original_chinese_chars": original_metrics["chinese"],
         },
         "audio_analysis": audio_stats,
+        "frames": frames_stats,
         "qaqc": {
             "phase_a_chars_no_space": phase_a_metrics["no_space"],
             "phase_a_chinese_chars": phase_a_metrics["chinese"],
@@ -764,6 +793,9 @@ def main():
                           "(agent 提案 → MM 人審 → render_cut.py 出片)")
     new.add_argument("--num-speakers", type=int,
                      help="diarize:已知講者人數就鎖定(準確度最好)")
+    new.add_argument("--frames", action="store_true",
+                     help="frames 線(影片限定):場景偵測抽幀,後續 screen/ocr/"
+                          "compose 逐步跑(invisible-context 併入)")
     new.add_argument("--stop-at",
                      choices=["transcribe", "phase-a", "phase-b",
                               "phase-c", "phase-d", "images", "image-insert",

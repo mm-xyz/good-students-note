@@ -14,3 +14,8 @@ soundfile>=0.12
 # 本地 ASR(--asr local,預設):Apple Silicon mlx + whisper-large-v3-turbo + 繁化
 mlx-whisper>=0.4
 opencc>=1.1
+# frames 線(invisible-context 併入):抽幀 dHash + VLM 篩圖 + macOS Vision OCR
+pillow>=10
+requests>=2
+pyobjc-framework-Vision>=10; sys_platform == "darwin"
+pyobjc-framework-Quartz>=10; sys_platform == "darwin"
