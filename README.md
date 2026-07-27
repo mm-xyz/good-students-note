@@ -18,17 +18,22 @@
 - **Python ≥ 3.10**(scripts 用了 PEP 604 `str | None` 語法)
 - **ffmpeg**:`brew install ffmpeg` / `apt install ffmpeg`
 - **Python packages**:`pip install requests`
-- **API Keys**:
-  - Groq(轉錄):[console.groq.com/keys](https://console.groq.com/keys)(免費)
-  - Gemini(校稿 + 筆記):[aistudio.google.com/apikey](https://aistudio.google.com/apikey)(免費)
+- **轉錄(2026-07-27 起預設本地,零雲端零 key)**:`--asr local` 用 mlx-whisper
+  (Apple Silicon;39.5 分鐘實測 84s),需 `.venv-audio`:
+  `python3.13 -m venv .venv-audio && .venv-audio/bin/pip install -r requirements-audio.txt`
+- **API Keys(視用途,皆可免)**:
+  - Groq(選配轉錄 `--asr groq`,非 Apple Silicon 機器用):[console.groq.com/keys](https://console.groq.com/keys)(免費)
+  - Gemini(校稿 + 筆記;**CLI 在 Claude Code 等 agent host 下不需要**,原則 5 走 agent 接手):[aistudio.google.com/apikey](https://aistudio.google.com/apikey)(免費)
+  - Hugging Face(`--diarize` 分 speaker 用,gated model 先[同意條款](https://hf.co/pyannote/speaker-diarization-community-1)):[hf.co/settings/tokens](https://hf.co/settings/tokens)(免費)
 
-### 2. 設定 API Key
+### 2. 設定 API Key(用到才設)
 
 CLI 使用者:
 ```bash
-# 在專案根建立 .env
-echo "GROQ_API_KEY=你的Groq_key" > .env
-echo "GEMINI_API_KEY=你的Gemini_key" >> .env
+# 在專案根建立 .env(全部選配:local ASR + agent host 校稿時一個都不用)
+echo "HF_TOKEN=你的HF_token" > .env          # --diarize 用
+echo "GROQ_API_KEY=你的Groq_key" >> .env     # --asr groq 用
+echo "GEMINI_API_KEY=你的Gemini_key" >> .env # 純 shell/cron 校稿用
 ```
 
 Web Studio 使用者:直接在瀏覽器 UI 輸入框貼上(只存在你的瀏覽器,不會上傳)。

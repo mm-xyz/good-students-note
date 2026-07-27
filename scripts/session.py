@@ -45,6 +45,7 @@ AUDIO_VENV = PROJECT_ROOT / ".venv-audio/bin/python"
 DIARIZE_SCRIPT = PROJECT_ROOT / "scripts/audio/diarize.py"
 PROSODY_SCRIPT = PROJECT_ROOT / "scripts/audio/prosody.py"
 CUTPLAN_SCRIPT = PROJECT_ROOT / "scripts/audio/cutplan.py"
+LOCAL_ASR_SCRIPT = PROJECT_ROOT / "scripts/audio/transcribe_local.py"
 
 
 # ─── Engine routing(誰在叫我?)──────────────────────────────────────
@@ -200,19 +201,38 @@ def new_session(args):
         "identity": args.identity,
     }
 
-    # 4. Groq transcription
+    # 4. 轉錄 → transcript.srt(IMMUTABLE)
+    # 2026-07-27 MM 拍板:主線=本地 mlx-whisper(--asr local,零雲端零 key);
+    # Groq 降為選配(--asr groq,要 GROQ_API_KEY)。
     t0 = time.time()
     transcript = sdir / "transcript.srt"
-    # groq_transcribe.py signature: <media> [output_dir] [context_file]
-    # We want output to be named transcript.srt (not <stem>.srt), so we handle rename.
-    run(["python3", str(GROQ_SCRIPT), str(src_link), str(sdir), str(ctx_path)])
-    # groq script outputs <stem>.srt — since we symlinked to source.<ext>, stem = "source"
-    groq_out = sdir / "source.srt"
-    if groq_out.exists():
-        groq_out.rename(transcript)
+    asr_engine = args.asr
+    if asr_engine == "local":
+        if not AUDIO_VENV.exists():
+            print("[session] ERROR: --asr local 需要 .venv-audio。安裝:\n"
+                  "  python3.13 -m venv .venv-audio && "
+                  ".venv-audio/bin/pip install -r requirements-audio.txt\n"
+                  "或改用 --asr groq(需 GROQ_API_KEY)。", file=sys.stderr)
+            sys.exit(3)
+        cmd = [str(AUDIO_VENV), str(LOCAL_ASR_SCRIPT), str(src_link),
+               "-o", str(transcript)]
+        if ctx_text:
+            cmd += ["--context", str(ctx_path)]
+        run(cmd)
+        asr_label = "mlx-whisper large-v3-turbo (local)"
+    else:  # groq
+        # groq_transcribe.py signature: <media> [output_dir] [context_file]
+        # We want output to be named transcript.srt (not <stem>.srt), so we handle rename.
+        run(["python3", str(GROQ_SCRIPT), str(src_link), str(sdir), str(ctx_path)])
+        # groq script outputs <stem>.srt — since we symlinked to source.<ext>, stem = "source"
+        groq_out = sdir / "source.srt"
+        if groq_out.exists():
+            groq_out.rename(transcript)
+        asr_label = "Groq Whisper large-v3"
     if not transcript.exists():
-        print(f"[session] ERROR: Groq did not produce transcript.srt", file=sys.stderr)
-        meta["error"] = "groq_transcription_failed"
+        print(f"[session] ERROR: {asr_engine} did not produce transcript.srt",
+              file=sys.stderr)
+        meta["error"] = f"{asr_engine}_transcription_failed"
         (sdir / "metadata.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2),
                                             encoding="utf-8")
         sys.exit(3)
@@ -650,7 +670,7 @@ def new_session(args):
     meta.update({
         "stop_at": args.stop_at,
         "transcription": {
-            "engine": "Groq Whisper large-v3",
+            "engine": asr_label,
             "duration_secs": groq_secs,
             "context_bytes": len(ctx_text.encode("utf-8")),
             "original_chars_no_space": original_metrics["no_space"],
@@ -729,6 +749,9 @@ def main():
                      help="圖片資料夾:copy 進 sessions/<slug>/images/ 並啟用"
                           "圖片理解(describe_images.py)+ 自動插圖(insert_images.py)"
                           " stages(§ S4.5.11);marker 鏈 phase-d→images→image-insert")
+    new.add_argument("--asr", choices=["local", "groq"], default="local",
+                     help="轉錄引擎。local(預設):mlx-whisper 本地零雲端零 key,"
+                          "需 .venv-audio;groq:Groq API(需 .env GROQ_API_KEY)")
     new.add_argument("--diarize", action="store_true",
                      help="音訊分析線:pyannote speaker diarization → speakers.json + "
                           "transcript.speakers.srt([S1] 前綴;命名走 marker 交 agent)。"

@@ -420,6 +420,10 @@ Step 5 只在 `goodedunote` 專案的 hosting 上新增/更新該篇 `<slug>/`,�
   主管線「`pip install requests` 就能跑」的輕量承諾不變。
 - **全本地零雲端**:diarization(pyannote community-1,`.env` 需 `HF_TOKEN`,gated model)
   與聲學分析(librosa)都在本機跑,音檔不出門。
+- **轉錄主線也是本地(2026-07-27 MM 拍板)**:`--asr local`(預設)用 mlx-whisper
+  large-v3-turbo(`scripts/audio/transcribe_local.py`,context 餵 initial_prompt、
+  OpenCC s2twp 繁化);Groq 降為選配 `--asr groq`(非 Apple Silicon 或無 .venv-audio 時用)。
+  Auth 雙軌總表的「Groq Auth」欄自此僅適用 `--asr groq` 路徑。
 - **判斷步驟照原則 5 走 marker**:speaker 命名(`.speaker_naming_pending.json`)、
   剪輯提案(`.cutplan_pending.json`)交對話 agent,腳本本身零 LLM 呼叫。
 - **剪輯的人審不可跳過**:cutplan.md 的勾選是 MM 的剪輯決定;agent 只提案
