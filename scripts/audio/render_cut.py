@@ -129,7 +129,9 @@ def run_ffmpeg(src: Path, ranges: list[list[float]], out: Path, fade: float,
         parts.append(f"[cat]loudnorm={loudnorm}[out]")
     script = out.parent / ".render_filter.txt"
     script.write_text(";\n".join(parts), encoding="utf-8")
-    codec = ["-c:a", "aac", "-b:a", "192k"] if out.suffix != ".wav" else []
+    codec = {".wav": [],
+             ".mp3": ["-c:a", "libmp3lame", "-b:a", "192k"],
+             }.get(out.suffix, ["-c:a", "aac", "-b:a", "192k"])
     cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(src),
            "-filter_complex_script", str(script), "-map", "[out]", *codec, str(out)]
     print(f"[render] ffmpeg {len(ranges)} ranges → {out.name}")
@@ -140,7 +142,8 @@ def run_ffmpeg(src: Path, ranges: list[list[float]], out: Path, fade: float,
 def main():
     ap = argparse.ArgumentParser(description="cutplan → ffmpeg 全自動出片")
     ap.add_argument("--session", required=True)
-    ap.add_argument("--out", default="final_cut.m4a")
+    ap.add_argument("--out", default="final_cut.mp3",
+                help="輸出檔名;副檔名決定編碼(.mp3/.m4a/.wav)")
     ap.add_argument("--snap-window", type=float, default=0.4)
     ap.add_argument("--fade", type=float, default=0.015)
     ap.add_argument("--loudnorm", default="I=-16:TP=-1.5:LRA=11",
