@@ -5,10 +5,15 @@
 ## 2026-07-29
 
 - **BGM 二段式 ducking 包絡**（ADR 0006，CLAUDE.md 原則 11）：fadein＝疊人聲
-  0→40%＋人聲結束 rise 秒 40→70%；fadeout＝predrop 2 秒 70→40%＋人聲進場後
-  fadeout 秒 40→0。人聲位置從時間軸推導，`volume` expr 逐 frame 內插取代 afade；
+  0→duck＋人聲結束 rise 秒 duck→solo；fadeout＝predrop 2 秒 solo→duck＋人聲進場後
+  fadeout 秒 duck→0。人聲位置從時間軸推導，`volume` expr 逐 frame 內插取代 afade；
   全域旋鈕 `--bgm-duck/solo/predrop/rise`。總原則入 CLAUDE.md：全程音量收放
   必須是舒服的遞增遞減，不得跳變。
+- **實聽微調（同日 Amendment）**：duck/solo 預設 0.4/0.7 → **0.15/0.55**
+  （振幅乘數，人耳對數）、rise 1.0→1.5s；ramp 曲線線性 → **smoothstep**。
+- **共用素材庫前綴解析**：`shared-material/水星貓的生活實驗室_v2/`，素材命名
+  `opening_*/break_*/ending_*`，cutplan 寫 `## 🎵 opening` 前綴對了就中；
+  歧義 FAIL 列候選；`--material-dir` 可換庫。
 
 - **音樂 overlay 疊接架構**（`559b244`，ADR 0004）：🎵 退出 concat 鏈改 amix 疊接，
   `lead`/`tail` 宣告進出場重疊、`start`/`end` 可選取音檔區間；片尾音樂自然收尾。

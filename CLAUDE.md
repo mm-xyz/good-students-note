@@ -435,6 +435,10 @@ Step 5 只在 `goodedunote` 專案的 hosting 上新增/更新該篇 `<slug>/`,�
 - **節目結構(2026-07-28)**:cutplan.md 播放順序=文件行序;`## 🎬`=精華集錦區
   (block 行可複製貼上/重複)、`## 🎵 檔案 fadein= fadeout= lead= tail= start= end=`
   =BGM overlay 疊接(音量包絡見原則 11;ADR 0004)、其他 `##`=章節。
+- **🎵 檔名解析(2026-07-29)**:session 目錄 → repo 根 → 絕對路徑 → **共用素材庫**
+  `shared-material/水星貓的生活實驗室_v2/`(`--material-dir` 可換)做前綴匹配——
+  素材命名慣例 `opening_*/break_*/ending_*`,cutplan 寫 `## 🎵 opening` 開頭對了
+  就中;前綴命中多個直接 FAIL 列候選,不靜默選第一個。
 - **frames 線(2026-07-28 併入 invisible-context)**:`scripts/frames/`(extract/screen/
   ocr/diagram/format_text/compose),產物 `sessions/<slug>/frames/`;session.py `--frames`
   觸發抽幀,VLM 全走本地 LM Studio;compose 吸收音訊線的停頓/🔥/講者圖層;skill
@@ -446,11 +450,13 @@ Step 5 只在 `goodedunote` 專案的 hosting 上新增/更新該篇 `<slug>/`,�
 (🎬 集錦淡出入、主音軌進場)與 BGM 側一體適用。BGM 疊到人聲時是「床」,
 獨奏時才是「主角」,音量跟著人聲讓位:
 
-- **fadein 二段式**:疊著人聲進場時 `fadein` 秒內 0→duck(40%),人聲還在就壓著;
-  人聲一結束 `rise` 秒內 duck→solo(基線的 70%)並維持。
+- **fadein 二段式**:疊著人聲進場時 `fadein` 秒內 0→duck,人聲還在就壓著;
+  人聲一結束 `rise` 秒內 duck→solo 並維持。
 - **fadeout 二段式**:人聲要回來前 `predrop`(預設 2 秒)先 solo→duck;
   人聲進場後再依 `fadeout` 秒 duck→0。
-- 百分比以 loudnorm 正規化後的音量基線為 100%;人聲在哪由 render 從時間軸
+- duck/solo 是**振幅乘數**非響度(人耳是對數的):預設 duck=0.15(≈-16.5dB,
+  標準 speech bed)、solo=0.55(≈-5dB)——2026-07-29 實聽把初版 0.4/0.7 調低。
+  所有 ramp 走 smoothstep 曲線(頭尾入彎、無稜角)。人聲在哪由 render 從時間軸
   推導(零音訊偵測、零 LLM)。
 - 參數:cutplan 🎵 行管 `fadein/fadeout/lead/tail/start/end`,全域旋鈕
   `--bgm-duck/--bgm-solo/--bgm-predrop/--bgm-rise`。

@@ -31,8 +31,32 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from srt_utils import parse_srt, pick_transcript, fmt_mmss, sec_to_ts
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+MATERIAL_DIR = PROJECT_ROOT / "shared-material" / "水星貓的生活實驗室_v2"
 LINE_RE = re.compile(r"^- \[( |x|X)\] (B\d{3,5}) \[([^\]]+)\] (.*)$")
 CHAPTER_RE = re.compile(r"^## (.+)$")
+AUDIO_EXTS = (".mp3", ".m4a", ".wav", ".aac", ".flac", ".ogg")
+
+
+def resolve_music(token: str, sdir: Path, material_dir: Path) -> Path | None:
+    """🎵 檔名解析:session 目錄 → repo 根 → 絕對/家目錄路徑 → 共用素材庫。
+
+    素材庫先找同名,再做**前綴匹配**(`opening` 命中 `opening_三個副本王.mp3`)
+    ——素材檔名慣例 `opening_/break_/ending_` 開頭,cutplan 只要開頭對了就中;
+    前綴命中多個=歧義,直接 FAIL 列候選,絕不靜默選第一個。"""
+    f = Path(token)
+    for c in (sdir / f, PROJECT_ROOT / f, f.expanduser(), material_dir / token):
+        if c.is_file():
+            return c
+    if material_dir.is_dir():
+        hits = sorted(p for p in material_dir.iterdir()
+                      if p.is_file() and p.suffix.lower() in AUDIO_EXTS
+                      and p.name.startswith(token))
+        if len(hits) > 1:
+            sys.exit(f"[render] FAIL: 共用素材庫有 {len(hits)} 個 {token} 開頭的檔案:"
+                     f"{'、'.join(p.name for p in hits)} — cutplan 的名字寫長一點")
+        if hits:
+            return hits[0]
+    return None
 
 
 MUSIC_RE = re.compile(r"^##\s*🎵\s*(\S+)((?:\s+\w+=[\d.]+)*)\s*$")
@@ -72,7 +96,10 @@ def bgm_envelope(m: dict, duck: float, solo: float, predrop: float,
 
 
 def env_to_expr(pts: list[tuple[float, float]]) -> str:
-    """keypoints → ffmpeg volume 表達式(巢狀 if 的分段線性內插)。"""
+    """keypoints → ffmpeg volume 表達式(巢狀 if,段內 smoothstep 內插)。
+
+    線性 ramp 在起終點有稜角、聽感生硬;smoothstep(x²(3-2x))頭尾都入彎,
+    收放才是「舒服的遞增遞減」(原則 11)。st(0,x) 存進度供同段重用。"""
     expr = f"{pts[-1][1]:.3f}"
     for (t0, v0), (t1, v1) in reversed(list(zip(pts, pts[1:]))):
         if t1 - t0 < 1e-6:
@@ -81,7 +108,7 @@ def env_to_expr(pts: list[tuple[float, float]]) -> str:
             seg = f"{v0:.3f}"
         else:
             seg = (f"({v0:.3f})+({v1 - v0:.3f})*"
-                   f"(t-{t0:.3f})/{t1 - t0:.3f}")
+                   f"st(0,(t-{t0:.3f})/{t1 - t0:.3f})*ld(0)*(3-2*ld(0))")
         expr = f"if(lt(t,{t1:.3f}),{seg},{expr})"
     return expr
 
@@ -542,14 +569,18 @@ def main():
                     help="🎬 集錦片段之間的靜音間隔秒數(預設 1.0;0=停用)")
     ap.add_argument("--music-speech-fade", type=float, default=1.5,
                     help="音樂 tail 疊接下、主音軌進場的淡入秒數(預設 1.5)")
-    ap.add_argument("--bgm-duck", type=float, default=0.4,
-                    help="BGM 疊到人聲時的音量乘數(預設 0.4=40%%)")
-    ap.add_argument("--bgm-solo", type=float, default=0.7,
-                    help="BGM 獨奏段的音量乘數(預設 0.7=基線的 70%%)")
+    ap.add_argument("--bgm-duck", type=float, default=0.15,
+                    help="BGM 疊到人聲時的振幅乘數(預設 0.15≈-16.5dB,"
+                         "標準 speech bed;振幅非響度,0.4 其實只小 8dB)")
+    ap.add_argument("--bgm-solo", type=float, default=0.55,
+                    help="BGM 獨奏段的振幅乘數(預設 0.55≈-5dB)")
     ap.add_argument("--bgm-predrop", type=float, default=2.0,
                     help="人聲進場前幾秒開始把 solo 降回 duck(預設 2.0)")
-    ap.add_argument("--bgm-rise", type=float, default=1.0,
-                    help="人聲結束後 BGM 從 duck 升到 solo 的秒數(預設 1.0)")
+    ap.add_argument("--bgm-rise", type=float, default=1.5,
+                    help="人聲結束後 BGM 從 duck 升到 solo 的秒數(預設 1.5)")
+    ap.add_argument("--material-dir", type=Path, default=MATERIAL_DIR,
+                    help="共用素材庫(🎵 檔名找不到時在此做前綴匹配;"
+                         "預設 shared-material/水星貓的生活實驗室_v2)")
     ap.add_argument("--dynaudnorm", default="m=4:p=0.9",
                     help="人聲動態均衡參數(ffmpeg dynaudnorm;多人同軌音量拉齊,"
                          "預設 m=4:p=0.9 保守增益;傳空字串停用)")
@@ -599,12 +630,11 @@ def main():
         if it["kind"] == "chapter":
             chapters.append({"title": it["title"], "anchor": len(units)})
         elif it["kind"] == "music":
-            f = Path(it["file"])
-            path = next((c for c in (sdir / f, PROJECT_ROOT / f, f.expanduser())
-                         if c.exists()), None)
+            path = resolve_music(it["file"], sdir, args.material_dir)
             if not path:
-                sys.exit(f"[render] FAIL: 音樂檔不存在:{it['file']}"
-                         f"(相對 session 目錄或 repo 根都找不到)")
+                sys.exit(f"[render] FAIL: 音樂檔不存在:{it['file']}(session/"
+                         f"repo 根/絕對路徑與共用素材庫 {args.material_dir} "
+                         f"的前綴匹配都找不到)")
             file_dur = ffprobe_duration(path)
             m_start = it["start"]
             m_end = min(it["end"], file_dur) if it["end"] else file_dur

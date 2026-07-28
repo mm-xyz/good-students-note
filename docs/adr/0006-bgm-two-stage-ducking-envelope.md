@@ -45,3 +45,11 @@ EP15 實配（opening.mp3 18s、lead=5 tail=5 fadein=2 fadeout=5）：
   某首音樂需要例外，再擴充 🎵 行參數，不預先做。
 - 包絡作用在 loudnorm **之前**：百分比是相對值，最終響度仍由 loudnorm 定錨，
   所以 duck/solo 的聽感比例在成品中大致保持（loudnorm 動態模式會有少量壓縮）。
+
+## Amendment（2026-07-29 深夜，MM 實聽回饋）
+
+- **等級下修**：duck/solo 是**振幅乘數**、人耳是對數的——初版 0.4/0.7 其實只小
+  8dB/3dB，實聽「配音還是好大聲」。預設改 duck=0.15（≈-16.5dB，標準 speech bed）、
+  solo=0.55（≈-5dB）；rise 1.0→1.5s。
+- **曲線換 smoothstep**：線性 ramp 起終點有稜角、實聽「有點不自然」；
+  `env_to_expr()` 段內插值改 x²(3-2x)（頭尾入彎），用 expr 的 `st/ld` 存段內進度。
