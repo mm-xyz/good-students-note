@@ -442,6 +442,11 @@ Step 5 只在 `goodedunote` 專案的 hosting 上新增/更新該篇 `<slug>/`,�
 - **⚙ config 區(2026-07-29)**:cutplan.md 頂部 `## ⚙ key=value ...` 一行=該集的
   render 參數真相源(覆蓋 CLI/預設);可用鍵=render_cut.py 數值型旋鈕的 dash 寫法,
   不認識的鍵直接 FAIL。cutplan.py prepare 會固定產出這一行(帶標準值)。
+- **Prompt 模板也住共用素材庫(2026-07-29)**:跨集重用的 prompt(如
+  `prompt_集數文案.md`)放 `shared-material/<節目版本>/`,節目 profile/輸出格式/
+  語氣規範住模板;每集 session 只放 `copy_material.md`(素材),組裝=模板
+  `{{集數}}`/`{{素材}}` 置換。集數文案跑 cloud 模型(agy/codex),時機=MM 驗收
+  該集 final_cut 之後;改規範改模板,不在 session 裡改。
 - **frames 線(2026-07-28 併入 invisible-context)**:`scripts/frames/`(extract/screen/
   ocr/diagram/format_text/compose),產物 `sessions/<slug>/frames/`;session.py `--frames`
   觸發抽幀,VLM 全走本地 LM Studio;compose 吸收音訊線的停頓/🔥/講者圖層;skill

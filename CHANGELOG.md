@@ -17,6 +17,9 @@
 - **cutplan ⚙ config 區**：cutplan.md 頂部 `## ⚙ key=value ...`＝該集 render 參數
   真相源（覆蓋 CLI/預設，未知鍵 FAIL）；cutplan.py 模板固定產出。集錦間隔預設
   1.0s→**0.5s**（MM 實聽「有點尬」）。
+- **集數文案 prompt 模板入共用素材庫**：`shared-material/<節目版本>/prompt_集數文案.md`
+  （profile/格式/語氣規範），session 只放 `copy_material.md` 素材，`{{集數}}`/`{{素材}}`
+  置換組裝；實跑等 MM 驗收 final_cut 後派 agy＋codex。
 
 - **音樂 overlay 疊接架構**（`559b244`，ADR 0004）：🎵 退出 concat 鏈改 amix 疊接，
   `lead`/`tail` 宣告進出場重疊、`start`/`end` 可選取音檔區間；片尾音樂自然收尾。
