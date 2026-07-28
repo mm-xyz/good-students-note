@@ -1,0 +1,34 @@
+# CHANGELOG
+
+> 剪輯線（feat/podcast-cut）的功能史。決策的「為什麼」住 `docs/adr/`，這裡只記「什麼時候做了什麼」。
+
+## 2026-07-29
+
+- **音樂 overlay 疊接架構**（`559b244`，ADR 0004）：🎵 退出 concat 鏈改 amix 疊接，
+  `lead`/`tail` 宣告進出場重疊、`start`/`end` 可選取音檔區間；片尾音樂自然收尾。
+  EP15 實配：Opening（集錦尾 5s 淡入、尾 8s 淡出、末 5s 主音軌進場）＋間奏＋片尾（末 10s 淡入）。
+- **🎬 集錦節奏改版**（`73f26a0`→`559b244`）：unit 級淡出淡入烘進 segment
+  （`--clip-fade-in/out` 預設 2s）、集錦間隔 `--clip-gap` 預設 1s。
+- **人聲動態均衡**（`559b244`）：`dynaudnorm`（m=4:p=0.9）插在 loudnorm 前，
+  三人同軌音量拉齊；EP15 實測 -18.4 → -16.6 LUFS。
+- **剪點防護鏈**（`73f26a0`＋`559b244`，ADR 0005）：>3s 異常 word 丟棄
+  （EP15「好」16.6s 造成 17s 重複音訊）；unit 邊界用 words.json 字級對齊
+  （「惜嗎」句尾被切）；exact 邊界跳過 snap/谷底/word_guard 外推。
+
+## 2026-07-28
+
+- **剪輯線三份 ADR**（`cbd8e08`）：cutplan 人審真相源／時間軸抽象／多軌單一 pipeline。
+- **節目結構 v1**（`30ebffd`）：🎬 精華集錦（block 可複製重排）＋🎵 音樂床，
+  播放順序＝cutplan.md 文件行序。
+- **frames 線併入**（`e1045f9`＋`2486188`）：invisible-context 抽幀/VLM 篩圖/OCR/compose
+  移植進 session 容器，`/invisible-context` skill 改指本 repo。
+- **README 補完整流程**（`af5297f`＋`6d63bff`）：前置/開 session/命名/人審/出片/旋鈕。
+
+## 2026-07-27
+
+- **字級精剪＋停頓收緊**（`5607ac3`）：cutplan 的 `~~刪除線~~` 走 words.json 精準剪字；
+  >1.5s 停頓自動收緊到 0.6s（word 邊界保護 `35ad5a4`）。
+- **波形平滑接縫**（`a249e3b`）：剪點滑到能量谷底＋acrossfade 三角交疊。
+- **出片預設 mp3**（`8b961ca`）：libmp3lame 192k，副檔名決定編碼。
+- **剪輯 pipeline 立線**（diarize/prosody/cutplan/render 四件套）：SRT 轉錄＋說話人分離
+  →韻律分析→cutplan.md 人審→ffmpeg 全自動出片。
