@@ -439,6 +439,9 @@ Step 5 只在 `goodedunote` 專案的 hosting 上新增/更新該篇 `<slug>/`,�
   `shared-material/水星貓的生活實驗室_v2/`(`--material-dir` 可換)做前綴匹配——
   素材命名慣例 `opening_*/break_*/ending_*`,cutplan 寫 `## 🎵 opening` 開頭對了
   就中;前綴命中多個直接 FAIL 列候選,不靜默選第一個。
+- **⚙ config 區(2026-07-29)**:cutplan.md 頂部 `## ⚙ key=value ...` 一行=該集的
+  render 參數真相源(覆蓋 CLI/預設);可用鍵=render_cut.py 數值型旋鈕的 dash 寫法,
+  不認識的鍵直接 FAIL。cutplan.py prepare 會固定產出這一行(帶標準值)。
 - **frames 線(2026-07-28 併入 invisible-context)**:`scripts/frames/`(extract/screen/
   ocr/diagram/format_text/compose),產物 `sessions/<slug>/frames/`;session.py `--frames`
   觸發抽幀,VLM 全走本地 LM Studio;compose 吸收音訊線的停頓/🔥/講者圖層;skill

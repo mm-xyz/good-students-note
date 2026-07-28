@@ -67,9 +67,15 @@ def write_cutplan_md(blocks: list[dict], path: Path, slug: str, srt_name: str) -
         "> 可在 block 前加 `## 章節標題` 行,render 會轉成 podcast chapters。",
         "> **節目結構**(選用,播放順序=本文件行序):`## 🎬 名稱`=精華集錦區,把正文的",
         "> block 行**複製貼上**進來(可重複、順序自訂,每段自帶淡入淡出);",
-        "> `## 🎵 音樂檔 fadein=1 fadeout=2`=音樂插入點(檔案放 session 目錄或 repo 根,",
-        "> 與前後語音交叉淡化)。典型結構:🎬集錦 → 🎵開頭 → 正文 → 🎵間奏 → 正文 → 🎵結尾。",
+        "> `## 🎵 檔名 fadein= fadeout= lead= tail= start= end=`=BGM overlay 疊接",
+        "> (檔名可只寫 opening/break/ending 前綴,共用素材庫自動匹配;二段式 ducking",
+        "> 包絡見 CLAUDE.md 原則 11)。典型結構:🎬集錦 → 🎵opening → 正文 → 🎵break",
+        "> → 正文 → 🎵ending。",
+        "> **⚙ config 區**(下一行):render 參數住這裡,吃鍵值覆蓋 CLI 預設,",
+        "> 可用鍵=render_cut.py 的數值型旋鈕(dash 寫法)。",
         "> 出片:`python3 scripts/audio/render_cut.py --session sessions/<slug>`",
+        "",
+        "## ⚙ clip-gap=0.5 bgm-duck=0.15 bgm-solo=0.55 max-pause=1.5",
         "",
     ]
     for b in blocks:

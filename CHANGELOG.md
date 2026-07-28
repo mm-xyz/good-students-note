@@ -14,6 +14,9 @@
 - **共用素材庫前綴解析**：`shared-material/水星貓的生活實驗室_v2/`，素材命名
   `opening_*/break_*/ending_*`，cutplan 寫 `## 🎵 opening` 前綴對了就中；
   歧義 FAIL 列候選；`--material-dir` 可換庫。
+- **cutplan ⚙ config 區**：cutplan.md 頂部 `## ⚙ key=value ...`＝該集 render 參數
+  真相源（覆蓋 CLI/預設，未知鍵 FAIL）；cutplan.py 模板固定產出。集錦間隔預設
+  1.0s→**0.5s**（MM 實聽「有點尬」）。
 
 - **音樂 overlay 疊接架構**（`559b244`，ADR 0004）：🎵 退出 concat 鏈改 amix 疊接，
   `lead`/`tail` 宣告進出場重疊、`start`/`end` 可選取音檔區間；片尾音樂自然收尾。

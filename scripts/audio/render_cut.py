@@ -61,6 +61,11 @@ def resolve_music(token: str, sdir: Path, material_dir: Path) -> Path | None:
 
 MUSIC_RE = re.compile(r"^##\s*🎵\s*(\S+)((?:\s+\w+=[\d.]+)*)\s*$")
 TEASER_RE = re.compile(r"^##\s*🎬\s*(.*)$")
+CONFIG_RE = re.compile(r"^##\s*⚙️?\s*(.*)$")
+# cutplan ⚙ config 區可覆蓋的數值旋鈕(dash 寫法;config > CLI/預設)
+CONFIG_KEYS = {"clip_gap", "clip_fade_in", "clip_fade_out", "music_speech_fade",
+               "bgm_duck", "bgm_solo", "bgm_predrop", "bgm_rise",
+               "max_pause", "pause_keep", "crossfade", "snap_window", "fade"}
 
 
 def bgm_envelope(m: dict, duck: float, solo: float, predrop: float,
@@ -162,6 +167,11 @@ def parse_program(path: Path) -> list[dict]:
     clip_mode = False
     for line in path.read_text(encoding="utf-8").splitlines():
         s = line.strip()
+        mcfg = CONFIG_RE.match(s)
+        if mcfg:
+            params = dict(re.findall(r"([\w-]+)=([\d.]+)", mcfg.group(1)))
+            program.append({"kind": "config", "params": params})
+            continue
         mm_ = MUSIC_RE.match(s)
         if mm_:
             params = dict(re.findall(r"(\w+)=([\d.]+)", mm_.group(2) or ""))
@@ -565,8 +575,8 @@ def main():
                     help="🎬 集錦片段開頭的淡入秒數(預設 2.0)")
     ap.add_argument("--clip-fade-out", type=float, default=2.0,
                     help="🎬 集錦片段結尾的淡出秒數(預設 2.0)")
-    ap.add_argument("--clip-gap", type=float, default=1.0,
-                    help="🎬 集錦片段之間的靜音間隔秒數(預設 1.0;0=停用)")
+    ap.add_argument("--clip-gap", type=float, default=0.5,
+                    help="🎬 集錦片段之間的靜音間隔秒數(預設 0.5;0=停用)")
     ap.add_argument("--music-speech-fade", type=float, default=1.5,
                     help="音樂 tail 疊接下、主音軌進場的淡入秒數(預設 1.5)")
     ap.add_argument("--bgm-duck", type=float, default=0.15,
@@ -598,6 +608,23 @@ def main():
     cp = json.loads((sdir / "cutplan.json").read_text(encoding="utf-8"))
     program = parse_program(sdir / "cutplan.md")
 
+    # ── ⚙ config 區:cutplan 是參數真相源,覆蓋 CLI/預設 ──
+    applied = {}
+    for it in program:
+        if it["kind"] != "config":
+            continue
+        for k, v in it["params"].items():
+            attr = k.replace("-", "_")
+            if attr not in CONFIG_KEYS:
+                sys.exit(f"[render] FAIL: ⚙ config 不認識的鍵「{k}」(可用:"
+                         + " ".join(sorted(x.replace("_", "-")
+                                           for x in CONFIG_KEYS)) + ")")
+            setattr(args, attr, float(v))
+            applied[k] = v
+    if applied:
+        print("[render] ⚙ config: "
+              + " ".join(f"{k}={v}" for k, v in applied.items()))
+
     spk_srt = sdir / "transcript.speakers.srt"
     srt_src = spk_srt if spk_srt.exists() else pick_transcript(sdir)
     srt_text = "".join(c["text"] for c in parse_srt(srt_src))
@@ -627,6 +654,8 @@ def main():
     units = []       # {"kind":"speech","start","end","items":[...],"clip"} | music
     chapters = []    # {"title","anchor"=下一個 unit 的 index}
     for it in program:
+        if it["kind"] == "config":
+            continue
         if it["kind"] == "chapter":
             chapters.append({"title": it["title"], "anchor": len(units)})
         elif it["kind"] == "music":
