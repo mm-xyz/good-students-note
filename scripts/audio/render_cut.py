@@ -319,10 +319,12 @@ def ffprobe_duration(path: Path) -> float:
 
 def run_ffmpeg(src: Path, segments: list[dict], out: Path, fade: float,
                loudnorm: str | None, crossfade: float, clip_fade: float) -> list[float]:
-    """出片。segments 依播放順序,speech/music 混排(節目結構 2026-07-28):
+    """出片。segments 依播放順序,speech/music/silence 混排(節目結構 2026-07-28):
       {"kind":"speech","a","b","clip":bool} | {"kind":"music","path","fadein","fadeout","dur"}
-    接縫規則(acrossfade 三角交疊):speech↔speech=crossfade(40ms);任一側是 🎬
-    集錦 clip=clip_fade;任一側是 music=該音樂的 fadein/fadeout(音樂床淡入淡出)。
+      | {"kind":"silence","dur"}(🎬 集錦之間的間隔,anullsrc 生成)
+    接縫規則(acrossfade 三角交疊):speech↔speech=crossfade(40ms);任一側是
+    silence 或 🎬 集錦 clip=clip_fade(集錦經過間隔時=淡出→靜音→淡入);
+    任一側是 music=該音樂的 fadein/fadeout(音樂床淡入淡出)。
     回傳每個 segment 在新時間軸上的起點。
     """
     n = len(segments)
@@ -340,23 +342,32 @@ def run_ffmpeg(src: Path, segments: list[dict], out: Path, fade: float,
             expr = (f"[0:a]atrim=start={s['a']:.3f}:end={s['b']:.3f},"
                     f"asetpts=PTS-STARTPTS,aformat=sample_rates=48000:"
                     f"channel_layouts=stereo")
+        elif s["kind"] == "silence":
+            d = s["dur"]
+            expr = (f"anullsrc=r=48000:cl=stereo,atrim=start=0:end={d:.3f},"
+                    f"asetpts=PTS-STARTPTS,aformat=sample_rates=48000:"
+                    f"channel_layouts=stereo")
         else:
             d = s["dur"]
             expr = (f"[{input_idx[s['path']]}:a]atrim=start=0:end={d:.3f},"
                     f"asetpts=PTS-STARTPTS,aformat=sample_rates=48000:"
                     f"channel_layouts=stereo")
         if i == 0:
-            f_in = s["fadein"] if s["kind"] == "music" else fade
+            f_in = (s["fadein"] if s["kind"] == "music"
+                    else clip_fade if s.get("clip") else fade)
             expr += f",afade=t=in:d={f_in:.3f}"
         if i == n - 1:
-            f_out = s["fadeout"] if s["kind"] == "music" else fade
+            f_out = (s["fadeout"] if s["kind"] == "music"
+                     else clip_fade if s.get("clip") else fade)
             expr += f",afade=t=out:st={max(0.0, d - f_out):.3f}:d={f_out:.3f}"
         parts.append(expr + f"[a{i}]")
         durs.append(d)
 
     def joint_cf(i: int) -> float:
         a, b = segments[i - 1], segments[i]
-        if a["kind"] == "music":
+        if a["kind"] == "silence" or b["kind"] == "silence":
+            cf = clip_fade
+        elif a["kind"] == "music":
             cf = a["fadeout"]
         elif b["kind"] == "music":
             cf = b["fadein"]
@@ -415,6 +426,9 @@ def main():
                     help="接縫交疊秒數(acrossfade;預設 40ms,越大越滑順但會吃字尾)")
     ap.add_argument("--clip-fade", type=float, default=0.25,
                     help="🎬 集錦片段的淡入淡出秒數(預設 0.25)")
+    ap.add_argument("--clip-gap", type=float, default=2.0,
+                    help="🎬 集錦片段之間插入的靜音間隔秒數(預設 2.0;0=停用),"
+                         "兩側各以 --clip-fade 淡出/淡入")
     ap.add_argument("--max-pause", type=float, default=1.5,
                     help="保留段內超過此秒數的停頓自動收緊(0=停用)")
     ap.add_argument("--pause-keep", type=float, default=0.6,
@@ -436,6 +450,16 @@ def main():
 
     wp = sdir / "words.json"
     words = json.loads(wp.read_text(encoding="utf-8")) if wp.exists() else None
+    if words:
+        # whisper 字級時間戳 artifact:單字橫跨十幾秒(EP15 的「好」718→735s),
+        # 會讓 word_guard 把兩側剪點各推到假字頭尾 → 音訊重複;一律丟棄
+        bad = [w for w in words if w["end"] - w["start"] > 3.0]
+        if bad:
+            print("[render] ⚠ 丟棄異常長 word(>3s,whisper 時間戳 artifact):"
+                  + " ".join(f"「{w['word']}」{w['start']:.1f}s+{w['end']-w['start']:.1f}s"
+                             for w in bad[:5])
+                  + (f" …共 {len(bad)} 個" if len(bad) > 5 else ""))
+            words = [w for w in words if w["end"] - w["start"] <= 3.0]
     silences = []
     pj = sdir / "prosody.json"
     if pj.exists():
@@ -470,6 +494,10 @@ def main():
                 last["end"] = b["end"]
                 last["items"].append(it)
             else:
+                # 兩個 🎬 集錦 unit 相鄰(時間不連續)→ 插入靜音間隔
+                if (args.clip_gap > 0 and last and last["kind"] == "speech"
+                        and last["clip"] and it["clip"]):
+                    units.append({"kind": "silence", "dur": args.clip_gap})
                 units.append({"kind": "speech", "start": b["start"], "end": b["end"],
                               "items": [it], "clip": it["clip"]})
 
@@ -484,7 +512,7 @@ def main():
     unit_first_seg = {}
     n_pause = 0
     for ui, u in enumerate(units):
-        if u["kind"] == "music":
+        if u["kind"] in ("music", "silence"):
             unit_first_seg[ui] = len(segments)
             segments.append(u)
             continue
@@ -530,6 +558,8 @@ def main():
             if s["kind"] == "speech":
                 tag = " [🎬]" if s.get("clip") else ""
                 print(f"  speech {fmt_mmss(s['a'])}–{fmt_mmss(s['b'])}{tag}")
+            elif s["kind"] == "silence":
+                print(f"  silence {s['dur']:.1f}s")
             else:
                 print(f"  music  {s['path'].name}({fmt_mmss(s['dur'])},"
                       f"in {s['fadein']}s/out {s['fadeout']}s)")
