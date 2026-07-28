@@ -4,6 +4,12 @@
 
 ## 2026-07-29
 
+- **BGM 二段式 ducking 包絡**（ADR 0006，CLAUDE.md 原則 11）：fadein＝疊人聲
+  0→40%＋人聲結束 rise 秒 40→70%；fadeout＝predrop 2 秒 70→40%＋人聲進場後
+  fadeout 秒 40→0。人聲位置從時間軸推導，`volume` expr 逐 frame 內插取代 afade；
+  全域旋鈕 `--bgm-duck/solo/predrop/rise`。總原則入 CLAUDE.md：全程音量收放
+  必須是舒服的遞增遞減，不得跳變。
+
 - **音樂 overlay 疊接架構**（`559b244`，ADR 0004）：🎵 退出 concat 鏈改 amix 疊接，
   `lead`/`tail` 宣告進出場重疊、`start`/`end` 可選取音檔區間；片尾音樂自然收尾。
   EP15 實配：Opening（集錦尾 5s 淡入、尾 8s 淡出、末 5s 主音軌進場）＋間奏＋片尾（末 10s 淡入）。

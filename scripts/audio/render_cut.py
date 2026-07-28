@@ -39,6 +39,53 @@ MUSIC_RE = re.compile(r"^##\s*🎵\s*(\S+)((?:\s+\w+=[\d.]+)*)\s*$")
 TEASER_RE = re.compile(r"^##\s*🎬\s*(.*)$")
 
 
+def bgm_envelope(m: dict, duck: float, solo: float, predrop: float,
+                 rise: float) -> list[tuple[float, float]]:
+    """疊軌感知的 BGM 音量包絡(分段線性 keypoints,音樂 local 時間軸,0–1 乘數)。
+
+    有人聲疊著時壓在 duck(預設 40%),獨奏段升到 solo(預設 70%)並維持;
+    人聲要進來前 predrop 秒先從 solo 降回 duck,人聲進場後再依 fadeout 秒
+    一路到 0(fadeout 超過 tail 時夾到 tail)。人聲在哪是 render 從時間軸
+    算出來的,不做音訊偵測。"""
+    D = m["dur"]
+    pts = [(0.0, 0.0)]
+    if m["has_prev"]:  # 疊在前段人聲尾巴下進場:0→duck,人聲結束才升 solo
+        fi = min(m["fadein"], max(m["lead"], 0.1))
+        pts += [(fi, duck), (m["lead"], duck), (m["lead"] + rise, solo)]
+    else:
+        pts += [(m["fadein"], solo)]
+    if m["has_next"]:  # 人聲要回來:提前 predrop 降回 duck,進場後 fadeout 到 0
+        entry = D - m["tail"]
+        fo = min(m["fadeout"], max(m["tail"], 0.1))
+        pts += [(entry - predrop, solo), (entry, duck), (entry + fo, 0.0)]
+    else:
+        pts += [(D - m["fadeout"], solo)]
+    pts.append((D, 0.0 if not m["has_next"] else pts[-1][1]))
+    # 夾單調遞增(獨奏窗太短時退化成連續 ramp,不會時間倒流)
+    out = []
+    for t, v in pts:
+        t = min(max(t, out[-1][0] if out else 0.0), D)
+        if out and abs(t - out[-1][0]) < 1e-6 and abs(v - out[-1][1]) < 1e-6:
+            continue
+        out.append((t, v))
+    return out
+
+
+def env_to_expr(pts: list[tuple[float, float]]) -> str:
+    """keypoints → ffmpeg volume 表達式(巢狀 if 的分段線性內插)。"""
+    expr = f"{pts[-1][1]:.3f}"
+    for (t0, v0), (t1, v1) in reversed(list(zip(pts, pts[1:]))):
+        if t1 - t0 < 1e-6:
+            continue
+        if abs(v1 - v0) < 1e-6:
+            seg = f"{v0:.3f}"
+        else:
+            seg = (f"({v0:.3f})+({v1 - v0:.3f})*"
+                   f"(t-{t0:.3f})/{t1 - t0:.3f}")
+        expr = f"if(lt(t,{t1:.3f}),{seg},{expr})"
+    return expr
+
+
 def extend_unit_edges(u: dict, words: list[dict], limit: float = 0.8) -> None:
     """SRT block 時間常比實際語音短(EP15「可惜嗎」的「惜嗎」被切在剪點外):
     用 words.json 找 unit 首/末 block 首/尾字的真實時間,只向外擴、不內縮,
@@ -368,10 +415,12 @@ def run_ffmpeg(src: Path, segments: list[dict], musics: list[dict], out: Path,
     接縫規則:鄰接 silence 或任一側有 baked fade → 10ms 微交疊(fade 已烘好),
     其餘 speech↔speech=crossfade(40ms 三角交疊)。
 
-    musics=[{"path","dur","fadein","fadeout","lead","anchor_seg"}]:每首依
-    dst 時間 adelay 後 amix 疊上語音軌——anchor_seg=某 silence gap 的 segment
-    index(音樂起點=gap 起點-lead,蓋過前面語音尾巴 lead 秒、後面語音頭 tail 秒)
-    ;anchor_seg=None ⇒ 片尾音樂(起點=語音結束-lead,收在音樂自然結束)。
+    musics=[{"path","dur","env","lead","anchor_seg",...}]:每首依 dst 時間
+    adelay 後 amix 疊上語音軌——anchor_seg=某 silence gap 的 segment index
+    (音樂起點=gap 起點-lead,蓋過前面語音尾巴 lead 秒、後面語音頭 tail 秒);
+    anchor_seg=None ⇒ 片尾音樂(起點=語音結束-lead,收在音樂自然結束)。
+    音量走 env(bgm_envelope 的疊軌感知包絡,volume expr 逐 frame 內插),
+    取代舊的 afade in/out。
     語音鏈之後依序:dynaudnorm(人聲動態均衡)→ amix 音樂 → loudnorm。
     回傳 (每個 segment 在新時間軸上的起點, 成品總長)。
     """
@@ -444,9 +493,9 @@ def run_ffmpeg(src: Path, segments: list[dict], musics: list[dict], out: Path,
             f"[{input_idx[m['path']]}:a]atrim=start={m['ss']:.3f}"
             f":end={m['ss'] + m['dur']:.3f},"
             f"asetpts=PTS-STARTPTS,aformat=sample_rates=48000:"
-            f"channel_layouts=stereo,afade=t=in:d={m['fadein']:.3f},"
-            f"afade=t=out:st={max(0.0, m['dur'] - m['fadeout']):.3f}:"
-            f"d={m['fadeout']:.3f},adelay={int(round(at * 1000))}:all=1[m{k}]")
+            f"channel_layouts=stereo,"
+            f"volume='{env_to_expr(m['env'])}':eval=frame,"
+            f"adelay={int(round(at * 1000))}:all=1[m{k}]")
     if musics:
         labels = "".join(f"[m{k}]" for k in range(len(musics)))
         parts.append(f"[{post}]{labels}amix=inputs={len(musics) + 1}:"
@@ -493,6 +542,14 @@ def main():
                     help="🎬 集錦片段之間的靜音間隔秒數(預設 1.0;0=停用)")
     ap.add_argument("--music-speech-fade", type=float, default=1.5,
                     help="音樂 tail 疊接下、主音軌進場的淡入秒數(預設 1.5)")
+    ap.add_argument("--bgm-duck", type=float, default=0.4,
+                    help="BGM 疊到人聲時的音量乘數(預設 0.4=40%%)")
+    ap.add_argument("--bgm-solo", type=float, default=0.7,
+                    help="BGM 獨奏段的音量乘數(預設 0.7=基線的 70%%)")
+    ap.add_argument("--bgm-predrop", type=float, default=2.0,
+                    help="人聲進場前幾秒開始把 solo 降回 duck(預設 2.0)")
+    ap.add_argument("--bgm-rise", type=float, default=1.0,
+                    help="人聲結束後 BGM 從 duck 升到 solo 的秒數(預設 1.0)")
     ap.add_argument("--dynaudnorm", default="m=4:p=0.9",
                     help="人聲動態均衡參數(ffmpeg dynaudnorm;多人同軌音量拉齊,"
                          "預設 m=4:p=0.9 保守增益;傳空字串停用)")
@@ -589,7 +646,8 @@ def main():
         tail = u["tail"] if nxt else 0.0
         m = {"path": u["path"], "dur": u["dur"], "ss": u["ss"],
              "fadein": u["fadein"], "fadeout": u["fadeout"],
-             "lead": lead, "anchor_ui": None}
+             "lead": lead, "tail": tail, "has_prev": has_prev,
+             "has_next": nxt is not None, "anchor_ui": None}
         if nxt:
             gap = u["dur"] - lead - tail
             if gap < 0.1:
@@ -599,6 +657,8 @@ def main():
             out_units.append({"kind": "silence", "dur": gap})
             m["anchor_ui"] = len(out_units) - 1
             nxt["after_music"] = True  # 主音軌在音樂 tail 下進場,烘淡入
+        m["env"] = bgm_envelope(m, args.bgm_duck, args.bgm_solo,
+                                args.bgm_predrop, args.bgm_rise)
         musics.append(m)
     units = out_units
 
@@ -679,8 +739,9 @@ def main():
         for m in musics:
             anchor = ("片尾" if m["anchor_ui"] is None
                       else f"gap@unit{m['anchor_ui']}")
+            env = " → ".join(f"{t:.1f}s:{v * 100:.0f}%" for t, v in m["env"])
             print(f"  music  {m['path'].name}({fmt_mmss(m['dur'])},{anchor},"
-                  f"lead {m['lead']}s,in {m['fadein']}s/out {m['fadeout']}s)")
+                  f"lead {m['lead']}s)\n         env {env}")
         return
 
     for m in musics:

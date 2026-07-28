@@ -433,11 +433,28 @@ Step 5 只在 `goodedunote` 專案的 hosting 上新增/更新該篇 `<slug>/`,�
 - **產物**:`speakers.json`、`transcript.speakers.srt`、`prosody.json`、`highlights.md`、
   `cutplan.md/json`、`final_cut.mp3`、`cut_map.json`、`chapters.txt`,全落 `sessions/<slug>/`。
 - **節目結構(2026-07-28)**:cutplan.md 播放順序=文件行序;`## 🎬`=精華集錦區
-  (block 行可複製貼上/重複)、`## 🎵 檔案 fadein= fadeout=`=音樂床、其他 `##`=章節。
+  (block 行可複製貼上/重複)、`## 🎵 檔案 fadein= fadeout= lead= tail= start= end=`
+  =BGM overlay 疊接(音量包絡見原則 11;ADR 0004)、其他 `##`=章節。
 - **frames 線(2026-07-28 併入 invisible-context)**:`scripts/frames/`(extract/screen/
   ocr/diagram/format_text/compose),產物 `sessions/<slug>/frames/`;session.py `--frames`
   觸發抽幀,VLM 全走本地 LM Studio;compose 吸收音訊線的停頓/🔥/講者圖層;skill
   `/invisible-context` 實體在 `.claude/skills/invisible-context/`,原 repo 已封存。
+
+### 原則 11 — BGM 疊軌感知、二段式音量包絡(2026-07-29 MM 拍板)
+
+**整個成品的音量變化必須是舒服的遞增遞減**——任何時刻都不得跳變,語音側
+(🎬 集錦淡出入、主音軌進場)與 BGM 側一體適用。BGM 疊到人聲時是「床」,
+獨奏時才是「主角」,音量跟著人聲讓位:
+
+- **fadein 二段式**:疊著人聲進場時 `fadein` 秒內 0→duck(40%),人聲還在就壓著;
+  人聲一結束 `rise` 秒內 duck→solo(基線的 70%)並維持。
+- **fadeout 二段式**:人聲要回來前 `predrop`(預設 2 秒)先 solo→duck;
+  人聲進場後再依 `fadeout` 秒 duck→0。
+- 百分比以 loudnorm 正規化後的音量基線為 100%;人聲在哪由 render 從時間軸
+  推導(零音訊偵測、零 LLM)。
+- 參數:cutplan 🎵 行管 `fadein/fadeout/lead/tail/start/end`,全域旋鈕
+  `--bgm-duck/--bgm-solo/--bgm-predrop/--bgm-rise`。
+- 決策脈絡:ADR 0004(overlay 架構)、ADR 0006(本包絡)。
 
 ---
 
