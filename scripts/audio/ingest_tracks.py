@@ -98,9 +98,11 @@ def mixdown(info: dict[str, dict], session_dir: Path) -> None:
     for p in tracks:
         cmd += ["-i", str(p)]
     if len(tracks) > 1:
-        # amix 預設等權(每軌 1/N),長度已驗證一致,duration=longest 只是保險
+        # normalize=0=自然疊加(等權 1/N 會比錄音室合軌小 ~20 LU,EP16 實測);
+        # 疊峰用 alimiter 保險(長度已驗證一致,duration=longest 只是保險)
         cmd += ["-filter_complex",
-                f"amix=inputs={len(tracks)}:duration=longest"]
+                f"amix=inputs={len(tracks)}:duration=longest:normalize=0,"
+                f"alimiter=limit=0.97"]
     cmd += ["-ar", str(first["sr"]), "-c:a", codec, str(source)]
     print(f"[ingest] mixdown {len(tracks)} 軌 → source.wav "
           f"({first['sr']} Hz, {first['sampwidth'] * 8}-bit)")
@@ -182,7 +184,9 @@ def main():
         print("[ingest] 單軌模式(無 tracks/),不需 ingest;照舊走 source.wav")
         return
 
-    track_files = sorted(p for p in tracks_dir.glob("*.wav") if p.is_file())
+    # 大小寫不敏感:錄音室輸出常是大寫 .WAV(EP16 實測撞牆)
+    track_files = sorted(p for p in tracks_dir.iterdir()
+                         if p.is_file() and p.suffix.lower() == ".wav")
     if not track_files:
         die(f"{tracks_dir} 存在但沒有 .wav 軌(檔名慣例:tracks/<Speaker>.wav)")
 
