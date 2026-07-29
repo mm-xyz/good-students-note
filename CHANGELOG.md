@@ -20,6 +20,20 @@
 - **集數文案 prompt 模板入共用素材庫**：`shared-material/<節目版本>/prompt_集數文案.md`
   （profile/格式/語氣規範），session 只放 `copy_material.md` 素材，`{{集數}}`/`{{素材}}`
   置換組裝；實跑等 MM 驗收 final_cut 後派 agy＋codex。
+- **文案模板 v2**：改以 MM 的 `info_prompt.md` 為基底（SEO 寫手/🧪 實驗進度/
+  💡 觀察筆記/關於我們），雙槽 `{{素材}}`＋`{{逐字稿}}`；組裝固化成
+  `scripts/audio/copy_prompt_build.py`（逐字稿逐段標 final-cut 時間、集錦去重）。
+- **多軌 ingest v1**（#565，ADR 0003 落地，reviewer PASS）：`scripts/audio/
+  ingest_tracks.py`——tracks/ 偵測、mixdown 產 source.wav＋audio16k.wav、每軌
+  能量 VAD 產 speakers.json（schema 與 diarize 相容）；13 tests（synthetic fixture）。
+- **Gemma 贅字標記實驗**（#569 第一輪）：`scripts/audio/fillers_local.py`——
+  LM Studio 分 chunk 標 ~~贅字~~，逐 block 機械驗證（去標記後必須逐字相等）。
+  EP15 實跑：1535 block/393 標記/27 丟棄/39 分（gemma-4-e4b）；26b QAT reasoning
+  隨輸入行數爆炸不可用（坑記 script 檔頭）。proposal 檔等 MM 審，不動 cutplan 本體。
+- **設計文件兩份**（#570/#571，等 MM 拍板）：`docs/design/2026-07-29_ep-visual-assets.md`
+  （三平台封面規格/引擎比較/筆記圖流程/觸發機制）、`2026-07-29_post-approval-copy-
+  automation.md`（驗收後文案自動化全流程）；EP15 筆記圖 prototype 與三版文案
+  （Jarvis/agy/codex）落 session 待比稿。
 
 - **音樂 overlay 疊接架構**（`559b244`，ADR 0004）：🎵 退出 concat 鏈改 amix 疊接，
   `lead`/`tail` 宣告進出場重疊、`start`/`end` 可選取音檔區間；片尾音樂自然收尾。
