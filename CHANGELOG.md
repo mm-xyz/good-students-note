@@ -4,6 +4,16 @@
 
 ## 2026-07-29
 
+- **cutplan 斷句粒度改 EP15 式短句**（MM 拍板，SPEC：`docs/design/
+  2026-07-29_phrase-level-cutplan-spec.md`）：EP17 NG 口白+正式開場黏同一
+  block 的根因＝mlx-whisper 長 segment（8–10s 帶標點），換手/靜音兩種切點
+  救不了「同人無停頓」段落。`srt_utils.split_words_to_phrases()` 用 word 級
+  時間軸按「字尾標點或停頓 ≥0.5s」機械重切（零 LLM）；`transcribe_local.py`
+  內建（EP18 起預設）；`resegment_srt.py` 給既有 session 事後補切；
+  `migrate_marks.py` 把舊 cutplan 的 ~~刪除線~~ difflib 字元流對齊移植
+  （EP16 手工流程固化）。EP17 實跑：198 cues→779 blocks、112 spans 移植
+  丟棄 0、dry-run PASS。坑：零長度 artifact word 不能自成短句（會產 0 長度
+  cue＋下游孤兒），已併回鄰組。
 - **分軌對齊正式入 pipeline（`diarize.py --from-tracks`）＋多人大段切開**：
   EP16 開場 4.5 分鐘 whisper 在搶話/jingle 區輸出 30s 視窗大段（一段吞三人、
   逐段貼標必錯一半），cutplan 開頭整片粗塊。原 pipeline ③「分軌 turns→SRT」

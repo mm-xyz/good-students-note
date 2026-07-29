@@ -8,7 +8,8 @@ scripts/audio/transcribe_local.py — 本地 ASR stage(mlx-whisper,全本地零�
         [--context context.txt] [--language zh] [--model mlx-community/whisper-large-v3-turbo]
 
 - Apple Silicon MLX 推理,39.5 分鐘音檔實測約 84s
-- segment 級時間軸 → SRT(全域時間軸,不切 chunk)
+- word 級時間軸重切 EP15 式短句 → SRT(全域時間軸,不切 chunk;
+  切點=字尾標點/停頓 ≥0.5s,見 srt_utils.split_words_to_phrases)
 - OpenCC s2twp 簡→繁台灣化(whisper 中文常出簡體)
 - context 內容餵 initial_prompt(人名/專名辨識;與 Groq 線同一份 context.txt)
 """
@@ -19,7 +20,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from srt_utils import sec_to_ts
+from srt_utils import sec_to_ts, split_words_to_phrases
 
 DEFAULT_MODEL = "mlx-community/whisper-large-v3-turbo"
 
@@ -53,18 +54,28 @@ def main():
     cc = opencc.OpenCC("s2twp")
     blocks = []
     words = []
+    n_seg = 0
     n = 0
     for seg in result["segments"]:
         text = cc.convert(seg["text"].strip())
         if not text:
             continue
-        n += 1
-        blocks.append(f"{n}\n{sec_to_ts(seg['start'])} --> {sec_to_ts(seg['end'])}\n{text}\n")
+        n_seg += 1
+        seg_words = []
         for w in seg.get("words", []):
             wt = cc.convert(w["word"].strip())
             if wt:
-                words.append({"start": round(float(w["start"]), 3),
-                              "end": round(float(w["end"]), 3), "word": wt})
+                seg_words.append({"start": round(float(w["start"]), 3),
+                                  "end": round(float(w["end"]), 3), "word": wt})
+        words.extend(seg_words)
+        # whisper segment 帶標點時常一段 8–10s(NG+正式帶會黏成一句),
+        # 切成 EP15 式短句才是 cutplan 要的粒度(2026-07-29 MM 拍板)
+        phrases = split_words_to_phrases(seg_words, text) or \
+            [{"start": seg["start"], "end": seg["end"], "text": text}]
+        for p in phrases:
+            n += 1
+            blocks.append(f"{n}\n{sec_to_ts(p['start'])} --> {sec_to_ts(p['end'])}\n"
+                          f"{p['text']}\n")
     if not blocks:
         print("[transcribe-local] ERROR: 零 segment 輸出", file=sys.stderr)
         sys.exit(1)
@@ -73,7 +84,7 @@ def main():
     # word 級時間軸(字級精剪 ~~刪除線~~ 用;與 transcript.srt 同源同輪轉錄)
     words_path = out.parent / "words.json"
     words_path.write_text(json.dumps(words, ensure_ascii=False), encoding="utf-8")
-    print(f"[transcribe-local] {n} segments → {args.output}"
+    print(f"[transcribe-local] {n_seg} segments → {n} 短句 cues → {args.output}"
           f"({len(words)} words → {words_path.name})")
 
 

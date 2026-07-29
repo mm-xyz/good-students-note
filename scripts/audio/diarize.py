@@ -32,7 +32,8 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from srt_utils import parse_srt, write_srt, pick_transcript, find_source_media, fmt_mmss, rel
+from srt_utils import (parse_srt, write_srt, pick_transcript, find_source_media,
+                       fmt_mmss, rel, join_words)
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 DEFAULT_MODEL = "pyannote/speaker-diarization-community-1"
@@ -177,20 +178,6 @@ def word_speakers(words: list[dict], turns: list[dict]) -> list[str]:
                                                     abs(t["end"] - mid)))["speaker"]
         labels.append(best or "S1")
     return labels
-
-
-def join_words(ws: list[dict], ref_text: str) -> str:
-    """word 文字串接(words.json 每字已 strip,原空格遺失)。英數字相鄰時
-    以原 cue 文字為準:原文有 "a b" 才補空格(whisper 常把單字拆半,
-    "M"+"ars" 不能補成 "M ars")。"""
-    parts = []
-    for w in ws:
-        if parts and parts[-1][-1:].isascii() and parts[-1][-1:].isalnum() \
-                and w["word"][:1].isascii() and w["word"][:1].isalnum() \
-                and f"{parts[-1]} {w['word']}" in ref_text:
-            parts.append(" ")
-        parts.append(w["word"])
-    return "".join(parts)
 
 
 def split_cues_by_turns(cues: list[dict], turns: list[dict],
