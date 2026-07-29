@@ -75,11 +75,15 @@ def build_gaps(blocks: list[dict], min_gap: float = 2.0) -> list[dict]:
     return gaps
 
 
-def annotate_gaps(gaps: list[dict], wav_path: Path) -> None:
-    """讀 audio16k.wav 量每個 gap 的能量:峰值 dBFS + 有聲比例(>-40dB 的 30ms
-    窗佔比)→ G 列標「🔊 有聲」或「靜音」,人審一眼分辨打板/笑聲 vs 真空白。"""
+def refine_gaps(gaps: list[dict], wav_path: Path,
+                burst_db: float = -40.0, min_burst: float = 0.12,
+                merge_gap: float = 0.35, pad: float = 0.15) -> list[dict]:
+    """讀 audio16k.wav 量每個 gap 的能量,把「有聲」的小段拆成獨立 G 列
+    (2026-07-29 MM 拍板):勾選=只保留那聲笑/打板/音效,不連帶前後死空白;
+    真靜音的 gap 維持單列標「靜音」。回傳重編號後的新 gaps。"""
     if not wav_path.exists():
-        return
+        return gaps
+    out = []
     with wave.open(str(wav_path), "rb") as wf:
         sr = wf.getframerate()
         n_total = wf.getnframes()
@@ -89,36 +93,54 @@ def annotate_gaps(gaps: list[dict], wav_path: Path) -> None:
             i1 = min(n_total, int(g["end"] * sr))
             wf.setpos(i0)
             raw = wf.readframes(i1 - i0)
-            peak_db, active = -96.0, 0
-            n_win = max(1, (len(raw) // 2) // win)
-            for w in range(n_win):
+            dbs = []
+            for w in range(max(1, (len(raw) // 2) // win)):
                 seg = raw[w * win * 2:(w + 1) * win * 2]
                 if len(seg) < 4:
+                    dbs.append(-96.0)
                     continue
                 acc = 0
                 for i in range(0, len(seg), 2):
                     v = int.from_bytes(seg[i:i + 2], "little", signed=True)
                     acc += v * v
                 rms = math.sqrt(acc / (len(seg) // 2)) / 32768
-                db = 20 * math.log10(rms) if rms > 0 else -96.0
-                peak_db = max(peak_db, db)
-                if db > -40.0:
-                    active += 1
-            g["peak_db"] = round(peak_db, 1)
-            g["active_ratio"] = round(active / n_win, 2)
+                dbs.append(20 * math.log10(rms) if rms > 0 else -96.0)
+            # 連續有聲窗 → bursts(間隔 < merge_gap 合併,短於 min_burst 丟棄)
+            bursts = []
+            for w, db in enumerate(dbs):
+                if db <= burst_db:
+                    continue
+                t0 = g["start"] + w * 0.03
+                t1 = t0 + 0.03
+                if bursts and t0 - bursts[-1][1] < merge_gap:
+                    bursts[-1][1] = t1
+                    bursts[-1][2] = max(bursts[-1][2], db)
+                else:
+                    bursts.append([t0, t1, db])
+            bursts = [b for b in bursts if b[1] - b[0] >= min_burst]
+            if not bursts:
+                out.append({**g, "kind": "silence", "peak_db": round(max(dbs), 1)})
+                continue
+            for t0, t1, pk in bursts:
+                out.append({"start": round(max(g["start"], t0 - pad), 3),
+                            "end": round(min(g["end"], t1 + pad), 3),
+                            "before": g["before"], "keep": False,
+                            "kind": "sound", "peak_db": round(pk, 1)})
+    for i, g in enumerate(out, 1):
+        g["id"] = f"G{i:04d}"
+    return out
 
 
 def gap_line(g: dict) -> str:
     mark = "x" if g.get("keep") else " "
-    if g.get("active_ratio", 0) > 0.1:
-        note = (f"🔊 有聲(峰值 {g['peak_db']:.0f}dB、{g['active_ratio'] * 100:.0f}% "
-                f"有能量;打板/笑/音效?)")
-    elif "active_ratio" in g:
-        note = "靜音"
-    else:
-        note = "打板/笑/環境音?"
+    dur = g["end"] - g["start"]
+    if g.get("kind") == "sound":
+        return (f"- [{mark}] {g['id']} [{fmt_mmss(g['start'])}–{fmt_mmss(g['end'])}] "
+                f"🔊 聲音事件 {dur:.1f}s(峰值 {g['peak_db']:.0f}dB;笑/打板/音效?"
+                f"勾選=保留這一小段)")
+    note = "靜音" if g.get("kind") == "silence" else "打板/笑/環境音?"
     return (f"- [{mark}] {g['id']} [{fmt_mmss(g['start'])}–{fmt_mmss(g['end'])}] "
-            f"⬜ 空白/非語音 {g['end'] - g['start']:.1f}s({note};勾選=保留原聲)")
+            f"⬜ 空白/非語音 {dur:.1f}s({note};勾選=保留原聲)")
 
 
 def write_cutplan_md(blocks: list[dict], path: Path, slug: str, srt_name: str,
@@ -147,10 +169,12 @@ def write_cutplan_md(blocks: list[dict], path: Path, slug: str, srt_name: str,
         "## ⚙ clip-gap=0.5 bgm-duck=0.15 bgm-solo=0.55 max-pause=1.5",
         "",
     ]
-    gap_before = {g["before"]: g for g in (gaps or [])}
+    gap_before: dict[str, list] = {}
+    for g in (gaps or []):
+        gap_before.setdefault(g["before"], []).append(g)
     for b in blocks:
-        if b["id"] in gap_before:
-            lines.append(gap_line(gap_before[b["id"]]))
+        for g in gap_before.get(b["id"], []):
+            lines.append(gap_line(g))
         mark = "x" if b["keep"] else " "
         spk = f"[{b['speaker']}] " if b.get("speaker") else ""
         reason = f" ← {b['reason']}" if b["reason"] else ""
@@ -166,7 +190,7 @@ def prepare(args):
     cues = parse_srt(srt_src)
     blocks = build_blocks(cues, args.merge_gap, args.max_block)
     gaps = build_gaps(blocks, args.min_gap)
-    annotate_gaps(gaps, session_dir / "audio16k.wav")
+    gaps = refine_gaps(gaps, session_dir / "audio16k.wav")
 
     cp_json = session_dir / "cutplan.json"
     cp_json.write_text(json.dumps({
@@ -218,17 +242,19 @@ def add_gaps(args):
         print(f"[cutplan] cutplan.json 已有 {len(data['gaps'])} 個 gap,不重複加")
         return
     gaps = build_gaps(data["blocks"], args.min_gap)
-    annotate_gaps(gaps, session_dir / "audio16k.wav")
+    gaps = refine_gaps(gaps, session_dir / "audio16k.wav")
     data["gaps"] = gaps
     cp_json.write_text(json.dumps(data, ensure_ascii=False, indent=2),
                        encoding="utf-8")
-    gap_before = {g["before"]: g for g in gaps}
+    gap_before: dict[str, list] = {}
+    for g in gaps:
+        gap_before.setdefault(g["before"], []).append(g)
     out = []
     for line in cp_md.read_text(encoding="utf-8").splitlines():
         s = line.strip()
-        for bid, g in gap_before.items():
+        for bid, gs in gap_before.items():
             if s.startswith(f"- [x] {bid} ") or s.startswith(f"- [ ] {bid} "):
-                out.append(gap_line(g))
+                out.extend(gap_line(g) for g in gs)
                 break
         out.append(line)
     cp_md.write_text("\n".join(out) + "\n", encoding="utf-8")
