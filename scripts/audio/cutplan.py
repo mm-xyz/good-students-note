@@ -19,7 +19,9 @@ block,上限 --max-block(預設 45s)— 粒度太細人審很累,太粗剪不乾
 import argparse
 import datetime as dt
 import json
+import math
 import sys
+import wave
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -73,10 +75,50 @@ def build_gaps(blocks: list[dict], min_gap: float = 2.0) -> list[dict]:
     return gaps
 
 
+def annotate_gaps(gaps: list[dict], wav_path: Path) -> None:
+    """讀 audio16k.wav 量每個 gap 的能量:峰值 dBFS + 有聲比例(>-40dB 的 30ms
+    窗佔比)→ G 列標「🔊 有聲」或「靜音」,人審一眼分辨打板/笑聲 vs 真空白。"""
+    if not wav_path.exists():
+        return
+    with wave.open(str(wav_path), "rb") as wf:
+        sr = wf.getframerate()
+        n_total = wf.getnframes()
+        win = int(0.03 * sr)
+        for g in gaps:
+            i0 = max(0, int(g["start"] * sr))
+            i1 = min(n_total, int(g["end"] * sr))
+            wf.setpos(i0)
+            raw = wf.readframes(i1 - i0)
+            peak_db, active = -96.0, 0
+            n_win = max(1, (len(raw) // 2) // win)
+            for w in range(n_win):
+                seg = raw[w * win * 2:(w + 1) * win * 2]
+                if len(seg) < 4:
+                    continue
+                acc = 0
+                for i in range(0, len(seg), 2):
+                    v = int.from_bytes(seg[i:i + 2], "little", signed=True)
+                    acc += v * v
+                rms = math.sqrt(acc / (len(seg) // 2)) / 32768
+                db = 20 * math.log10(rms) if rms > 0 else -96.0
+                peak_db = max(peak_db, db)
+                if db > -40.0:
+                    active += 1
+            g["peak_db"] = round(peak_db, 1)
+            g["active_ratio"] = round(active / n_win, 2)
+
+
 def gap_line(g: dict) -> str:
     mark = "x" if g.get("keep") else " "
+    if g.get("active_ratio", 0) > 0.1:
+        note = (f"🔊 有聲(峰值 {g['peak_db']:.0f}dB、{g['active_ratio'] * 100:.0f}% "
+                f"有能量;打板/笑/音效?)")
+    elif "active_ratio" in g:
+        note = "靜音"
+    else:
+        note = "打板/笑/環境音?"
     return (f"- [{mark}] {g['id']} [{fmt_mmss(g['start'])}–{fmt_mmss(g['end'])}] "
-            f"⬜ 空白/非語音 {g['end'] - g['start']:.1f}s(打板/笑/環境音;勾選=保留原聲)")
+            f"⬜ 空白/非語音 {g['end'] - g['start']:.1f}s({note};勾選=保留原聲)")
 
 
 def write_cutplan_md(blocks: list[dict], path: Path, slug: str, srt_name: str,
@@ -124,6 +166,7 @@ def prepare(args):
     cues = parse_srt(srt_src)
     blocks = build_blocks(cues, args.merge_gap, args.max_block)
     gaps = build_gaps(blocks, args.min_gap)
+    annotate_gaps(gaps, session_dir / "audio16k.wav")
 
     cp_json = session_dir / "cutplan.json"
     cp_json.write_text(json.dumps({
@@ -175,6 +218,7 @@ def add_gaps(args):
         print(f"[cutplan] cutplan.json 已有 {len(data['gaps'])} 個 gap,不重複加")
         return
     gaps = build_gaps(data["blocks"], args.min_gap)
+    annotate_gaps(gaps, session_dir / "audio16k.wav")
     data["gaps"] = gaps
     cp_json.write_text(json.dumps(data, ensure_ascii=False, indent=2),
                        encoding="utf-8")
