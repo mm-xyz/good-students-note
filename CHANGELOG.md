@@ -36,6 +36,13 @@
 - **cutplan G 空白列**（ADR 0007）：block 間 ≥2s 空白（打板/笑/環境音）列成
   `G` 列預設不勾＝照舊剪掉、勾選＝保留原聲（render 當 raw unit 不做任何平滑）；
   `cutplan.py add-gaps` 對既有 session 冪等補列。
+- **G 列能量標注＋burst 拆分**（ADR 0007 Amendment）：讀 audio16k 量能量——
+  真靜音單列標「靜音」；有聲小段（>-40dB、≥0.12s、pad 0.15s）各自獨立成
+  「🔊 聲音事件」列附峰值 dB，勾選＝只保留那聲笑/打板不連帶死空白。
+  EP16 實測 13 列＝8 聲音事件＋5 靜音。
+- **EP16 首航**：分軌管線全線打通——錄音室檔→含 Gemma 154 處預標的可人審
+  cutplan≈33 分鐘機器時間（雲端 token 0），時間帳見 session 的 pipeline_run.md；
+  stereo 預聽 A/B 後拍板直接出 stereo。
 - **設計文件兩份**（#570/#571，等 MM 拍板）：`docs/design/2026-07-29_ep-visual-assets.md`
   （三平台封面規格/引擎比較/筆記圖流程/觸發機制）、`2026-07-29_post-approval-copy-
   automation.md`（驗收後文案自動化全流程）；EP15 筆記圖 prototype 與三版文案
