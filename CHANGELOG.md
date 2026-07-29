@@ -4,6 +4,15 @@
 
 ## 2026-07-29
 
+- **分軌對齊正式入 pipeline（`diarize.py --from-tracks`）＋多人大段切開**：
+  EP16 開場 4.5 分鐘 whisper 在搶話/jingle 區輸出 30s 視窗大段（一段吞三人、
+  逐段貼標必錯一半），cutplan 開頭整片粗塊。原 pipeline ③「分軌 turns→SRT」
+  是 subagent 臨場代碼、只貼標不切段；現固化進 diarize.py——words.json 逐字
+  對 speakers.json（每軌 VAD ground truth）歸屬講者，段內有換手就在換手處
+  切開（sub-cue 文字由 words 重建，與 render 字級對齊同源，ADR 0005）；
+  單人 cue 原文零改動。EP16 實測 867→948 blocks，64 段多人大段拆成逐句換手；
+  Gemma 156 段刪除線以字元流 difflib 對齊遷移（丟 1 段），render --dry-run
+  驗證鏈全通。舊檔留 `*.bak-30sblocks`。
 - **BGM 二段式 ducking 包絡**（ADR 0006，CLAUDE.md 原則 11）：fadein＝疊人聲
   0→duck＋人聲結束 rise 秒 duck→solo；fadeout＝predrop 2 秒 solo→duck＋人聲進場後
   fadeout 秒 duck→0。人聲位置從時間軸推導，`volume` expr 逐 frame 內插取代 afade；

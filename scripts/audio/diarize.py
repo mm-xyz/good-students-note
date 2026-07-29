@@ -9,6 +9,9 @@ scripts/audio/diarize.py — Speaker diarization stage(pyannote-audio,全本地)
     # speakers_map.json 填好人名後,重新輸出帶人名的 SRT(不重跑模型,任何 python 可跑):
     python3 scripts/audio/diarize.py --session sessions/<slug> --apply-map
 
+    # 分軌路徑(ingest_tracks.py 已產 speakers.json)的對齊,零模型任何 python 可跑:
+    python3 scripts/audio/diarize.py --session sessions/<slug> --from-tracks
+
 Flow:
     1. ffmpeg: source.<ext> → audio16k.wav(16kHz mono,全長不切 chunk — 時間軸要全域)
     2. pyannote/speaker-diarization-community-1(gated model,.env 需 HF_TOKEN)
@@ -150,6 +153,130 @@ def assign_speakers(cues: list[dict], turns: list[dict]) -> list[dict]:
     return cues
 
 
+def word_speakers(words: list[dict], turns: list[dict]) -> list[str]:
+    """每個 word 指給 overlap 最大的 turn speaker;零 overlap(常見於 0 長度
+    artifact word)繼承前一個 word 的 speaker,開頭找最近的 turn。"""
+    labels = []
+    lo = 0
+    for w in words:
+        while lo < len(turns) and turns[lo]["end"] <= w["start"] - 2.0:
+            lo += 1
+        best, best_ov = None, 0.0
+        for t in turns[lo:]:
+            if t["start"] >= w["end"] + 2.0:
+                break
+            ov = min(w["end"], t["end"]) - max(w["start"], t["start"])
+            if ov > best_ov:
+                best, best_ov = t["speaker"], ov
+        if best is None:
+            if labels:
+                best = labels[-1]
+            elif turns:
+                mid = (w["start"] + w["end"]) / 2
+                best = min(turns, key=lambda t: min(abs(t["start"] - mid),
+                                                    abs(t["end"] - mid)))["speaker"]
+        labels.append(best or "S1")
+    return labels
+
+
+def join_words(ws: list[dict], ref_text: str) -> str:
+    """word 文字串接(words.json 每字已 strip,原空格遺失)。英數字相鄰時
+    以原 cue 文字為準:原文有 "a b" 才補空格(whisper 常把單字拆半,
+    "M"+"ars" 不能補成 "M ars")。"""
+    parts = []
+    for w in ws:
+        if parts and parts[-1][-1:].isascii() and parts[-1][-1:].isalnum() \
+                and w["word"][:1].isascii() and w["word"][:1].isalnum() \
+                and f"{parts[-1]} {w['word']}" in ref_text:
+            parts.append(" ")
+        parts.append(w["word"])
+    return "".join(parts)
+
+
+def split_cues_by_turns(cues: list[dict], turns: list[dict],
+                        words: list[dict]) -> tuple[list[dict], int]:
+    """whisper 在搶話/jingle 區常輸出 30s 視窗大段(EP16 開場實測),逐段貼標
+    會一段吞多人。用 word 級時間戳把「段內有換手」的 cue 在換手處切開:
+    單一 speaker 的 cue 原文照舊(零改動),被切開的 sub-cue 文字由 words 重建
+    (與 render 的字級對齊同源,見 ADR 0005)。回傳 (新 cues, 被切開的 cue 數)。"""
+    labels = word_speakers(words, turns)
+    out: list[dict] = []
+    wi = 0
+    n_split = 0
+    for c in cues:
+        ws: list[tuple[dict, str]] = []
+        while wi < len(words):
+            mid = (words[wi]["start"] + words[wi]["end"]) / 2
+            if mid > c["end"] and words[wi]["start"] >= c["end"]:
+                break
+            ws.append((words[wi], labels[wi]))
+            wi += 1
+        groups: list[list[tuple[dict, str]]] = []
+        for w, lab in ws:
+            if groups and groups[-1][-1][1] == lab:
+                groups[-1].append((w, lab))
+            else:
+                groups.append([(w, lab)])
+        if len(groups) <= 1:
+            spk = groups[0][0][1] if groups else None
+            out.append({**c, "speaker": spk or c.get("speaker")})
+            continue
+        n_split += 1
+        prev_end = c["start"]
+        for gi, g in enumerate(groups):
+            gws = [w for w, _ in g]
+            start = c["start"] if gi == 0 else max(gws[0]["start"], prev_end)
+            end = c["end"] if gi == len(groups) - 1 else max(gws[-1]["end"], start)
+            out.append({"idx": None, "start": round(start, 3), "end": round(end, 3),
+                        "text": join_words(gws, c["text"]), "speaker": g[0][1]})
+            prev_end = end
+    # whisper cue 邊界偶爾切在英文字中間("…嗯。A" / "ra呢?…"):同 speaker、
+    # 零間隔、junction 兩側都是英數字 → 併回一個 cue
+    merged: list[dict] = []
+    for c in out:
+        p = merged[-1] if merged else None
+        if (p and p["speaker"] == c["speaker"] and c["start"] - p["end"] <= 0.05
+                and p["text"][-1:].isascii() and p["text"][-1:].isalnum()
+                and c["text"][:1].isascii() and c["text"][:1].isalnum()):
+            p["end"] = c["end"]
+            p["text"] += c["text"]
+        else:
+            merged.append(c)
+    out = merged
+    for i, c in enumerate(out, 1):
+        c["idx"] = i
+    return out, n_split
+
+
+def align_from_tracks(session_dir: Path) -> None:
+    """分軌路徑的 speaker 對齊(pipeline ③,零 LLM、任何 python 可跑):
+    ingest_tracks.py 的 speakers.json(每軌 VAD = ground truth)+ transcript.srt
+    (+ words.json 切換手)→ transcript.speakers.srt。speaker=軌名=真名,
+    不需 pyannote 也不需命名 marker。"""
+    sj = session_dir / "speakers.json"
+    if not sj.exists():
+        print(f"[diarize] {sj} 不存在;先跑 ingest_tracks.py", file=sys.stderr)
+        sys.exit(1)
+    turns = json.loads(sj.read_text(encoding="utf-8"))["turns"]
+    srt_src = pick_transcript(session_dir)
+    cues = parse_srt(srt_src)
+
+    wp = session_dir / "words.json"
+    if wp.exists():
+        words = json.loads(wp.read_text(encoding="utf-8"))
+        cues, n_split = split_cues_by_turns(cues, turns, words)
+        note = f"{n_split} 段多人 cue 已在換手處切開"
+    else:
+        cues = assign_speakers(cues, turns)
+        note = "無 words.json,退回逐段貼標(多人大段不會被切開)"
+
+    out_srt = session_dir / "transcript.speakers.srt"
+    write_srt(cues, out_srt)
+    switches = sum(1 for a, b in zip(cues, cues[1:]) if a["speaker"] != b["speaker"])
+    print(f"[diarize] {out_srt.name}: {len(cues)} segments(來源 {srt_src.name}),"
+          f"{switches} 次換手,{note}")
+
+
 def write_naming_marker(session_dir: Path, speakers: list[str]) -> None:
     marker = session_dir / ".speaker_naming_pending.json"
     ctx = session_dir / "context.txt"
@@ -207,6 +334,9 @@ def main():
     ap.add_argument("--device", choices=["auto", "mps", "cpu"], default="auto")
     ap.add_argument("--apply-map", action="store_true",
                     help="只套 speakers_map.json 人名,不重跑模型")
+    ap.add_argument("--from-tracks", action="store_true",
+                    help="分軌對齊:用 ingest_tracks 的 speakers.json 貼標+切換手,"
+                         "零模型(任何 python 可跑)")
     args = ap.parse_args()
 
     session_dir = Path(args.session).resolve()
@@ -216,6 +346,10 @@ def main():
 
     if args.apply_map:
         apply_map(session_dir)
+        return
+
+    if args.from_tracks:
+        align_from_tracks(session_dir)
         return
 
     import time
