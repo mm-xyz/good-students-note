@@ -55,7 +55,32 @@ def build_blocks(cues: list[dict], merge_gap: float, max_block: float) -> list[d
     return blocks
 
 
-def write_cutplan_md(blocks: list[dict], path: Path, slug: str, srt_name: str) -> None:
+def build_gaps(blocks: list[dict], min_gap: float = 2.0) -> list[dict]:
+    """block 之間 ≥ min_gap 的空白(打板/笑聲/環境音)→ G 列,預設不勾=照舊剪掉。
+
+    2026-07-29 MM 拍板:空白要看得見、可選擇保留;預設行為不變(render 本來就
+    會丟掉 unit 之間的空白,G 列只是把隱形的東西攤出來)。"""
+    gaps = []
+    prev_end = 0.0
+    for b in blocks:
+        if b["start"] - prev_end >= min_gap:
+            gaps.append({"start": round(prev_end, 3), "end": round(b["start"], 3),
+                         "before": b["id"]})
+        prev_end = b["end"]
+    for i, g in enumerate(gaps, 1):
+        g["id"] = f"G{i:04d}"
+        g["keep"] = False
+    return gaps
+
+
+def gap_line(g: dict) -> str:
+    mark = "x" if g.get("keep") else " "
+    return (f"- [{mark}] {g['id']} [{fmt_mmss(g['start'])}–{fmt_mmss(g['end'])}] "
+            f"⬜ 空白/非語音 {g['end'] - g['start']:.1f}s(打板/笑/環境音;勾選=保留原聲)")
+
+
+def write_cutplan_md(blocks: list[dict], path: Path, slug: str, srt_name: str,
+                     gaps: list[dict] | None = None) -> None:
     lines = [
         f"# Cutplan — {slug}",
         "",
@@ -63,6 +88,8 @@ def write_cutplan_md(blocks: list[dict], path: Path, slug: str, srt_name: str) -
         "> **字級精剪**:保留的 block 內把贅字/贅句包進 `~~刪除線~~`,render 會用",
         "> word 級時間軸精準剪掉那幾個字(需 words.json;--asr local 自動產)。",
         "> 停頓不用標:render 自動把 >1.5s 的停頓收緊到 0.6s(--max-pause 可調)。",
+        "> `G` 列=block 之間 ≥2s 的空白(打板/笑/環境音),預設不勾=照舊剪掉,",
+        "> 勾選=保留該段原聲;G 列文字只是說明,可自由改。",
         "> 除了加刪除線,文字與時間碼不可改動(render 會逐 block 對 SRT 驗證)。",
         "> 可在 block 前加 `## 章節標題` 行,render 會轉成 podcast chapters。",
         "> **節目結構**(選用,播放順序=本文件行序):`## 🎬 名稱`=精華集錦區,把正文的",
@@ -78,7 +105,10 @@ def write_cutplan_md(blocks: list[dict], path: Path, slug: str, srt_name: str) -
         "## ⚙ clip-gap=0.5 bgm-duck=0.15 bgm-solo=0.55 max-pause=1.5",
         "",
     ]
+    gap_before = {g["before"]: g for g in (gaps or [])}
     for b in blocks:
+        if b["id"] in gap_before:
+            lines.append(gap_line(gap_before[b["id"]]))
         mark = "x" if b["keep"] else " "
         spk = f"[{b['speaker']}] " if b.get("speaker") else ""
         reason = f" ← {b['reason']}" if b["reason"] else ""
@@ -93,6 +123,7 @@ def prepare(args):
     srt_src = spk_srt if spk_srt.exists() else pick_transcript(session_dir)
     cues = parse_srt(srt_src)
     blocks = build_blocks(cues, args.merge_gap, args.max_block)
+    gaps = build_gaps(blocks, args.min_gap)
 
     cp_json = session_dir / "cutplan.json"
     cp_json.write_text(json.dumps({
@@ -101,10 +132,11 @@ def prepare(args):
         "merge_gap": args.merge_gap,
         "max_block": args.max_block,
         "blocks": blocks,
+        "gaps": gaps,
     }, ensure_ascii=False, indent=2), encoding="utf-8")
 
     cp_md = session_dir / "cutplan.md"
-    write_cutplan_md(blocks, cp_md, session_dir.name, srt_src.name)
+    write_cutplan_md(blocks, cp_md, session_dir.name, srt_src.name, gaps)
     total = sum(b["end"] - b["start"] for b in blocks)
     print(f"[cutplan] {len(blocks)} blocks({fmt_mmss(total)} 內容)→ "
           f"{rel(cp_md, PROJECT_ROOT)}")
@@ -133,6 +165,33 @@ def prepare(args):
     print(f"[cutplan] 剪輯提案待對話 agent 接手: {rel(marker, PROJECT_ROOT)}")
 
 
+def add_gaps(args):
+    """對既有 session 補 G 列(冪等):不動任何既有行(含刪除線/勾選/章節)。"""
+    session_dir = Path(args.session).resolve()
+    cp_json = session_dir / "cutplan.json"
+    cp_md = session_dir / "cutplan.md"
+    data = json.loads(cp_json.read_text(encoding="utf-8"))
+    if data.get("gaps"):
+        print(f"[cutplan] cutplan.json 已有 {len(data['gaps'])} 個 gap,不重複加")
+        return
+    gaps = build_gaps(data["blocks"], args.min_gap)
+    data["gaps"] = gaps
+    cp_json.write_text(json.dumps(data, ensure_ascii=False, indent=2),
+                       encoding="utf-8")
+    gap_before = {g["before"]: g for g in gaps}
+    out = []
+    for line in cp_md.read_text(encoding="utf-8").splitlines():
+        s = line.strip()
+        for bid, g in gap_before.items():
+            if s.startswith(f"- [x] {bid} ") or s.startswith(f"- [ ] {bid} "):
+                out.append(gap_line(g))
+                break
+        out.append(line)
+    cp_md.write_text("\n".join(out) + "\n", encoding="utf-8")
+    print(f"[cutplan] 補 {len(gaps)} 個 G 列(≥{args.min_gap}s 空白)→ "
+          f"{rel(cp_md, PROJECT_ROOT)}")
+
+
 def main():
     ap = argparse.ArgumentParser(description="Podcast cutplan 產生器(文字剪輯)")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -142,9 +201,16 @@ def main():
                    help="0(預設)=依原 SRT 短句一行一句(2026-07-28 MM 拍板);"
                         ">0 則同 speaker 間隔小於此秒數的句子併成一個 block")
     p.add_argument("--max-block", type=float, default=45.0)
+    p.add_argument("--min-gap", type=float, default=2.0,
+                   help="block 間空白 ≥ 此秒數列成 G 列(預設 2.0)")
+    g = sub.add_parser("add-gaps", help="對既有 cutplan 補 G 空白列(冪等)")
+    g.add_argument("--session", required=True)
+    g.add_argument("--min-gap", type=float, default=2.0)
     args = ap.parse_args()
     if args.cmd == "prepare":
         prepare(args)
+    elif args.cmd == "add-gaps":
+        add_gaps(args)
 
 
 if __name__ == "__main__":

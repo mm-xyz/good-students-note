@@ -30,6 +30,12 @@
   LM Studio 分 chunk 標 ~~贅字~~，逐 block 機械驗證（去標記後必須逐字相等）。
   EP15 實跑：1535 block/393 標記/27 丟棄/39 分（gemma-4-e4b）；26b QAT reasoning
   隨輸入行數爆炸不可用（坑記 script 檔頭）。proposal 檔等 MM 審，不動 cutplan 本體。
+- **EP16 首航實測修正**（ADR 0003 Amendment）：ingest 大寫 `.WAV` 相容、
+  amix `normalize=0`＋alimiter（音量 -43→-33 LUFS）、**mixdown 改 stereo**
+  （檔名數字前綴控聲像排位，等功率 pan ±0.3；mono 聽感悶）。
+- **cutplan G 空白列**（ADR 0007）：block 間 ≥2s 空白（打板/笑/環境音）列成
+  `G` 列預設不勾＝照舊剪掉、勾選＝保留原聲（render 當 raw unit 不做任何平滑）；
+  `cutplan.py add-gaps` 對既有 session 冪等補列。
 - **設計文件兩份**（#570/#571，等 MM 拍板）：`docs/design/2026-07-29_ep-visual-assets.md`
   （三平台封面規格/引擎比較/筆記圖流程/觸發機制）、`2026-07-29_post-approval-copy-
   automation.md`（驗收後文案自動化全流程）；EP15 筆記圖 prototype 與三版文案

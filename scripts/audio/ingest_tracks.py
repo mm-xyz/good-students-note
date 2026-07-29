@@ -28,6 +28,7 @@ import argparse
 import datetime as dt
 import json
 import math
+import re
 import subprocess
 import sys
 import time
@@ -47,12 +48,15 @@ def die(msg: str) -> None:
 
 
 def probe_tracks(tracks: list[Path]) -> dict[str, dict]:
-    """讀各軌 wav header → {speaker: {sr, sampwidth, channels, duration}}。"""
+    """讀各軌 wav header → {speaker: {sr, sampwidth, channels, duration}}。
+
+    檔名慣例:`<Speaker>.wav` 或 `<N>_<Speaker>.wav`——數字前綴只決定
+    聲像排位(左→右,2026-07-29 MM 拍板 stereo 出片),不進 speaker 名。"""
     info = {}
     for p in sorted(tracks):
         try:
             with wave.open(str(p), "rb") as wf:
-                info[p.stem] = {
+                info[re.sub(r"^\d+[_-]", "", p.stem)] = {
                     "file": p,
                     "sr": wf.getframerate(),
                     "sampwidth": wf.getsampwidth(),
@@ -86,7 +90,10 @@ def validate_tracks(info: dict[str, dict]) -> None:
 
 
 def mixdown(info: dict[str, dict], session_dir: Path) -> None:
-    """等權混音 → source.wav(保留原始 SR/位深)→ audio16k.wav(16k mono)。"""
+    """混音 → source.wav(stereo,保留原始 SR/位深)→ audio16k.wav(16k mono)。
+
+    2026-07-29 MM 拍板:直接出 stereo——各軌依檔名排序均分聲像(等功率 pan,
+    範圍 ±0.3,3 軌≈左/中/右),mono 合軌聽感悶、無空間感(EP16 實測)。"""
     tracks = [t["file"] for t in info.values()]
     first = next(iter(info.values()))
     codec = PCM_CODEC.get(first["sampwidth"])
@@ -97,12 +104,20 @@ def mixdown(info: dict[str, dict], session_dir: Path) -> None:
     cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y"]
     for p in tracks:
         cmd += ["-i", str(p)]
-    if len(tracks) > 1:
+    n = len(tracks)
+    if n > 1:
+        parts = []
+        for i in range(n):
+            pos = 0.0 if n == 1 else -0.3 + 0.6 * i / (n - 1)  # 左→右均分
+            ang = (pos + 1) * math.pi / 4
+            fl, fr = math.cos(ang), math.sin(ang)
+            parts.append(f"[{i}:a]pan=stereo|c0={fl:.3f}*c0|c1={fr:.3f}*c0[t{i}]")
+        labels = "".join(f"[t{i}]" for i in range(n))
         # normalize=0=自然疊加(等權 1/N 會比錄音室合軌小 ~20 LU,EP16 實測);
         # 疊峰用 alimiter 保險(長度已驗證一致,duration=longest 只是保險)
-        cmd += ["-filter_complex",
-                f"amix=inputs={len(tracks)}:duration=longest:normalize=0,"
-                f"alimiter=limit=0.97"]
+        parts.append(f"{labels}amix=inputs={n}:duration=longest:normalize=0,"
+                     f"alimiter=limit=0.97[out]")
+        cmd += ["-filter_complex", ";".join(parts), "-map", "[out]"]
     cmd += ["-ar", str(first["sr"]), "-c:a", codec, str(source)]
     print(f"[ingest] mixdown {len(tracks)} 軌 → source.wav "
           f"({first['sr']} Hz, {first['sampwidth'] * 8}-bit)")

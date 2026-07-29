@@ -32,7 +32,7 @@ from srt_utils import parse_srt, pick_transcript, fmt_mmss, sec_to_ts
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 MATERIAL_DIR = PROJECT_ROOT / "shared-material" / "水星貓的生活實驗室_v2"
-LINE_RE = re.compile(r"^- \[( |x|X)\] (B\d{3,5}) \[([^\]]+)\] (.*)$")
+LINE_RE = re.compile(r"^- \[( |x|X)\] ([BG]\d{3,5}) \[([^\]]+)\] (.*)$")
 CHAPTER_RE = re.compile(r"^## (.+)$")
 AUDIO_EXTS = (".mp3", ".m4a", ".wav", ".aac", ".flac", ".ogg")
 
@@ -335,23 +335,30 @@ def subtract(ranges: list[list[float]], removals: list[list[float]],
 
 
 def validate_program(blocks: list[dict], program: list[dict],
-                     srt_text: str) -> None:
+                     srt_text: str, gaps: list[dict] | None = None) -> None:
     """防幻覺/防手滑驗證 + 逐出現解析字級精剪(spans 掛回 program item)。
     (1) json 每個 block 至少在 md 出現一次;md 不得有 json 沒有的 id
         (重複出現合法 — 🎬 集錦區可複製貼上正文的行)
     (2) 每次出現的正文(去刪除線標記後)== json block 文字 — 不准改字
     (3) json block 文字逐字存在於來源 SRT(json 也不可竄改)
+    G 列(空白/非語音):id 必須在 json 的 gaps,文字純說明不驗證。
     """
     json_by_id = {b["id"]: b for b in blocks}
+    gap_by_id = {g["id"]: g for g in (gaps or [])}
     md_ids = {it["id"] for it in program if it["kind"] == "block"}
-    missing = set(json_by_id) - md_ids
-    extra = md_ids - set(json_by_id)
+    missing = {i for i in json_by_id if i not in md_ids}
+    extra = {i for i in md_ids if i not in json_by_id and i not in gap_by_id}
     if missing or extra:
         sys.exit(f"[render] FAIL: cutplan.md 與 cutplan.json block 不一致 "
                  f"(md 缺 {sorted(missing) or '無'} / md 多 {sorted(extra) or '無'})")
     flat = re.sub(r"\s+", "", srt_text)
     for it in program:
         if it["kind"] != "block":
+            continue
+        if it["id"] in gap_by_id:
+            it["spans"] = []
+            it["block"] = gap_by_id[it["id"]]
+            it["gap"] = True
             continue
         b = json_by_id[it["id"]]
         jt = re.sub(r"\s+", "", b["text"])
@@ -628,7 +635,7 @@ def main():
     spk_srt = sdir / "transcript.speakers.srt"
     srt_src = spk_srt if spk_srt.exists() else pick_transcript(sdir)
     srt_text = "".join(c["text"] for c in parse_srt(srt_src))
-    validate_program(cp["blocks"], program, srt_text)
+    validate_program(cp["blocks"], program, srt_text, cp.get("gaps"))
 
     wp = sdir / "words.json"
     words = json.loads(wp.read_text(encoding="utf-8")) if wp.exists() else None
@@ -678,6 +685,7 @@ def main():
             b = it["block"]
             last = units[-1] if units else None
             joinable = (last and last["kind"] == "speech"
+                        and not last.get("raw") and not it.get("gap")
                         and last["clip"] == it["clip"]
                         and 0 <= b["start"] - last["end"] < 2.0)
             if joinable:
@@ -689,7 +697,8 @@ def main():
                         and last["clip"] and it["clip"]):
                     units.append({"kind": "silence", "dur": args.clip_gap})
                 units.append({"kind": "speech", "start": b["start"], "end": b["end"],
-                              "items": [it], "clip": it["clip"]})
+                              "items": [it], "clip": it["clip"],
+                              "raw": it.get("gap", False)})
 
     # ── 🎵 music unit → overlay 疊接:中段換成獨奏長度的 silence gap,
     #    音樂本體記進 musics,render 時 adelay+amix 疊上語音軌 ──
@@ -735,6 +744,11 @@ def main():
         if u["kind"] == "silence":
             unit_first_seg[ui] = len(segments)
             segments.append(u)
+            continue
+        if u.get("raw"):  # G 空白列:保留原聲原長,不 snap/不收停頓/不精剪
+            unit_first_seg[ui] = len(segments)
+            segments.append({"kind": "speech", "a": u["start"], "b": u["end"],
+                             "clip": u["clip"]})
             continue
         if words:
             extend_unit_edges(u, words)
