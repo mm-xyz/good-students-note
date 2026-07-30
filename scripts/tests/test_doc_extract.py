@@ -43,11 +43,11 @@ except ImportError:
     HAVE_EBOOKLIB = False
 
 
-def run_cli(input_path: Path, output_path: Path, context_path: Path | None = None) -> tuple[int, str, str]:
+def run_cli(input_path: Path, output_path: Path, corrections_path: Path | None = None) -> tuple[int, str, str]:
     """透過 subprocess 跑實際 CLI(驗介面契約:argv/stdout stats JSON/exit code)。"""
     cmd = [sys.executable, str(DOC_DIR / "extract.py"), str(input_path), "-o", str(output_path)]
-    if context_path:
-        cmd += ["--context", str(context_path)]
+    if corrections_path:
+        cmd += ["--corrections", str(corrections_path)]
     proc = subprocess.run(cmd, capture_output=True, text=True)
     return proc.returncode, proc.stdout, proc.stderr
 
@@ -114,17 +114,54 @@ class TestTxtExtraction(unittest.TestCase):
         self.assertNotEqual(rc, 0)
         self.assertTrue(stderr.strip())
 
-    def test_context_corrections_applied(self):
+    def test_corrections_flag_applied(self):
+        """
+        2026-07-31 對抗性驗收 Major-3:find=replace 補充修正表改名 --corrections,
+        把 --context 這個旗標名讓回音檔線既有語意(ASR initial_prompt 自由文本),
+        避免兩條輸入線對同一個 CLI 旗標名有衝突語意。行為不變,只驗證新旗標名可用。
+        """
         src = self.tmp / "ctx.txt"
         src.write_text("这里有一个術語錯字需要修正。\n", encoding="utf-8")
-        ctx = self.tmp / "context.txt"
-        ctx.write_text("術語錯字=正確術語\n", encoding="utf-8")
+        corrections = self.tmp / "corrections.txt"
+        corrections.write_text("術語錯字=正確術語\n", encoding="utf-8")
         out = self.tmp / "ctx.md"
-        rc, _, stderr = run_cli(src, out, context_path=ctx)
+        rc, _, stderr = run_cli(src, out, corrections_path=corrections)
         self.assertEqual(rc, 0, msg=stderr)
         content = out.read_text(encoding="utf-8")
         self.assertIn("正確術語", content)
         self.assertNotIn("術語錯字", content)
+
+    def test_numbered_list_not_treated_as_headings(self):
+        """
+        2026-07-31 對抗性驗收 Critical-1:好學生筆記/講義常見的編號條列步驟
+        (「1. 先讀目錄抓框架」)之前會被 numbered/numbered_sub pattern
+        誤判成 ## 章節標題,把單一小節的筆記炸成 4 個假章節。
+        這兩條 pattern 已移除——條列項要維持條列文字,只有真正的「第X章」
+        字樣才算章節,sections 應該是 1 而不是 4。
+        """
+        src = self.tmp / "notes.txt"
+        src.write_text(
+            "第一章 讀書方法\n"
+            "\n"
+            "以下是三個步驟:\n"
+            "1. 先讀目錄抓框架\n"
+            "2. 用便利貼標記重點頁\n"
+            "3. 讀完後寫一段摘要\n",
+            encoding="utf-8",
+        )
+        out = self.tmp / "notes.md"
+        rc, stdout, stderr = run_cli(src, out)
+        self.assertEqual(rc, 0, msg=stderr)
+
+        content = out.read_text(encoding="utf-8")
+        self.assertIn("## 第一章 讀書方法", content)
+        for item in ("1. 先讀目錄抓框架", "2. 用便利貼標記重點頁", "3. 讀完後寫一段摘要"):
+            self.assertIn(item, content)
+            self.assertNotIn(f"## {item}", content)
+            self.assertNotIn(f"### {item}", content)
+
+        stats = json.loads(stdout.strip().splitlines()[-1])
+        self.assertEqual(stats["sections"], 1)
 
 
 class TestTextCleaningUnits(unittest.TestCase):
@@ -321,6 +358,48 @@ class TestEpubExtraction(unittest.TestCase):
         self.assertEqual(stats["input_type"], "epub")
         self.assertEqual(stats["sections"], 2)
         self.assertEqual(stats["lang"], "zh")
+
+    def _build_epub_with_nonlinear_page(self, path: Path):
+        """spine 含一頁 linear="no"(作者手動標的目錄頁,非 ebooklib 自動 EpubNav)。"""
+        book = epub.EpubBook()
+        book.set_identifier("test-id-002")
+        book.set_title("测试电子书2")
+        book.set_language("zh")
+
+        toc_page = epub.EpubHtml(title="目錄", file_name="toc_page.xhtml", lang="zh")
+        toc_page.content = "<html><body><h1>目錄</h1><p>第一章……第二章……</p></body></html>"
+        c1 = epub.EpubHtml(title="第一章", file_name="chap1.xhtml", lang="zh")
+        c1.content = "<html><body><h1>第一章 緒論</h1><p>這是正文內容一，講緒論。</p></body></html>"
+
+        book.add_item(toc_page)
+        book.add_item(c1)
+        book.toc = (epub.Link("chap1.xhtml", "第一章", "chap1"),)
+        book.add_item(epub.EpubNcx())
+        book.add_item(epub.EpubNav())
+        # (item, "no") — EPUB 規範的 linear="no",標「非閱讀順序輔助頁」
+        book.spine = ["nav", (toc_page, "no"), c1]
+        epub.write_epub(str(path), book)
+
+    def test_epub_linear_no_page_excluded(self):
+        """
+        2026-07-31 對抗性驗收 Critical-2:spine 裡 linear="no" 的頁面
+        (作者手動標的目錄/封面等輔助頁)之前只被 is_chapter() 擋掉
+        ebooklib 自動產生的 EpubNav,linear="no" 的真實 EpubHtml 頁沒被擋,
+        「## 目錄」會被誤抽成一個章節,灌水 sections。
+        """
+        src = self.tmp / "book_nonlinear.epub"
+        self._build_epub_with_nonlinear_page(src)
+        out = self.tmp / "book_nonlinear.md"
+        rc, stdout, stderr = run_cli(src, out)
+        self.assertEqual(rc, 0, msg=stderr)
+
+        content = out.read_text(encoding="utf-8")
+        self.assertNotIn("## 目錄", content)
+        self.assertIn("## 第一章 緒論", content)
+        self.assertIn("這是正文內容一", content)
+
+        stats = json.loads(stdout.strip().splitlines()[-1])
+        self.assertEqual(stats["sections"], 1)
 
 
 if __name__ == "__main__":
