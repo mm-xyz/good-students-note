@@ -18,10 +18,12 @@ Fixture 一律程式內生成(不外連下載):
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import sys
 import tempfile
 import unittest
+from collections import Counter
 from pathlib import Path
 
 DOC_DIR = Path(__file__).resolve().parent.parent / "doc"
@@ -286,6 +288,135 @@ class TestPdfExtraction(unittest.TestCase):
         joined = content.replace("\n", "")
         # 右欄「天地玄」必須先於左欄「洪荒」出現,不可被預設橫排順序打亂
         self.assertLess(joined.index("天地玄"), joined.index("洪荒"))
+
+        stats = json.loads(stdout.strip().splitlines()[-1])
+        self.assertEqual(stats["vertical_pages"], 1)
+
+    def test_pdf_vertical_text_reassembles_per_character_lines(self):
+        """
+        真書重現(#615):insert_textbox(rotate=270) 那種 fixture 會被 PyMuPDF
+        自動把整欄合併成一個 line,測不到「一字一行」這個真書才會現形的
+        bug。真實排版/掃描 PDF 常把直排的每個字各自拆成獨立 line(bbox 極
+        窄、x 中心幾乎相同、dir 仍是垂直的 (0, ±1))——這裡用 fitz.TextWriter
+        搭配 90 度旋轉 morph 逐字元各自 write_text,重現這種「每字一個
+        line」的真實情境,斷言修 bug 後同一直欄的字元會接成連續字串,不再
+        被逐字拆成一字一行。
+        """
+        src = self.tmp / "vertical_percall.pdf"
+        doc = fitz.open()
+        page = doc.new_page(width=300, height=400)
+
+        def write_vertical_char(x, y, ch, fontsize=18):
+            tw = fitz.TextWriter(page.rect)
+            tw.append((x, y), ch, fontsize=fontsize, font=fitz.Font("china-s"))
+            tw.write_text(page, morph=(fitz.Point(x, y), fitz.Matrix(90)))
+
+        # 右欄「天地玄黄」、左欄「宇宙洪荒」,每個字各自呼叫一次
+        # write_vertical_char,y 遞增模擬直排由上到下、右欄 x 大於左欄 x
+        # 模擬欄序右到左——完全比照真書 PDF 逐字各自一個 line 的結構。
+        y = 30
+        for ch in "天地玄黄":
+            write_vertical_char(260, y, ch)
+            y += 20
+        y = 30
+        for ch in "宇宙洪荒":
+            write_vertical_char(230, y, ch)
+            y += 20
+
+        doc.save(str(src))
+        doc.close()
+
+        out = self.tmp / "vertical_percall.md"
+        rc, stdout, stderr = run_cli(src, out)
+        self.assertEqual(rc, 0, msg=stderr)
+        content = out.read_text(encoding="utf-8")
+
+        # 核心斷言:同一直欄的字元接成連續字串。修 bug 前這裡會變成
+        # 「天\n地\n玄\n黄」一字一行,以下兩個 assertIn 都會失敗。
+        # (簡→繁轉換會把「黄」轉成「黃」,故用繁體字斷言。)
+        self.assertIn("天地玄黃", content)
+        self.assertIn("宇宙洪荒", content)
+
+        stats = json.loads(stdout.strip().splitlines()[-1])
+        self.assertEqual(stats["vertical_pages"], 1)
+
+    def test_pdf_vertical_duplicate_ocr_pass_not_interleaved(self):
+        """
+        對抗性驗收 FAIL 重現(#615 二修 + reviewer 測試品質糾正):真書
+        《紫微攻略2》的隱藏 OCR 文字層會把同一段直排文字用兩個
+        near-duplicate pass 各寫一次,兩份 pass 每個字元的 bbox x 中心
+        各自帶獨立小抖動(實測落在 0.3~0.5px,不是整份 pass 固定同一個
+        偏移量)。若把兩份 pass 併進同一欄後單純按全域 x 中心排序,兩份
+        pass 的字元會依各自抖動值交錯穿插,比一字一行更難讀(reviewer
+        實測 page 9 拿到「…打轉富固定什麼星，，宮是什麼星，但…」這種
+        字元級亂碼)。
+
+        踩坑記錄:第一版 fixture 讓兩份 pass 全程固定同一個 x 偏移
+        (x_a=200.0、x_b=200.5,每個字元都一樣),結果排序主鍵是
+        x_center,固定偏移只會把兩份 pass 乾淨分成兩個連續區塊,根本不
+        會觸發交錯——把 extract.py 換回 round-1(b249e24,還沒有本輪
+        修法)重跑舊 fixture 竟然也 PASS,不是真紅綠測試。真書的抖動是
+        「每個字元獨立」,全域排序才會把兩份 pass 交錯穿插;這裡改成兩份
+        pass 各自帶不同、逐字元變化的 x 抖動(在 fitz.TextWriter 精確
+        指定座標,不用真隨機以保證測試可重現),已用 round-1 版
+        extract.py 實測確認 FAIL(輸出「該往應老公如何但往如何但往老公
+        應該往」之類的交錯亂碼),對現在的實作 PASS。
+
+        斷言:
+        1. 該欄的字元(不論是哪一份 pass)接成的子字串,是原文「老公應該
+           如何但往往」的完整連續片段,而不是逐字交錯的亂碼;
+        2. 全文任何 6 字元滑動視窗內,同一字元出現次數 < 4(交錯亂碼會讓
+           同一批字元在小視窗內反覆出現;乾淨文字——即使重複整段——不會)。
+        """
+        src = self.tmp / "vertical_dup_pass.pdf"
+        doc = fitz.open()
+        page = doc.new_page(width=300, height=400)
+
+        def write_char(x, y, ch, fontsize=14):
+            tw = fitz.TextWriter(page.rect)
+            tw.append((x, y), ch, fontsize=fontsize, font=fitz.Font("china-s"))
+            tw.write_text(page, morph=(fitz.Point(x, y), fitz.Matrix(90)))
+
+        clause = "老公應該如何但往往"
+        y = 40
+        base_x = 200.0
+        # 兩份 pass 各自逐字元變化的 x 抖動(px 級,落在真書實測的
+        # 0.3~0.5px 範圍),刻意讓兩份 pass 在某些字元上 A 較右、某些
+        # 字元上 B 較右,而不是整份固定同一個偏移——這樣全域 x 排序才會
+        # 真正把兩份 pass 交錯穿插,而非乾淨分成兩塊。
+        jitter_a = [0.30, 0.10, 0.35, 0.05, 0.30, 0.10, 0.30, 0.05, 0.30]
+        jitter_b = [0.10, 0.30, 0.05, 0.35, 0.10, 0.30, 0.10, 0.35, 0.10]
+        for i, ch in enumerate(clause):
+            write_char(base_x + jitter_a[i], y + i * 16, ch)
+            write_char(base_x + jitter_b[i], y + i * 16 + 2.0, ch)  # 第二份 pass:y 也偏移約 2px
+
+        doc.save(str(src))
+        doc.close()
+
+        out = self.tmp / "vertical_dup_pass.md"
+        rc, stdout, stderr = run_cli(src, out)
+        self.assertEqual(rc, 0, msg=stderr)
+        content = out.read_text(encoding="utf-8")
+
+        # 核心斷言 1:原文的連續片段必須完整、原序出現(不論重複幾次),
+        # 不能被拆散交錯。修 bug 前(track 用純 y 排序合併兩份 pass)這裡
+        # 會產出「老老公公應應該該…」或更破碎的交錯亂碼,兩個 assertIn
+        # 都會失敗。
+        self.assertIn("老公應該如何但往往", content)
+
+        # 核心斷言 2:交錯亂碼偵測——任何 6 字元滑動視窗內,同一字元最多
+        # 出現 3 次;字元級交錯(如「說模模模的糊況」)會讓同一字元在小
+        # 視窗內反覆出現 4 次以上,乾淨文字(即使整句重複兩次)不會。
+        cjk_only = re.sub(r"[^一-鿿]", "", content)
+        max_repeat_in_window = 0
+        window = 6
+        for i in range(max(0, len(cjk_only) - window + 1)):
+            counts = Counter(cjk_only[i:i + window])
+            max_repeat_in_window = max(max_repeat_in_window, max(counts.values()))
+        self.assertLess(
+            max_repeat_in_window, 4,
+            msg=f"疑似字元級交錯亂碼,content={content!r}",
+        )
 
         stats = json.loads(stdout.strip().splitlines()[-1])
         self.assertEqual(stats["vertical_pages"], 1)
