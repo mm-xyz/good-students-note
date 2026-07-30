@@ -37,6 +37,7 @@ import re
 import sys
 from collections import Counter
 from pathlib import Path
+from urllib.parse import unquote
 
 # ── Dependency check(只在 main() 呼叫,保持純函式可在其他直譯器下被 import 測試）──
 
@@ -408,12 +409,72 @@ def _html_chapter_title_and_text(html_content: bytes) -> tuple[str, str]:
     return title, text.strip()
 
 
-def extract_epub(path: str) -> list[tuple[str, str]]:
-    """回傳 [(章節標題, 章節內文), ...],依 spine 讀序,略過 nav/目錄頁。"""
+def _flatten_toc(entries) -> list[tuple[int, str, str]]:
+    """
+    把 book.toc(ebooklib 巢狀結構:Link 葉節點 / (Section, children) tuple /
+    純 list 分組)攤平成 [(depth, title, href), ...],depth 從 1 起算、跟隨巢狀層級。
+    """
+    def walk(items, depth):
+        flat = []
+        for entry in items:
+            if isinstance(entry, tuple):
+                head, children = entry
+                href = getattr(head, "href", None)
+                title = getattr(head, "title", None)
+                if href and title:
+                    flat.append((depth, title.strip(), href))
+                flat.extend(walk(children, depth + 1))
+            elif isinstance(entry, list):
+                flat.extend(walk(entry, depth))
+            else:
+                href = getattr(entry, "href", None)
+                title = getattr(entry, "title", None)
+                if href and title:
+                    flat.append((depth, title.strip(), href))
+        return flat
+
+    return walk(entries, 1)
+
+
+def _build_toc_href_map(toc_entries) -> tuple[dict[str, tuple[int, str]], dict[str, tuple[int, str]]]:
+    """
+    把攤平後的 toc 條目依 href(去掉 #fragment、去 URL escape)對應到它指向的
+    spine 檔案,回傳(完整路徑對照表, 檔名對照表)兩層——完整路徑優先比對,
+    對不到才退回只比檔名(不同 EPUB 打包時 toc href 跟 item 內部路徑前綴
+    可能不一致,檔名兜底比較穩)。同一檔案被多個 toc 條目指到(常見於外層
+    Section 跟其子 Link 都指同一頁不同錨點)時,第一個(層級最淺)那個赢。
+    """
+    by_full: dict[str, tuple[int, str]] = {}
+    by_basename: dict[str, tuple[int, str]] = {}
+    for level, title, href in _flatten_toc(toc_entries):
+        base = unquote(href.split("#", 1)[0])
+        if not base:
+            continue
+        if base not in by_full:
+            by_full[base] = (level, title)
+        basename = base.rsplit("/", 1)[-1]
+        if basename not in by_basename:
+            by_basename[basename] = (level, title)
+    return by_full, by_basename
+
+
+def extract_epub(path: str) -> list[tuple[int, str, str]]:
+    """
+    回傳 [(標題層級, 章節標題, 章節內文), ...],依 spine 讀序,略過 nav/目錄頁。
+
+    章節標題來源優先順序(跟 PDF 路徑用 doc.get_toc() 書籤標題同一邏輯):
+    1. toc/nav 的標題文字(book.toc,對應到該 spine 檔的 href)——EPUB 的
+       目錄結構本來就是作者填的真實章名,比內文猜 h1-h3 可靠得多。
+    2. 對不到 toc 的節,退回內文第一個 h1/h2/h3。
+    3. 兩者都沒有,退回「第N章」(N=該節在 spine 讀序中的位置)。
+    標題層級:toc depth 1 → ##,depth ≥2 → ###(跟 PDF TOC level 換算一致);
+    退回 h1-h3 或「第N章」一律當 ## 章節,不臆測子層級。
+    """
     import ebooklib
     from ebooklib import epub
 
     book = epub.read_epub(path)
+    toc_by_full, toc_by_basename = _build_toc_href_map(book.toc)
 
     def is_real_chapter(item) -> bool:
         if item.get_type() != ebooklib.ITEM_DOCUMENT:
@@ -437,19 +498,28 @@ def extract_epub(path: str) -> list[tuple[str, str]]:
         ordered_items = [it for it in book.get_items_of_type(ebooklib.ITEM_DOCUMENT) if is_real_chapter(it)]
 
     chapters = []
-    for item in ordered_items:
-        title, text = _html_chapter_title_and_text(item.get_content())
-        chapters.append((title, text))
+    for idx, item in enumerate(ordered_items, 1):
+        html_title, text = _html_chapter_title_and_text(item.get_content())
+        name = item.get_name()
+        toc_entry = toc_by_full.get(name) or toc_by_basename.get(name.rsplit("/", 1)[-1])
+        if toc_entry:
+            level, title = toc_entry
+            heading_level = 2 if level >= 2 else 1
+        elif html_title:
+            heading_level, title = 1, html_title
+        else:
+            heading_level, title = 1, f"第{idx}章"
+        chapters.append((heading_level, title, text))
     return chapters
 
 
-def build_epub_markdown(chapters: list[tuple[str, str]]) -> str:
+def build_epub_markdown(chapters: list[tuple[int, str, str]]) -> str:
     parts = []
-    for idx, (title, text) in enumerate(chapters, 1):
-        heading_title = title or f"第{idx}章"
+    for heading_level, title, text in chapters:
+        prefix = "###" if heading_level >= 2 else "##"
         cleaned = clean_text_block(strip_garbled_chars(text))
         cleaned = dehyphenate_and_merge(cleaned)
-        parts += ["", f"## {heading_title}", "", cleaned]
+        parts += ["", f"{prefix} {title}", "", cleaned]
     return "\n".join(parts)
 
 

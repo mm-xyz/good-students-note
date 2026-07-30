@@ -333,7 +333,10 @@ class TestEpubExtraction(unittest.TestCase):
         )
         book.add_item(c1)
         book.add_item(c2)
-        book.toc = (epub.Link("chap1.xhtml", "第一章", "chap1"), epub.Link("chap2.xhtml", "第二章", "chap2"))
+        # toc 標題刻意跟內文 h1 一致(真書常見:toc 就是抄章名),同時鎖住
+        # 「toc 對得到時優先用 toc」與「toc 標題=body 標題時輸出不變」兩件事。
+        book.toc = (epub.Link("chap1.xhtml", "第一章 软件设计", "chap1"),
+                    epub.Link("chap2.xhtml", "第二章 结论", "chap2"))
         book.add_item(epub.EpubNcx())
         book.add_item(epub.EpubNav())
         book.spine = ["nav", c1, c2]
@@ -373,7 +376,8 @@ class TestEpubExtraction(unittest.TestCase):
 
         book.add_item(toc_page)
         book.add_item(c1)
-        book.toc = (epub.Link("chap1.xhtml", "第一章", "chap1"),)
+        # toc 標題跟內文 h1 一致(理由同 _build_epub 的註解)。
+        book.toc = (epub.Link("chap1.xhtml", "第一章 緒論", "chap1"),)
         book.add_item(epub.EpubNcx())
         book.add_item(epub.EpubNav())
         # (item, "no") — EPUB 規範的 linear="no",標「非閱讀順序輔助頁」
@@ -400,6 +404,63 @@ class TestEpubExtraction(unittest.TestCase):
 
         stats = json.loads(stdout.strip().splitlines()[-1])
         self.assertEqual(stats["sections"], 1)
+
+    def _build_epub_with_toc_titles_no_headings(self, path: Path):
+        """
+        兩節內文都是純段落(完全沒有 h1/h2/h3),但 book.toc 有描述性真章名——
+        對齊真書《跑者都該懂的跑步關鍵數據》的實際結構(章名躲在 toc/nav,
+        不在內文 heading tag)。外層 Link 是 depth=1(該對到 ##),巢狀
+        Section 底下的子 Link 是 depth=2(該對到 ###)。
+        """
+        book = epub.EpubBook()
+        book.set_identifier("test-id-toc-titles")
+        book.set_title("测试书toc")
+        book.set_language("zh")
+
+        c1 = epub.EpubHtml(title="c1", file_name="chap1.xhtml", lang="zh")
+        c1.content = "<html><body><p>這裡完全沒有標題標籤，只有純段落內容，講第一節的東西。</p></body></html>"
+        c2 = epub.EpubHtml(title="c2", file_name="chap2.xhtml", lang="zh")
+        c2.content = "<html><body><p>第二節同樣沒有 h1/h2/h3，只有純段落內容。</p></body></html>"
+        c3 = epub.EpubHtml(title="c3", file_name="chap3.xhtml", lang="zh")
+        c3.content = "<html><body><p>子節內容也沒有標題標籤，講子節的細節。</p></body></html>"
+
+        book.add_item(c1)
+        book.add_item(c2)
+        book.add_item(c3)
+        book.toc = (
+            epub.Link("chap1.xhtml", "【導讀一】真實描述性章名", "chap1"),
+            (epub.Section("真實描述性章名二（有子節）", href="chap2.xhtml"),
+             (epub.Link("chap3.xhtml", "子節：真實描述性子章名", "chap3"),)),
+        )
+        book.add_item(epub.EpubNcx())
+        book.add_item(epub.EpubNav())
+        book.spine = ["nav", c1, c2, c3]
+        epub.write_epub(str(path), book)
+
+    def test_epub_uses_toc_title_when_no_body_headings(self):
+        """
+        2026-07-31 卡 #614:真書實測揭露的缺口——EPUB 章名偵測只抓每個
+        spine 文件的第一個 h1/h2/h3,章名不在那些 tag 時全部 fallback 成
+        空殼「第N章」。修法:章名優先用 toc/nav 標題,對不到才退回 h1-h3、
+        再退回「第N章」。這裡斷言 toc 標題被用上,不是 fallback 編號。
+        """
+        src = self.tmp / "book_toc_titles.epub"
+        self._build_epub_with_toc_titles_no_headings(src)
+        out = self.tmp / "book_toc_titles.md"
+        rc, stdout, stderr = run_cli(src, out)
+        self.assertEqual(rc, 0, msg=stderr)
+
+        content = out.read_text(encoding="utf-8")
+        self.assertIn("## 【導讀一】真實描述性章名", content)
+        self.assertIn("## 真實描述性章名二（有子節）", content)
+        self.assertIn("### 子節：真實描述性子章名", content)
+        # 不該退回空殼「第N章」fallback(toc 對得到就不該用它)
+        self.assertNotIn("## 第1章", content)
+        self.assertNotIn("## 第2章", content)
+        self.assertNotIn("## 第3章", content)
+
+        stats = json.loads(stdout.strip().splitlines()[-1])
+        self.assertEqual(stats["sections"], 3)
 
 
 if __name__ == "__main__":
