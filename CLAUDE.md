@@ -29,6 +29,9 @@ It is the **single authoritative specification** for all AI-assisted workflows i
 # 處理一個音檔,產出去時間軸、合併、通順的 cleaned.md(大宗使用者終點)
 python3 scripts/session.py new <audio_file> --context "領域專名詞"
 
+# 處理一份文件(pdf/epub/txt),同一入口按副檔名自動分流,直接產 cleaned.md(見原則 12)
+python3 scripts/session.py new <doc_file.pdf> --vlm   # --vlm 選配:pdf 圖表理解
+
 # 要好學生筆記?加 --stop-at notes --identity "<立場>"
 # 要互動校稿 + 即時貼 context?開 web/studio.html
 # 閉環(音檔+圖片 → 出版前全自動,deploy 人工按):
@@ -232,17 +235,32 @@ Phase A/B/C/D 都在精修同一份 cleaned.md(A/B 產出、C/D 出版前強制�
 - **`qaqc_phase_b.py`**: Gemini-powered Phase B(支援 merged 與 structured 兩模式)
 - **`lang/`**: 多語系轉錄/清理腳本(見 `scripts/lang/README.md`)。目前有 `it/`(義大利文,歷史參考)、`en/`(英文)、`ja/`(日文);跨語系格式工具(`srt_clean_md.py`、`vtt_to_txt.py`)放 `lang/` 根
 
+### 文件輸入線 (`/scripts/doc`,見原則 12)
+
+- **`extract.py`**: Phase-1 確定性抽取器(0 token)— PDF(PyMuPDF)/EPUB(ebooklib)/TXT →
+  結構化繁體 markdown,直接產出 `cleaned.md`,跳過 ASR 專屬清理
+- **`figures.py`**: PDF 圖表確定性渲染器(0 token)— 內嵌點陣圖/向量圖表頁/掃描頁 →
+  `<session>/images/` + `doc_figures.json`,供既有 `describe_images.py` 續接
+  (`session.py new <pdf> --vlm` 觸發)
+- 重依賴(fitz/ebooklib/lxml/chardet/opencc)住 `.venv-doc`(見 `requirements-doc.txt`),
+  與 `.venv-audio` 同構——「輸入前端各自一個 deps venv,主管線輕量承諾不變」
+
 ### 回歸測試 (`/scripts/tests`)
 
-音訊剪輯線的行為鎖定測試(characterization,2026-07-30 起)。**改 `scripts/audio/` 任何檔案,改完必跑**:
+音訊剪輯線的行為鎖定測試(characterization,2026-07-30 起),文件輸入線測試(2026-07-31
+起)併入同一套 runner。**改 `scripts/audio/` 或 `scripts/doc/` 任何檔案,改完必跑**:
 
 ```bash
 bash scripts/tests/run_all.sh
 ```
 
-- 每份 `test_*.py` 皆可獨立直接執行(unittest,零 pytest 依賴);`test_prosody.py` 的 numpy 測試主環境自動 skip,runner 會用 `.venv-audio` 跑該檔
-- 涵蓋:`srt_utils`(斷句/時間碼/SRT roundtrip)、`cutplan`(block/G 列/burst/prepare e2e)、`resegment_srt`+`migrate_marks`(phrase-level 改版兩工具)、`diarize` 零模型路徑(換手切開/from-tracks/apply-map)、`render_cut`(防幻覺驗證/剪距運算/BGM 包絡/dry-run e2e)、`copy_prompt_build`、`prosody` 確定性部分
-- **不在範圍**:ASR/pyannote/librosa 模型呼叫、ffmpeg 實際出片(外部依賴,靠每集實跑把關)
+- 音檔線每份 `test_*.py` 皆可獨立直接執行(unittest,零 pytest 依賴);`test_prosody.py`
+  的 numpy 測試主環境自動 skip,runner 會用 `.venv-audio` 跑該檔
+- 文件線三份(`test_doc_extract`/`test_doc_figures`/`test_session_doc_line`)需要
+  fitz/ebooklib/lxml/PIL,主環境沒裝,runner 獨立用 `.venv-doc/bin/python -m pytest`
+  跑;`.venv-doc` 不存在則印安裝提示並跳過該段,不讓整支 run_all 失敗
+- 涵蓋:`srt_utils`(斷句/時間碼/SRT roundtrip)、`cutplan`(block/G 列/burst/prepare e2e)、`resegment_srt`+`migrate_marks`(phrase-level 改版兩工具)、`diarize` 零模型路徑(換手切開/from-tracks/apply-map)、`render_cut`(防幻覺驗證/剪距運算/BGM 包絡/dry-run e2e)、`copy_prompt_build`、`prosody` 確定性部分、`doc_extract`(簡繁/章節/直排重排/OCR 去交錯)、`doc_figures`(四維篩選/manifest)、`session_doc_line`(副檔名分流 e2e)
+- **不在範圍**:ASR/pyannote/librosa 模型呼叫、ffmpeg 實際出片、掃描 PDF 的 OCR(外部依賴或未實作,詳見原則 12 / ADR 0008)
 
 ### SRT Component (`/SRT`)
 
@@ -481,6 +499,38 @@ Step 5 只在 `goodedunote` 專案的 hosting 上新增/更新該篇 `<slug>/`,�
 - 參數:cutplan 🎵 行管 `fadein/fadeout/lead/tail/start/end`,全域旋鈕
   `--bgm-duck/--bgm-solo/--bgm-predrop/--bgm-rise`。
 - 決策脈絡:ADR 0004(overlay 架構)、ADR 0006(本包絡)。
+
+### 原則 12 — 輸入轉接器:副檔名分流,抽取器只做確定性、理解層跨線共用(2026-07-31 引入)
+
+`scripts/session.py new <file>` 是**唯一入口**,依副檔名自動分流,不需要使用者手動選線:
+
+| 副檔名 | 走線 | 產 `cleaned.md` 的路徑 |
+|---|---|---|
+| 音檔/影片(既有,零改動) | 音檔線 | transcribe → phase-a → phase-b(ASR 專屬清理) |
+| `.pdf` / `.epub` / `.txt` | 文件線 | `scripts/doc/extract.py` 直接產出,**跳過** transcribe/phase-a/phase-b |
+
+- **抽取器只做 Phase-1 確定性抽取(0 token)**:`scripts/doc/extract.py` 只做文字抽取、
+  結構偵測(章節→`##`/`###`)、簡繁轉換、雜訊清理,**絕不呼叫 LLM、絕不自己寫摘要或
+  好學生筆記**——這條界線與音檔線 Phase A(確定性清理)同構,呼應原則 6「確定性工作
+  用工具,LLM 只做判斷」。
+- **文件線跳過 ASR 專屬清理**:transcribe/phase-a/phase-b 是為了修正 Whisper 聽錯的
+  東西而存在,文件本來就沒有 ASR 誤差,extract.py 的輸出已是乾淨文本,套用這三段反而
+  是多餘改寫;產物直接當 `cleaned.md`。
+- **理解層跨輸入共用**:Step 3(enhance)、Step 4(好學生筆記)不分音檔/文件輸入,一律
+  吃同一份 `cleaned.md`,下游規則(零省略、字數校驗等)不變——這是「輸入轉接器」設計
+  的核心:前段(抽取/轉錄)依輸入類型各自處理,後段(理解)只認 `cleaned.md` 這個共同
+  介面。
+- **圖片理解複用既有工具,不重造**:`--vlm`(僅 pdf 有意義)先跑 `scripts/doc/figures.py`
+  (確定性渲染內嵌圖/向量圖表頁/掃描頁進 `images/`),再走既有 `--images` 的
+  `describe_images.py`(LLM 看圖描述)+ `insert_images.py`(自動插圖)marker 呼叫路徑
+  ——差別只在圖片來源是渲染而非人工資料夾複製,理解邏輯完全共用。
+- **重依賴隔離**(呼應原則 10 音訊線的 `.venv-audio`):fitz/ebooklib/lxml/chardet/opencc
+  住 `.venv-doc`(`requirements-doc.txt`),`.venv-doc` 不存在時文件線直接報錯退出
+  (不像 frames 線是「跳過」,因為文件線沒有 fallback 產物)。
+
+**Why**:2026-07 把「音檔轉逐字稿知識庫」的工具擴展成「任何輸入 → markdown 知識庫」,
+PDF/EPUB/TXT 是第一批新增輸入類型;純掃描書(無文字層)缺免費 OCR 方案,暫列 backlog
+(#616)。決策脈絡見 ADR 0008。
 
 ---
 
@@ -744,8 +794,10 @@ Web 使用者 git pull(或瀏覽器下次 reload)
 | Web 字典載入器 | `/web/dict-loader.js` |
 | CLI Skill 定義 | `/.claude/skills/good-student-notes/SKILL.md` |
 | Groq 轉錄腳本 | `/.claude/skills/good-student-notes/scripts/groq_transcribe.py` |
-| Pipeline 統籌器 | `/scripts/session.py` |
+| Pipeline 統籌器 | `/scripts/session.py`(音檔/影片線 + 文件線副檔名分流,見原則 12) |
 | Gemini Phase B | `/scripts/qaqc_phase_b.py` |
+| **文件線** Phase-1 確定性抽取(pdf/epub/txt→cleaned.md) | `/scripts/doc/extract.py`(用 `.venv-doc`,見 `requirements-doc.txt`) |
+| **文件線** PDF 圖表確定性渲染(`--vlm`) | `/scripts/doc/figures.py`(用 `.venv-doc`;產物接 `describe_images.py`) |
 | 多語系腳本 | `/scripts/lang/` |
 | 英文轉錄(Groq, language=en) | `/scripts/lang/en/groq_transcribe_en.py` |
 | 結構保留型翻譯(EN→zh-TW;原則 2) | `/scripts/lang/en/srt_zhtw.py`(prep/assemble + 時間軸 byte 驗證) |
