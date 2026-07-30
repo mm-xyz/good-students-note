@@ -98,5 +98,8 @@ MCP5/
 build/
 .worktrees/
 
-# 文件輸入線 venv(與 .venv-audio 同,不上推)
-.venv-doc/
+# 輸入線 venv(重依賴隔離,不上推)。不帶尾斜線 ——
+# worktree 內常態是 symlink 到主樹 venv(`ln -s ../../.venv-doc .venv-doc`),
+# 尾斜線只匹配目錄不匹配 symlink,曾因此漏 ignore 造成 symlink 被誤 add。
+.venv-doc
+.venv-audio

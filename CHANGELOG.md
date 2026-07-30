@@ -2,6 +2,49 @@
 
 > 剪輯線（feat/podcast-cut）的功能史。決策的「為什麼」住 `docs/adr/`，這裡只記「什麼時候做了什麼」。
 
+## 2026-07-31
+
+- **統一輸入管線:文件(PDF/EPUB/TXT)接進 `session.py new`,音檔線零改動**
+  （#605-#608,ADR 0008）:`scripts/session.py new <file>` 現按副檔名自動分流——
+  音檔/影片走既有轉錄線,`.pdf`/`.epub`/`.txt` 走新的文件抽取線,兩線最後
+  匯流到共用的理解層(enhance/notes)。
+  - `scripts/doc/extract.py`(#605):Phase-1 確定性抽取器(0 token,不呼叫
+    LLM)——PDF 用 PyMuPDF、EPUB 用 ebooklib、TXT 用 chardet 偵編碼,統一輸出
+    簡→繁(s2twp)結構化 markdown,直接當 `cleaned.md`,**跳過** transcribe/
+    phase-a/phase-b(ASR 專屬清理對已乾淨文件無意義)。內建連字號斷字合併、
+    頁碼/頁眉頁腳雜訊清除、編號清單不誤判章節(改用 PDF 書籤 TOC 判斷子章節)。
+  - **EPUB 章名優先用 toc/nav**(#614):章節標題來源改先查 `book.toc` 對應
+    spine 檔的真實章名,對不到才退回內文 h1-h3、再退回「第N章」——比直接猜
+    內文標題可靠,同時過濾 `linear="no"` 的非閱讀順序輔助頁(目錄/勘誤頁)。
+  - **PDF 直排(vertical text)偵測與重排**(#615):逐頁判定多數 text line
+    是否 y 分量 dominant 來認定直排頁,重排順序改「欄序右→左、欄內上→下」;
+    真實掃描/OCR PDF 常把直排每個字拆成獨立 line、也常有近似重複的 OCR pass
+    造成逐字交錯,補上細分子欄(緊 eps)+ 同視覺位置 slot 收斂 + 高相似度文字
+    合併三道處理,把「一字一行」與「逐字交錯亂碼」都收斂回可讀連續文本。
+  - `scripts/doc/figures.py`(#606):PDF 圖表確定性渲染器(0 token,不呼叫
+    LLM/VLM)——內嵌點陣圖(四維篩選:寬/高/面積/長寬比,擋橫幅/分隔線裝飾圖)、
+    向量圖表頁(單頁向量物件數 ≥ 門檻整頁渲染)、掃描頁(首 10 頁抽樣平均文字密度過低)
+    三種來源渲染成 PNG 落 `<session>/images/`,manifest 寫 `doc_figures.json`,
+    續接既有 `describe_images.py`(看圖描述,LLM 那層)。
+  - `scripts/session.py` 分流(#607):`DOC_EXTS = {.pdf, .epub, .txt}` 判斷
+    走哪條線;文件線 `--vlm`(僅 pdf 有意義)先跑 `figures.py`,再複用既有
+    `--images` 的 `describe_images.py`/`insert_images.py` marker 呼叫路徑,
+    不重造圖片理解邏輯;`metadata.json` 新增 `source_type`(`doc`/`audio`)與
+    `doc_extraction` stats 欄位。
+  - 重依賴(fitz/ebooklib/lxml/chardet/opencc)隔離在 `.venv-doc`
+    （`requirements-doc.txt`）,與音訊線 `.venv-audio` 同構,主管線
+    「`pip install requests` 就能跑」的輕量承諾不變。
+  - 決策脈絡、純掃描書(無文字層)OCR 路線暫列 backlog(#616,無現成免費
+    OCR 方案)見 `docs/adr/0008-input-adapter-doc-line.md`。
+- **回歸測試套件整合文件線**（#608）:`scripts/tests/run_all.sh` 新增獨立段落,
+  用 `.venv-doc/bin/python -m pytest` 跑 `test_doc_extract`/`test_doc_figures`/
+  `test_session_doc_line` 三份(31 tests);`.venv-doc` 不存在則印安裝提示並
+  跳過,不讓整支 run_all 失敗。音檔線既有測試迴圈零改動。CLAUDE.md 新增
+  原則 12(輸入轉接器),`.claude/skills/good-student-notes/SKILL.md` 輸入
+  心智模型從「媒體檔案」擴到「媒體或文件檔案」。`.gitignore` 修正
+  `.venv-doc`/`.venv-audio` 去尾斜線,讓 worktree 內的 symlink venv 也被
+  正確 ignore(尾斜線只匹配目錄不匹配 symlink)。
+
 ## 2026-07-30
 
 - **音訊剪輯線補上全套回歸測試（新增 130 tests，行為鎖定）**：MM 拍板「把現在所有
