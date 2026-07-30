@@ -342,17 +342,29 @@ class TestPdfExtraction(unittest.TestCase):
 
     def test_pdf_vertical_duplicate_ocr_pass_not_interleaved(self):
         """
-        對抗性驗收 FAIL 重現(#615 二修):真書《紫微攻略2》的隱藏 OCR 文字
-        層會把同一段直排文字用兩個 near-duplicate pass 各寫一次,兩份 pass
-        的 bbox x 中心只差 0.3~0.5px(落在分欄容差內)、y 範圍又幾乎重疊
-        (real 案例量到的偏移)。若把兩份 pass 併進同一欄後直接按 y 排序
-        輸出,字元會逐字交錯,比一字一行更難讀(reviewer 實測 page 9 拿到
-        「…打轉富固定什麼星，，宮是什麼星，但…」這種字元級亂碼)。
+        對抗性驗收 FAIL 重現(#615 二修 + reviewer 測試品質糾正):真書
+        《紫微攻略2》的隱藏 OCR 文字層會把同一段直排文字用兩個
+        near-duplicate pass 各寫一次,兩份 pass 每個字元的 bbox x 中心
+        各自帶獨立小抖動(實測落在 0.3~0.5px,不是整份 pass 固定同一個
+        偏移量)。若把兩份 pass 併進同一欄後單純按全域 x 中心排序,兩份
+        pass 的字元會依各自抖動值交錯穿插,比一字一行更難讀(reviewer
+        實測 page 9 拿到「…打轉富固定什麼星，，宮是什麼星，但…」這種
+        字元級亂碼)。
 
-        這裡用 fitz.TextWriter 逐字元寫兩份幾乎重疊的 pass(x 偏移
-        0.5px、y 偏移 2px)重現這個結構,斷言輸出:
+        踩坑記錄:第一版 fixture 讓兩份 pass 全程固定同一個 x 偏移
+        (x_a=200.0、x_b=200.5,每個字元都一樣),結果排序主鍵是
+        x_center,固定偏移只會把兩份 pass 乾淨分成兩個連續區塊,根本不
+        會觸發交錯——把 extract.py 換回 round-1(b249e24,還沒有本輪
+        修法)重跑舊 fixture 竟然也 PASS,不是真紅綠測試。真書的抖動是
+        「每個字元獨立」,全域排序才會把兩份 pass 交錯穿插;這裡改成兩份
+        pass 各自帶不同、逐字元變化的 x 抖動(在 fitz.TextWriter 精確
+        指定座標,不用真隨機以保證測試可重現),已用 round-1 版
+        extract.py 實測確認 FAIL(輸出「該往應老公如何但往如何但往老公
+        應該往」之類的交錯亂碼),對現在的實作 PASS。
+
+        斷言:
         1. 該欄的字元(不論是哪一份 pass)接成的子字串,是原文「老公應該
-           如何但往往」的某個連續片段,而不是逐字交錯的亂碼;
+           如何但往往」的完整連續片段,而不是逐字交錯的亂碼;
         2. 全文任何 6 字元滑動視窗內,同一字元出現次數 < 4(交錯亂碼會讓
            同一批字元在小視窗內反覆出現;乾淨文字——即使重複整段——不會)。
         """
@@ -367,10 +379,16 @@ class TestPdfExtraction(unittest.TestCase):
 
         clause = "老公應該如何但往往"
         y = 40
-        x_a, x_b = 200.0, 200.5  # 兩份 pass 的 x 中心偏移約 0.5px
+        base_x = 200.0
+        # 兩份 pass 各自逐字元變化的 x 抖動(px 級,落在真書實測的
+        # 0.3~0.5px 範圍),刻意讓兩份 pass 在某些字元上 A 較右、某些
+        # 字元上 B 較右,而不是整份固定同一個偏移——這樣全域 x 排序才會
+        # 真正把兩份 pass 交錯穿插,而非乾淨分成兩塊。
+        jitter_a = [0.30, 0.10, 0.35, 0.05, 0.30, 0.10, 0.30, 0.05, 0.30]
+        jitter_b = [0.10, 0.30, 0.05, 0.35, 0.10, 0.30, 0.10, 0.35, 0.10]
         for i, ch in enumerate(clause):
-            write_char(x_a, y + i * 16, ch)
-            write_char(x_b, y + i * 16 + 2.0, ch)  # 第二份 pass:y 也偏移約 2px
+            write_char(base_x + jitter_a[i], y + i * 16, ch)
+            write_char(base_x + jitter_b[i], y + i * 16 + 2.0, ch)  # 第二份 pass:y 也偏移約 2px
 
         doc.save(str(src))
         doc.close()
