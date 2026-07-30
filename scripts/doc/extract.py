@@ -9,7 +9,13 @@ PDF(PyMuPDF)/EPUB(ebooklib)/TXT → 結構化繁體 markdown 純文字。
 
 用 .venv-doc 的 python 跑(已裝 fitz/ebooklib/chardet/opencc):
     /Users/marslo/GithubRepo_mm-xyz/good-students-note/.venv-doc/bin/python \
-        scripts/doc/extract.py <input> -o <output.md> [--context <file>]
+        scripts/doc/extract.py <input> -o <output.md> [--corrections <file>]
+
+注意:這裡沒有 --context。--context 是統一管線既有語意(音檔線
+scripts/audio/transcribe_local.py 用它餵 ASR initial_prompt 的自由文本),
+doc 線不重複這個入口、也不搶這個字面意思。本檔的補充修正表(find=replace
+逐行對照,見 apply_corrections())改名 --corrections,避免兩條輸入線
+對同一個旗標名有衝突語意。
 
 輸出:單一 UTF-8 markdown 檔 = 繁體乾淨文本 + ##/### 章節標題;
 無 YAML frontmatter、無摘要、無 callout、無 code fence 包裹。
@@ -207,11 +213,15 @@ SECTION_PATTERNS = [
     (r"^Lecture\s+(\d+)[:\.\s]\s*(.{0,60})", "lecture"),
     (r"^Lesson\s+(\d+)[:\.\s]\s*(.{0,60})", "lesson"),
     (r"^Module\s+(\d+)[:\.\s]\s*(.{0,60})", "module"),
-    (r"^(\d+\.\d+(?:\.\d+)*)\.?\s+([A-Za-z一-鿿].{0,60})", "numbered_sub"),
-    (r"^(\d+)\.\s+([A-Za-z一-鿿].{0,60})", "numbered"),
 ]
+# 2026-07-31 對抗性驗收 Critical-1:移除過的 numbered/numbered_sub pattern
+# (`^\d+\.\s+...` / `^\d+\.\d+...`)。好學生筆記的輸入主力是條列步驟
+# (「1. 先讀目錄抓框架」「2. 用便利貼標記重點頁」……),純文字層級無法可靠
+# 分辨「這是子章節標題」還是「這是條列項」,誤判會把整份筆記的章節結構污染
+# 成噪音。子章節偵測改用更可靠信號(PDF 書籤 TOC),沒有書籤就讓編號清單維持
+# 條列文字,不再猜測升格。
 
-_SUBSECTION_LEVELS = {"section", "numbered_sub"}
+_SUBSECTION_LEVELS = {"section"}
 
 
 def detect_sections(text: str) -> list[dict]:
@@ -413,7 +423,12 @@ def extract_epub(path: str) -> list[tuple[str, str]]:
         return True
 
     ordered_items = []
-    for idref, _linear in book.spine:
+    for idref, linear in book.spine:
+        # linear="no" 是 EPUB 規範標「非閱讀順序輔助頁」的正式欄位(作者手動
+        # 標的目錄/封面/勘誤頁等),跟 ebooklib 自動產生的 EpubNav 是兩回事——
+        # is_chapter() 只擋得住後者,這裡要另外擋 linear="no"。
+        if linear == "no":
+            continue
         item = book.get_item_with_id(idref)
         if item is not None and is_real_chapter(item):
             ordered_items.append(item)
@@ -465,15 +480,16 @@ def build_txt_markdown(raw_text: str) -> str:
     return assemble_with_heuristic_sections(cleaned)
 
 
-# ── --context 補充修正(可選,find=replace 逐行對照表）──────────────────
+# ── --corrections 補充修正(可選,find=replace 逐行對照表)──────────────
+# 命名與音檔線的 --context(自由文本餵 initial_prompt)刻意區隔開來,
+# 見檔頭說明。
 
-
-def apply_context_corrections(text: str, context_path: str | None) -> str:
-    if not context_path:
+def apply_corrections(text: str, corrections_path: str | None) -> str:
+    if not corrections_path:
         return text
-    path = Path(context_path)
+    path = Path(corrections_path)
     if not path.is_file():
-        print(f"[extract] WARN: --context 檔案不存在,略過: {context_path}", file=sys.stderr)
+        print(f"[extract] WARN: --corrections 檔案不存在,略過: {corrections_path}", file=sys.stderr)
         return text
 
     corrections = []
@@ -494,7 +510,7 @@ def apply_context_corrections(text: str, context_path: str | None) -> str:
 # ── 主流程 ────────────────────────────────────────────────────────────
 
 
-def process_file(input_path: str, output_path: str, context_path: str | None = None) -> dict:
+def process_file(input_path: str, output_path: str, corrections_path: str | None = None) -> dict:
     path = Path(input_path)
     if not path.is_file():
         raise ExtractError(f"檔案不存在: {input_path}")
@@ -526,7 +542,7 @@ def process_file(input_path: str, output_path: str, context_path: str | None = N
         raise ExtractError(f"不支援的格式: {ext}(僅支援 .pdf / .epub / .txt)")
 
     final_text = convert_to_tw(body)
-    final_text = apply_context_corrections(final_text, context_path)
+    final_text = apply_corrections(final_text, corrections_path)
     final_text = collapse_blank_lines(final_text).strip()
 
     if not final_text:
@@ -556,13 +572,15 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="確定性文件抽取器(PDF/EPUB/TXT → 結構化繁體 markdown)")
     ap.add_argument("input", help="輸入檔案(.pdf / .epub / .txt)")
     ap.add_argument("-o", "--output", required=True, help="輸出 markdown 路徑")
-    ap.add_argument("--context", default=None, help="補充修正對照表(每行 find=replace),可選")
+    ap.add_argument("--corrections", default=None,
+                     help="補充修正對照表(每行 find=replace),可選;"
+                          "與音檔線 --context(餵 ASR initial_prompt)語意不同,故不共用旗標名")
     args = ap.parse_args()
 
     check_deps()
 
     try:
-        stats = process_file(args.input, args.output, args.context)
+        stats = process_file(args.input, args.output, args.corrections)
     except ExtractError as e:
         print(f"[extract] ERROR: {e}", file=sys.stderr)
         sys.exit(1)
