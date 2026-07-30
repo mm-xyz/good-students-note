@@ -1,0 +1,14 @@
+# 文件輸入線(doc-to-md / doc-vlm-to-md 併入)專用依賴 — 與主管線隔離,裝進 .venv-doc
+# 主管線維持「pip install requests 就能跑」的輕量承諾;PDF/EPUB 解析與內嵌圖表渲染
+# 只有處理 .pdf/.epub/.txt 輸入時才需要(與 .venv-audio 同構:輸入前端各自一個 deps venv)。
+#
+# 安裝:
+#   python3.13 -m venv .venv-doc
+#   .venv-doc/bin/pip install -r requirements-doc.txt
+#
+# 版本策略:一律裝最新(不釘死舊版),避開 Pillow 10.0.0 / lxml 4.9.0 那批已知 CVE。
+PyMuPDF>=1.24        # fitz:PDF/EPUB 文字抽取 + 內嵌圖表/掃描頁渲染成 PNG
+ebooklib>=0.18       # EPUB 章節解析
+chardet>=5.2         # TXT 編碼偵測
+Pillow>=10.4         # 圖像處理(與 .venv-audio 生態相同,此線獨立裝)
+opencc>=1.1          # s2twp 簡→繁台灣化(與 scripts/audio/transcribe_local.py 同一繁化慣例)

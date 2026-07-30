@@ -97,3 +97,6 @@ MCP5/
 # 派生/執行期產物留本機(可由 master + scripts 重生;見 memory outward-docs 原則)
 build/
 .worktrees/
+
+# 文件輸入線 venv(與 .venv-audio 同,不上推)
+.venv-doc/
