@@ -18,10 +18,12 @@ Fixture 一律程式內生成(不外連下載):
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import sys
 import tempfile
 import unittest
+from collections import Counter
 from pathlib import Path
 
 DOC_DIR = Path(__file__).resolve().parent.parent / "doc"
@@ -334,6 +336,69 @@ class TestPdfExtraction(unittest.TestCase):
         # (簡→繁轉換會把「黄」轉成「黃」,故用繁體字斷言。)
         self.assertIn("天地玄黃", content)
         self.assertIn("宇宙洪荒", content)
+
+        stats = json.loads(stdout.strip().splitlines()[-1])
+        self.assertEqual(stats["vertical_pages"], 1)
+
+    def test_pdf_vertical_duplicate_ocr_pass_not_interleaved(self):
+        """
+        對抗性驗收 FAIL 重現(#615 二修):真書《紫微攻略2》的隱藏 OCR 文字
+        層會把同一段直排文字用兩個 near-duplicate pass 各寫一次,兩份 pass
+        的 bbox x 中心只差 0.3~0.5px(落在分欄容差內)、y 範圍又幾乎重疊
+        (real 案例量到的偏移)。若把兩份 pass 併進同一欄後直接按 y 排序
+        輸出,字元會逐字交錯,比一字一行更難讀(reviewer 實測 page 9 拿到
+        「…打轉富固定什麼星，，宮是什麼星，但…」這種字元級亂碼)。
+
+        這裡用 fitz.TextWriter 逐字元寫兩份幾乎重疊的 pass(x 偏移
+        0.5px、y 偏移 2px)重現這個結構,斷言輸出:
+        1. 該欄的字元(不論是哪一份 pass)接成的子字串,是原文「老公應該
+           如何但往往」的某個連續片段,而不是逐字交錯的亂碼;
+        2. 全文任何 6 字元滑動視窗內,同一字元出現次數 < 4(交錯亂碼會讓
+           同一批字元在小視窗內反覆出現;乾淨文字——即使重複整段——不會)。
+        """
+        src = self.tmp / "vertical_dup_pass.pdf"
+        doc = fitz.open()
+        page = doc.new_page(width=300, height=400)
+
+        def write_char(x, y, ch, fontsize=14):
+            tw = fitz.TextWriter(page.rect)
+            tw.append((x, y), ch, fontsize=fontsize, font=fitz.Font("china-s"))
+            tw.write_text(page, morph=(fitz.Point(x, y), fitz.Matrix(90)))
+
+        clause = "老公應該如何但往往"
+        y = 40
+        x_a, x_b = 200.0, 200.5  # 兩份 pass 的 x 中心偏移約 0.5px
+        for i, ch in enumerate(clause):
+            write_char(x_a, y + i * 16, ch)
+            write_char(x_b, y + i * 16 + 2.0, ch)  # 第二份 pass:y 也偏移約 2px
+
+        doc.save(str(src))
+        doc.close()
+
+        out = self.tmp / "vertical_dup_pass.md"
+        rc, stdout, stderr = run_cli(src, out)
+        self.assertEqual(rc, 0, msg=stderr)
+        content = out.read_text(encoding="utf-8")
+
+        # 核心斷言 1:原文的連續片段必須完整、原序出現(不論重複幾次),
+        # 不能被拆散交錯。修 bug 前(track 用純 y 排序合併兩份 pass)這裡
+        # 會產出「老老公公應應該該…」或更破碎的交錯亂碼,兩個 assertIn
+        # 都會失敗。
+        self.assertIn("老公應該如何但往往", content)
+
+        # 核心斷言 2:交錯亂碼偵測——任何 6 字元滑動視窗內,同一字元最多
+        # 出現 3 次;字元級交錯(如「說模模模的糊況」)會讓同一字元在小
+        # 視窗內反覆出現 4 次以上,乾淨文字(即使整句重複兩次)不會。
+        cjk_only = re.sub(r"[^一-鿿]", "", content)
+        max_repeat_in_window = 0
+        window = 6
+        for i in range(max(0, len(cjk_only) - window + 1)):
+            counts = Counter(cjk_only[i:i + window])
+            max_repeat_in_window = max(max_repeat_in_window, max(counts.values()))
+        self.assertLess(
+            max_repeat_in_window, 4,
+            msg=f"疑似字元級交錯亂碼,content={content!r}",
+        )
 
         stats = json.loads(stdout.strip().splitlines()[-1])
         self.assertEqual(stats["vertical_pages"], 1)

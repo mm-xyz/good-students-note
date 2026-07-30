@@ -36,6 +36,7 @@ line 接成同一直欄的連續字串(中日文字間不加空白),只有欄與
 from __future__ import annotations
 
 import argparse
+import difflib
 import json
 import re
 import sys
@@ -271,6 +272,88 @@ def _line_is_vertical(direction: tuple[float, float]) -> bool:
     return abs(dy) > abs(dx)
 
 
+def _median(values: list[float]) -> float:
+    srt = sorted(values)
+    n = len(srt)
+    if n == 0:
+        return 0.0
+    mid = n // 2
+    return srt[mid] if n % 2 else (srt[mid - 1] + srt[mid]) / 2
+
+
+def _fine_x_subclusters(col: list, eps: float) -> list[list]:
+    """
+    把同一(粗)x 容差候選欄,依更緊的 eps 再細分成子欄。
+
+    實測這本書同一物理欄內字元的 x 中心 jitter 恆為 0,近似重複的 OCR
+    pass 之間的 x 偏移則落在 0.3~0.5px 一帶——遠小於粗欄容差(tol,約
+    一個字寬的 0.3 倍),才會被粗欄誤併,但用更緊的 eps 通常還是能把
+    這種近似重複 pass 分開。分不開的(x 完全相同,是同一位置的替代讀
+    值,不是位移的重複 pass)留給 _collapse_duplicate_slots 處理。
+    """
+    srt = sorted(col, key=lambda l: (l["bbox"][0] + l["bbox"][2]) / 2)
+    subclusters: list[list] = []
+    prev_xc = None
+    for l in srt:
+        xc = (l["bbox"][0] + l["bbox"][2]) / 2
+        if prev_xc is not None and abs(xc - prev_xc) <= eps:
+            subclusters[-1].append(l)
+        else:
+            subclusters.append([l])
+        prev_xc = xc
+    return subclusters
+
+
+def _collapse_duplicate_slots(lines: list, pitch: float, frac: float = 0.5) -> list:
+    """
+    同一細分子欄內,依 y0 排序後,若連續兩個字元的 y0 間距遠小於一般
+    行高(代表兩者其實是同一個視覺位置的替代讀值——OCR 對同一個字元
+    給出的另一次判讀,不是相鄰的下一個字元),只保留先出現的一份,
+    避免同一位置的多份候選都進最終輸出造成局部逐字交錯或重影。
+    真正相鄰的兩個不同字元,y0 間距近似一個字高(pitch),遠大於這裡
+    的門檻,不受影響。
+    """
+    srt = sorted(lines, key=lambda l: l["bbox"][1])
+    if not srt:
+        return []
+    kept = [srt[0]]
+    for l in srt[1:]:
+        if l["bbox"][1] - kept[-1]["bbox"][1] < pitch * frac:
+            continue  # 同一位置的重複讀值,捨棄
+        kept.append(l)
+    return kept
+
+
+def _merge_or_keep_subcluster_texts(subclusters: list[list], threshold: float = 0.6) -> list[str]:
+    """
+    同一候選欄細分出的多個子欄,若還原後的文字內容高度相似(difflib
+    ratio 超過 threshold),視為同一段落被重複 OCR 兩次以上,只保留
+    字數較多(通常代表較完整)的那份;文字差異大則視為兩個真的不同的
+    物理欄剛好共用相近的 x 中心,原樣保留,依起始 y 排序個別輸出。
+    """
+    texts_by_y = []
+    for sc in subclusters:
+        text = "".join(span["text"] for l in sc for span in l["spans"])
+        if not text.strip():
+            continue
+        texts_by_y.append((min(l["bbox"][1] for l in sc), text))
+    texts_by_y.sort(key=lambda t: t[0])
+
+    kept: list[str] = []
+    for _y0, text in texts_by_y:
+        merged = False
+        for i, existing in enumerate(kept):
+            ratio = difflib.SequenceMatcher(None, text, existing).ratio()
+            if ratio > threshold:
+                if len(text) > len(existing):
+                    kept[i] = text
+                merged = True
+                break
+        if not merged:
+            kept.append(text)
+    return kept
+
+
 def _analyze_page(page) -> tuple[str, bool]:
     """
     回傳(該頁文字, 是否為直排頁)。
@@ -281,8 +364,20 @@ def _analyze_page(page) -> tuple[str, bool]:
     注意:不能假設 PyMuPDF 的 line 本身就是「一欄」——真實排版/掃描 PDF
     常把直排的每個字各自拆成獨立 line(bbox 極窄、x 中心幾乎相同),此時
     若逐 line 換行輸出就會變成一字一行。這裡先依 x 中心把排序後相鄰的
-    line 分組成同一直欄,欄內文字直接串接(不加空白),只在欄與欄交界
-    (x 中心跳變)時才換行。
+    line 分組成同一直欄候選(粗容差 tol)。
+
+    部分 OCR PDF 還會把同一段落用近似重複的 OCR pass 多寫一次,重複
+    pass 的 bbox 有些微 x 偏移(實測約 0.3~0.5px),剛好落在粗容差 tol
+    內,若直接對整欄按 y 排序輸出,兩份 pass 的字元會逐字交錯,比一字
+    一行更難讀。因此候選欄還要:
+      1. 用更緊的 eps 再細分子欄(_fine_x_subclusters)——能靠 x 偏移分開
+         的重複 pass,這步就分開了;
+      2. 子欄內依 y0 間距把「同一視覺位置的替代讀值」(x 也完全相同、
+         只是 OCR 判讀分歧)收斂成一份(_collapse_duplicate_slots);
+      3. 子欄還原後的文字若高度相似,視為同一段落的重複 pass 只留較完
+         整的一份;文字不相似則視為兩個真的不同的物理欄(_merge_or_keep_
+         subcluster_texts)。
+    欄內文字直接串接(不加空白),只在欄界或子欄邊界才換行。
     """
     d = page.get_text("dict")
     lines = []
@@ -342,10 +437,22 @@ def _analyze_page(page) -> tuple[str, bool]:
             columns.append([l])
         prev_xc = xc
 
-    parts = [
-        "".join(span["text"] for l in col for span in l["spans"])
-        for col in columns
-    ]
+    # 細分子欄容差:實測同一物理欄字元 x 中心 jitter 恆為 0,近似重複
+    # pass 的 x 偏移落在 0.3~0.5px 一帶——用比粗容差 tol 緊很多的 eps
+    # (tol 的一小段,並夾在 [0.2, 1.0] 之間)才分得開,又不會誤傷真正
+    # 同欄、x 中心理應完全一致的字元。
+    fine_eps = min(1.0, max(0.2, tol * 0.06))
+
+    parts = []
+    for col in columns:
+        heights = [l["bbox"][3] - l["bbox"][1] for l in col if l["bbox"][3] > l["bbox"][1]]
+        pitch = _median(heights) if heights else 13.0
+        subclusters = [
+            _collapse_duplicate_slots(sc, pitch)
+            for sc in _fine_x_subclusters(col, fine_eps)
+        ]
+        parts.extend(_merge_or_keep_subcluster_texts(subclusters))
+
     text = "\n".join(p for p in parts if p.strip())
     return text, True
 
