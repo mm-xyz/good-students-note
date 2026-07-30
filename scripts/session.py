@@ -680,30 +680,35 @@ def new_session(args):
                     images_stats = {"engine": engine, "status": "pending_agent_handoff",
                                     "marker_file": mi.name, **fig_stats}
 
-                    mii = sdir / ".image_insert_pending.json"
-                    mii.write_text(json.dumps({
-                        "stage": "image-insert",
-                        "engine": engine,
-                        "input_file": str(cleaned_md.relative_to(PROJECT_ROOT)),
-                        "rules_ref": "prompts/publish_qaqc.md § S4.5.11",
-                        "tool": "scripts/insert_images.py",
-                        "depends_on": "images 完成(image_notes.json 全數 described)",
-                        "instructions": (
-                            f"自動插圖待 {engine} agent 接手。先確認 .images_pending.json 已清。"
-                            "流程:(1) `dedupe_images.py --report`(§ S4.5.12)確認後 `--apply` 去重;"
-                            "(2) `insert_images.py --plan` 取內容行清單;"
-                            "(3) `propose_anchors.py --session <dir>`(純 py 文字比對+單調 DP,零 LLM)"
-                            "產出 anchors_proposed.json;(3b) 開 Claude Haiku subagent(本 stage 規範"
-                            "執行者,勿用更大模型)只複核 needs_llm_review=true 的條目(§ S4.5.11)。"
-                            "(4) `insert_images.py --apply --anchors <json>`(零省略+單調約束,fail 即 rollback);"
-                            "(5) `insert_images.py --verify` 過 → 刪本 marker;"
-                            "needs_review 清單向使用者回報複核。"),
-                        "created_at": dt.datetime.now().isoformat(timespec="seconds"),
-                    }, ensure_ascii=False, indent=2), encoding="utf-8")
-                    print(f"[session] 自動插圖待 {engine} agent 接手: "
-                          f"{mii.relative_to(PROJECT_ROOT)}")
-                    image_insert_stats = {"engine": engine, "status": "pending_agent_handoff",
-                                          "marker_file": mii.name}
+                    # --stop-at images 守門(跟音檔線 --images 分支的既有寫法一致,
+                    # 見上方「7.4 圖片理解」的 `if args.stop_at != "images":`):
+                    # 使用者明確要求停在 images,就只寫 describe marker,不寫 insert marker,
+                    # 否則「兩個 marker 都寫了」跟輸出宣稱的 stopped-at 矛盾。
+                    if args.stop_at != "images":
+                        mii = sdir / ".image_insert_pending.json"
+                        mii.write_text(json.dumps({
+                            "stage": "image-insert",
+                            "engine": engine,
+                            "input_file": str(cleaned_md.relative_to(PROJECT_ROOT)),
+                            "rules_ref": "prompts/publish_qaqc.md § S4.5.11",
+                            "tool": "scripts/insert_images.py",
+                            "depends_on": "images 完成(image_notes.json 全數 described)",
+                            "instructions": (
+                                f"自動插圖待 {engine} agent 接手。先確認 .images_pending.json 已清。"
+                                "流程:(1) `dedupe_images.py --report`(§ S4.5.12)確認後 `--apply` 去重;"
+                                "(2) `insert_images.py --plan` 取內容行清單;"
+                                "(3) `propose_anchors.py --session <dir>`(純 py 文字比對+單調 DP,零 LLM)"
+                                "產出 anchors_proposed.json;(3b) 開 Claude Haiku subagent(本 stage 規範"
+                                "執行者,勿用更大模型)只複核 needs_llm_review=true 的條目(§ S4.5.11)。"
+                                "(4) `insert_images.py --apply --anchors <json>`(零省略+單調約束,fail 即 rollback);"
+                                "(5) `insert_images.py --verify` 過 → 刪本 marker;"
+                                "needs_review 清單向使用者回報複核。"),
+                            "created_at": dt.datetime.now().isoformat(timespec="seconds"),
+                        }, ensure_ascii=False, indent=2), encoding="utf-8")
+                        print(f"[session] 自動插圖待 {engine} agent 接手: "
+                              f"{mii.relative_to(PROJECT_ROOT)}")
+                        image_insert_stats = {"engine": engine, "status": "pending_agent_handoff",
+                                              "marker_file": mii.name}
                 else:
                     print(f"[session] engine={engine}: 圖片描述/插圖需對話 agent"
                           "(Haiku anchors),已渲染圖表但未寫 marker;出版前 gate "

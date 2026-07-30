@@ -165,6 +165,9 @@ def test_txt_input_produces_cleaned_md_and_skips_asr_stages(tmp_path: Path):
 
 
 def test_vlm_flag_renders_figures_and_writes_image_markers(tmp_path: Path):
+    """跑到底(--stop-at phase-b,非 images)時兩個 marker 都該寫。
+    對照組見 test_vlm_stop_at_images_gate_only_writes_describe_marker:
+    --stop-at images 時只該寫 describe marker,不寫 insert marker。"""
     stem = "docline_smoke_vlm"
     pdf_path = tmp_path / f"{stem}.pdf"
     make_pdf_with_image(
@@ -206,6 +209,48 @@ def test_vlm_flag_renders_figures_and_writes_image_markers(tmp_path: Path):
         meta = json.loads((sdir / "metadata.json").read_text(encoding="utf-8"))
         assert meta["qaqc"]["images"]["status"] == "pending_agent_handoff"
         assert meta["qaqc"]["image_insert"]["status"] == "pending_agent_handoff"
+    finally:
+        _cleanup(slug)
+
+
+# ── 3b. --vlm + --stop-at images 守門:只寫 describe marker,不寫 insert marker ──
+# (回歸鎖:對抗性驗收 Major — 原本 --vlm 分支漏了跟音檔線 --images 分支一致的
+# `if args.stop_at != "images":` 守門,導致 --stop-at images 卻仍寫出
+# .image_insert_pending.json,跟輸出宣稱的 stopped-at 矛盾)
+
+
+def test_vlm_stop_at_images_gate_only_writes_describe_marker(tmp_path: Path):
+    stem = "docline_smoke_vlm_gate"
+    pdf_path = tmp_path / f"{stem}.pdf"
+    make_pdf_with_image(
+        pdf_path,
+        title="測試標題含圖守門",
+        body="這是一段測試內文，用來確認 --stop-at images 對 --vlm 分支同樣生效。" * 2,
+    )
+
+    slug = _slug_for(stem)
+    _cleanup(slug)
+    try:
+        proc = run_session_new(
+            pdf_path, "--vlm", "--stop-at", "images", "--engine", "claude")
+        assert proc.returncode == 0, proc.stderr
+        assert "stopped at: images" in proc.stdout
+
+        sdir = SESSIONS_DIR / slug
+        assert (sdir / "images").is_dir()
+        assert list((sdir / "images").glob("*.png")), \
+            "figures.py 仍應渲染圖(--stop-at images 只擋 insert marker,不擋 figures)"
+
+        assert (sdir / ".images_pending.json").exists(), \
+            "describe marker 應該寫(images 是使用者要求的終點)"
+        assert not (sdir / ".image_insert_pending.json").exists(), \
+            "--stop-at images 時不該寫 insert marker(gate 沒生效)"
+
+        meta = json.loads((sdir / "metadata.json").read_text(encoding="utf-8"))
+        assert meta["stop_at"] == "images"
+        assert meta["qaqc"]["images"]["status"] == "pending_agent_handoff"
+        assert meta["qaqc"]["image_insert"] is None, \
+            "image_insert 應維持初始值 None(--stop-at images 未觸發該 stage)"
     finally:
         _cleanup(slug)
 
