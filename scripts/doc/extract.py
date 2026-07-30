@@ -27,6 +27,10 @@ stdout 印一行 JSON stats:{"input_type","chars","sections","lang","vertical_pa
 該頁視為「直排頁」,重排順序= 欄序右→左、欄內上→下(傳統中文直排讀序),
 不採用 PyMuPDF 預設依插入順序輸出的橫排邏輯(那套順序在直排頁上會錯亂)。
 無法完美重排的極端版式,至少會被計入 stats.vertical_pages,不會靜默吐錯亂文字。
+真實掃描/排版 PDF 常把直排的「每個字」各自拆成獨立的 text line(bbox 極窄、
+x 中心幾乎相同),不是一整欄一個 line;因此重排後還要把 x 中心相近的連續
+line 接成同一直欄的連續字串(中日文字間不加空白),只有欄與欄交界處才換行,
+否則會變成一字一行不能讀。
 """
 
 from __future__ import annotations
@@ -272,8 +276,13 @@ def _analyze_page(page) -> tuple[str, bool]:
     回傳(該頁文字, 是否為直排頁)。
     直排頁的判定:get_text('dict') 抽出的 text line 中,'dir' 向量 y 分量
     dominant(abs(dy) > abs(dx))的行數超過半數。
-    直排頁的重排順序 = 欄序右→左(bbox x 中心由大到小)、欄內依 span 原序
-    (PyMuPDF 對垂直書寫模式的 line 本身已經是「一欄」,span 順序即欄內讀序)。
+    直排頁的重排順序 = 欄序右→左(bbox x 中心由大到小)、欄內由上而下。
+
+    注意:不能假設 PyMuPDF 的 line 本身就是「一欄」——真實排版/掃描 PDF
+    常把直排的每個字各自拆成獨立 line(bbox 極窄、x 中心幾乎相同),此時
+    若逐 line 換行輸出就會變成一字一行。這裡先依 x 中心把排序後相鄰的
+    line 分組成同一直欄,欄內文字直接串接(不加空白),只在欄與欄交界
+    (x 中心跳變)時才換行。
     """
     d = page.get_text("dict")
     lines = []
@@ -295,8 +304,48 @@ def _analyze_page(page) -> tuple[str, bool]:
         x0, _y0, x1, _y1 = l["bbox"]
         return (x0 + x1) / 2
 
-    ordered = sorted(lines, key=lambda l: (-x_center(l), l["bbox"][1]))
-    parts = ["".join(span["text"] for span in l["spans"]) for l in ordered]
+    def line_width(l):
+        x0, _y0, x1, _y1 = l["bbox"]
+        return x1 - x0
+
+    # 部分掃描/OCR 直排 PDF(例如 OCR 產生的隱藏搜尋文字層)會把同一個字元
+    # 以完全相同的 bbox 座標重複輸出兩次(同一 render 動作被寫入兩遍),
+    # 不去重的話,兩個重複 line 排序後會緊鄰,join 後變成「用用本本命命」
+    # 這種逐字重影。兩個不同字元不可能佔用完全相同的 bbox,所以 bbox+文字
+    # 皆相同即可判定為重複發射,只保留第一份。
+    seen: set[tuple] = set()
+    deduped = []
+    for l in lines:
+        x0, y0, x1, y1 = l["bbox"]
+        text = "".join(span["text"] for span in l["spans"])
+        key = (round(x0, 1), round(y0, 1), round(x1, 1), round(y1, 1), text)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(l)
+
+    ordered = sorted(deduped, key=lambda l: (-x_center(l), l["bbox"][1]))
+
+    # 欄界容許誤差:依本頁字元寬度動態抓,同一直欄內字元的 x 中心通常只有
+    # 不到 1px 的浮動,欄與欄之間至少差一個字寬以上,用 0.3 倍平均字寬當
+    # 門檻足以分辨,不會誤併相鄰欄、也不會被字級不同的書弄錯。
+    widths = [line_width(l) for l in ordered if line_width(l) > 0]
+    tol = max(2.0, (sum(widths) / len(widths)) * 0.3) if widths else 3.0
+
+    columns: list[list] = []
+    prev_xc = None
+    for l in ordered:
+        xc = x_center(l)
+        if prev_xc is not None and abs(xc - prev_xc) <= tol:
+            columns[-1].append(l)
+        else:
+            columns.append([l])
+        prev_xc = xc
+
+    parts = [
+        "".join(span["text"] for l in col for span in l["spans"])
+        for col in columns
+    ]
     text = "\n".join(p for p in parts if p.strip())
     return text, True
 

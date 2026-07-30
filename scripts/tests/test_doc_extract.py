@@ -290,6 +290,54 @@ class TestPdfExtraction(unittest.TestCase):
         stats = json.loads(stdout.strip().splitlines()[-1])
         self.assertEqual(stats["vertical_pages"], 1)
 
+    def test_pdf_vertical_text_reassembles_per_character_lines(self):
+        """
+        真書重現(#615):insert_textbox(rotate=270) 那種 fixture 會被 PyMuPDF
+        自動把整欄合併成一個 line,測不到「一字一行」這個真書才會現形的
+        bug。真實排版/掃描 PDF 常把直排的每個字各自拆成獨立 line(bbox 極
+        窄、x 中心幾乎相同、dir 仍是垂直的 (0, ±1))——這裡用 fitz.TextWriter
+        搭配 90 度旋轉 morph 逐字元各自 write_text,重現這種「每字一個
+        line」的真實情境,斷言修 bug 後同一直欄的字元會接成連續字串,不再
+        被逐字拆成一字一行。
+        """
+        src = self.tmp / "vertical_percall.pdf"
+        doc = fitz.open()
+        page = doc.new_page(width=300, height=400)
+
+        def write_vertical_char(x, y, ch, fontsize=18):
+            tw = fitz.TextWriter(page.rect)
+            tw.append((x, y), ch, fontsize=fontsize, font=fitz.Font("china-s"))
+            tw.write_text(page, morph=(fitz.Point(x, y), fitz.Matrix(90)))
+
+        # 右欄「天地玄黄」、左欄「宇宙洪荒」,每個字各自呼叫一次
+        # write_vertical_char,y 遞增模擬直排由上到下、右欄 x 大於左欄 x
+        # 模擬欄序右到左——完全比照真書 PDF 逐字各自一個 line 的結構。
+        y = 30
+        for ch in "天地玄黄":
+            write_vertical_char(260, y, ch)
+            y += 20
+        y = 30
+        for ch in "宇宙洪荒":
+            write_vertical_char(230, y, ch)
+            y += 20
+
+        doc.save(str(src))
+        doc.close()
+
+        out = self.tmp / "vertical_percall.md"
+        rc, stdout, stderr = run_cli(src, out)
+        self.assertEqual(rc, 0, msg=stderr)
+        content = out.read_text(encoding="utf-8")
+
+        # 核心斷言:同一直欄的字元接成連續字串。修 bug 前這裡會變成
+        # 「天\n地\n玄\n黄」一字一行,以下兩個 assertIn 都會失敗。
+        # (簡→繁轉換會把「黄」轉成「黃」,故用繁體字斷言。)
+        self.assertIn("天地玄黃", content)
+        self.assertIn("宇宙洪荒", content)
+
+        stats = json.loads(stdout.strip().splitlines()[-1])
+        self.assertEqual(stats["vertical_pages"], 1)
+
     def test_pdf_dehyphenation_removes_line_break_hyphen(self):
         src = self.tmp / "hyphen.pdf"
         doc = fitz.open()
