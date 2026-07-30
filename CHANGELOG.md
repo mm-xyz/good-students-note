@@ -2,6 +2,24 @@
 
 > 剪輯線（feat/podcast-cut）的功能史。決策的「為什麼」住 `docs/adr/`，這裡只記「什麼時候做了什麼」。
 
+## 2026-07-30
+
+- **音訊剪輯線補上全套回歸測試（新增 130 tests，行為鎖定）**：MM 拍板「把現在所有
+  的行為都補上 test，不想每次回來處理被改壞的問題」。新增 `scripts/tests/`
+  六份：`test_srt_utils`（斷句核心 split_words_to_phrases 的標點/停頓切點＋
+  零長度 artifact 併組、join_words 英數補空格、SRT roundtrip）、`test_cutplan`
+  （merge_gap=0 一 cue 一 block、G 列門檻、refine_gaps 合成 wav burst 拆分、
+  prepare e2e 三產物）、`test_resegment_migrate`（短句重切首尾沿用原 cue 邊界、
+  備份不覆蓋、刪除線字元流對齊移植/跨 block 拆/寧缺勿錯丟棄）、
+  `test_diarize_align`（換手切開、英文字 junction 併回、from-tracks/apply-map
+  e2e）、`test_render_cut`（防幻覺驗證五 FAIL 路徑、剪距運算全函式、BGM 包絡
+  keypoints、⚙ config 覆蓋、dry-run e2e）、`test_copy_prompt_build`（cut_map
+  時間換算、🎬 排除、同講者合併）＋ `test_prosody`（zscore 分軌正規化）。
+  `run_all.sh` 一鍵全跑（test_prosody 自動用 .venv-audio）；模型呼叫與 ffmpeg
+  出片不在範圍。CLAUDE.md 新增「改 scripts/audio/ 改完必跑」規則。
+  坑：合成 wav 不能全靜音——谷底偵測在零能量下漂進相鄰字、word_guard 外推
+  會把字級精剪 merge 回去,fixture 要在字界留 20ms 靜音縫才是真實剪點形狀。
+
 ## 2026-07-29
 
 - **cutplan 斷句粒度改 EP15 式短句**（MM 拍板，SPEC：`docs/design/

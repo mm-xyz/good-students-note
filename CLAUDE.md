@@ -232,6 +232,18 @@ Phase A/B/C/D 都在精修同一份 cleaned.md(A/B 產出、C/D 出版前強制�
 - **`qaqc_phase_b.py`**: Gemini-powered Phase B(支援 merged 與 structured 兩模式)
 - **`lang/`**: 多語系轉錄/清理腳本(見 `scripts/lang/README.md`)。目前有 `it/`(義大利文,歷史參考)、`en/`(英文)、`ja/`(日文);跨語系格式工具(`srt_clean_md.py`、`vtt_to_txt.py`)放 `lang/` 根
 
+### 回歸測試 (`/scripts/tests`)
+
+音訊剪輯線的行為鎖定測試(characterization,2026-07-30 起)。**改 `scripts/audio/` 任何檔案,改完必跑**:
+
+```bash
+bash scripts/tests/run_all.sh
+```
+
+- 每份 `test_*.py` 皆可獨立直接執行(unittest,零 pytest 依賴);`test_prosody.py` 的 numpy 測試主環境自動 skip,runner 會用 `.venv-audio` 跑該檔
+- 涵蓋:`srt_utils`(斷句/時間碼/SRT roundtrip)、`cutplan`(block/G 列/burst/prepare e2e)、`resegment_srt`+`migrate_marks`(phrase-level 改版兩工具)、`diarize` 零模型路徑(換手切開/from-tracks/apply-map)、`render_cut`(防幻覺驗證/剪距運算/BGM 包絡/dry-run e2e)、`copy_prompt_build`、`prosody` 確定性部分
+- **不在範圍**:ASR/pyannote/librosa 模型呼叫、ffmpeg 實際出片(外部依賴,靠每集實跑把關)
+
 ### SRT Component (`/SRT`)
 
 - **`transcribe.py`**: Standalone Python transcription tool (interactive mode)
