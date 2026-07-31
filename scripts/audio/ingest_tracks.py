@@ -138,8 +138,11 @@ def energy_vad(wav_path: Path, speaker: str, silence_db: float = -40.0,
     """單軌能量 VAD:短窗 RMS(dBFS)超過門檻=在講話。純 stdlib。
 
     每窗只 subsample 最多 VAD_STRIDE_SAMPLES 點算 RMS(參考 render_cut.py
-    refine_boundaries 的短窗讀法),長音檔也跑得動。相鄰 speech 段間隔
-    < min_gap 合併;短於 min_speech 的段丟棄。回傳 diarize 相容 turns。
+    refine_boundaries 的短窗讀法),長音檔也跑得動。subsample 以 frame 對齊
+    (每個取樣點=一整個 frame 的全部聲道)— stride 若以 sample 為單位,
+    立體聲軌遇偶數 stride 會固定採同一聲道,訊號在另一聲道就整段漏判
+    (卡 #572);mono 時 frame=sample,行為與舊版逐 byte 相同。相鄰 speech
+    段間隔 < min_gap 合併;短於 min_speech 的段丟棄。回傳 diarize 相容 turns。
     """
     with wave.open(str(wav_path), "rb") as wf:
         sr = wf.getframerate()
@@ -148,6 +151,9 @@ def energy_vad(wav_path: Path, speaker: str, silence_db: float = -40.0,
         n_total = wf.getnframes()
         full_scale = float(2 ** (8 * sw - 1))
         win_frames = max(1, int(VAD_WIN_SECS * sr))
+        frame_bytes = sw * nch
+        # frame 為單位的 stride:每窗取 ~VAD_STRIDE_SAMPLES/nch 個 frame,
+        # 每 frame 讀全部 nch 點 → 總點數仍 ≤ VAD_STRIDE_SAMPLES,成本不變
         stride = max(1, (win_frames * nch) // VAD_STRIDE_SAMPLES)
 
         spans: list[list[float]] = []   # [start, end) of active windows
@@ -157,10 +163,12 @@ def energy_vad(wav_path: Path, speaker: str, silence_db: float = -40.0,
             if not buf:
                 break
             acc, cnt = 0.0, 0
-            for off in range(0, len(buf) - sw + 1, stride * sw):
-                v = int.from_bytes(buf[off:off + sw], "little", signed=True)
-                acc += v * v
-                cnt += 1
+            for base in range(0, len(buf) - frame_bytes + 1, stride * frame_bytes):
+                for c in range(nch):
+                    off = base + c * sw
+                    v = int.from_bytes(buf[off:off + sw], "little", signed=True)
+                    acc += v * v
+                    cnt += 1
             rms = math.sqrt(acc / cnt) / full_scale if cnt else 0.0
             db = 20 * math.log10(rms) if rms > 0 else -120.0
             if db >= silence_db:
