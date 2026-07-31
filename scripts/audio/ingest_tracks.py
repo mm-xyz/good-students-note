@@ -21,7 +21,8 @@ Flow(ADR 0003 進料端三步):
 
 已存在 source.wav / audio16k.wav / speakers.json 時要 --force 才覆蓋。
 產物皆落 sessions/<slug>/,不進版控(sessions/ 已 gitignore)。
-session.py wiring 是 follow-up,本腳本先可獨立手跑。
+session.py 已接線(卡 #572):`session.py new sessions/<slug>` 偵測 tracks/
+自動先跑本腳本,再用 mixdown 的 source.wav 走同一條 pipeline;本腳本仍可獨立手跑。
 """
 
 import argparse

@@ -12,6 +12,13 @@ Session 容器把所有產物與輸入都綁在 sessions/<slug>/,避免汙染專
         [--skip-phase-b]     # 僅跑到 Phase A,產出 cleaned.srt 不產 cleaned.md
         [--structured-srt]   # 另外產一份 transcript.cleaned.srt(結構保留型校稿)
 
+    # 多軌(ADR 0003,卡 #572):輸入改成「已備好 tracks/ 的 session 目錄」——
+    # 先跑 ingest_tracks(驗證+mixdown+每軌 VAD → ground-truth speakers.json),
+    # 再用 mixdown 的 source.wav 走同一條 pipeline;--diarize/--cut 的 diarize
+    # stage 偵測到 ingest 版 speakers.json 自動改走 --from-tracks(零 pyannote)
+    python3 scripts/session.py new sessions/<slug> --cut ...
+    #   (目錄慣例 sessions/<slug>/tracks/<Speaker>.wav)
+
 Flow:
     1. Build slug YYYY-MM-DD_<sanitized-filename>, mkdir sessions/<slug>/
     2. symlink audio → source.<ext>; write context.txt (and metadata.json skeleton)
@@ -42,6 +49,7 @@ NORMALIZE_SCRIPT = PROJECT_ROOT / "scripts/normalize_punctuation.py"
 
 # 音訊分析線(diarize/prosody/cut)— 重依賴隔離在 .venv-audio(見 requirements-audio.txt)
 AUDIO_VENV = PROJECT_ROOT / ".venv-audio/bin/python"
+INGEST_SCRIPT = PROJECT_ROOT / "scripts/audio/ingest_tracks.py"   # 純 stdlib+ffmpeg
 DIARIZE_SCRIPT = PROJECT_ROOT / "scripts/audio/diarize.py"
 PROSODY_SCRIPT = PROJECT_ROOT / "scripts/audio/prosody.py"
 CUTPLAN_SCRIPT = PROJECT_ROOT / "scripts/audio/cutplan.py"
@@ -118,6 +126,21 @@ def resolve_context(ctx: str | None) -> str:
     return ctx
 
 
+# ─── Multitrack(ADR 0003)───
+
+def ingest_ground_truth(session_dir: Path) -> bool:
+    """speakers.json 是否為 ingest_tracks.py 產的 ground truth(source=tracks)。
+    是的話 diarize stage 走 --from-tracks 對齊,不跑 pyannote(卡 #572)。"""
+    sj = session_dir / "speakers.json"
+    if not sj.exists():
+        return False
+    try:
+        data = json.loads(sj.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return False
+    return isinstance(data, dict) and data.get("source") == "tracks"
+
+
 # ─── Char metrics ───
 
 def count_chars(text: str) -> dict:
@@ -166,27 +189,56 @@ def new_session(args):
         print(f"Audio not found: {audio}", file=sys.stderr)
         sys.exit(1)
 
-    SESSIONS_DIR.mkdir(exist_ok=True)
-    slug = build_slug(audio)
-    sdir = SESSIONS_DIR / slug
-    if sdir.exists():
-        # If the session already exists, we do NOT overwrite its products; bail.
-        print(f"Session already exists: {sdir}", file=sys.stderr)
-        print("Remove it first or pick a different date.", file=sys.stderr)
-        sys.exit(2)
-    sdir.mkdir()
+    multitrack = audio.is_dir()
+    if multitrack:
+        # 多軌模式(ADR 0003 進料端,卡 #572):輸入=已備好 tracks/ 的 session 目錄。
+        # 先跑 ingest(驗證+mixdown+每軌 VAD → ground-truth speakers.json),
+        # 之後用 mixdown 的 source.wav 走同一條 pipeline(不 fork 流程)。
+        sdir = audio
+        slug = sdir.name
+        if not (sdir / "tracks").is_dir():
+            print(f"目錄輸入需含 tracks/(多軌慣例 sessions/<slug>/tracks/"
+                  f"<Speaker>.wav): {sdir}", file=sys.stderr)
+            sys.exit(1)
+        if (sdir / "transcript.srt").exists():
+            # 與單檔模式「session 已存在就 bail」同一條不覆蓋原則
+            print(f"Session already processed (transcript.srt exists): {sdir}",
+                  file=sys.stderr)
+            print("Remove its products first or pick a different session.",
+                  file=sys.stderr)
+            sys.exit(2)
+        print(f"[session] multitrack: 偵測到 tracks/,先跑 ingest(ADR 0003)")
+        try:
+            run(["python3", str(INGEST_SCRIPT), "--session", str(sdir)])
+        except subprocess.CalledProcessError:
+            print("[session] ingest_tracks 失敗(訊息見上)。既有 ingest 產物要"
+                  "重做請先手動跑 ingest_tracks.py --force。", file=sys.stderr)
+            sys.exit(3)
+        # 1. mixdown 產物就是後續唯一音源(轉錄/diarize/prosody 照舊吃這兩檔)
+        ext = ".wav"
+        src_link = sdir / "source.wav"
+    else:
+        SESSIONS_DIR.mkdir(exist_ok=True)
+        slug = build_slug(audio)
+        sdir = SESSIONS_DIR / slug
+        if sdir.exists():
+            # If the session already exists, we do NOT overwrite its products; bail.
+            print(f"Session already exists: {sdir}", file=sys.stderr)
+            print("Remove it first or pick a different date.", file=sys.stderr)
+            sys.exit(2)
+        sdir.mkdir()
 
-    print(f"[session] created: {sdir}")
+        print(f"[session] created: {sdir}")
 
-    # 1. symlink audio
-    ext = audio.suffix
-    src_link = sdir / f"source{ext}"
-    try:
-        os.symlink(audio, src_link)
-    except OSError:
-        # Fallback to copy on filesystems that can't symlink
-        import shutil
-        shutil.copy2(audio, src_link)
+        # 1. symlink audio
+        ext = audio.suffix
+        src_link = sdir / f"source{ext}"
+        try:
+            os.symlink(audio, src_link)
+        except OSError:
+            # Fallback to copy on filesystems that can't symlink
+            import shutil
+            shutil.copy2(audio, src_link)
 
     # 2. context.txt
     ctx_text = resolve_context(args.context)
@@ -198,8 +250,10 @@ def new_session(args):
     # 3. Metadata skeleton
     meta = {
         "session_id": slug,
-        "source_audio": audio.name,
-        "source_size_bytes": audio.stat().st_size,
+        "source_audio": src_link.name if multitrack else audio.name,
+        "source_size_bytes": (src_link.stat().st_size if multitrack
+                              else audio.stat().st_size),
+        "multitrack": multitrack,
         "created_at": dt.date.today().isoformat(),
         "domain_candidate": args.domain,
         "identity": args.identity,
@@ -281,14 +335,27 @@ def new_session(args):
     want_prosody = args.prosody or args.cut
     if want_diarize or want_prosody:
         audio_stats = {}
-        if not AUDIO_VENV.exists():
+        # 多軌:ingest 已產 ground-truth speakers.json(source=tracks)→ diarize
+        # 改走 --from-tracks 對齊(零模型、任何 python 可跑),不碰 pyannote/.venv
+        from_tracks = want_diarize and ingest_ground_truth(sdir)
+        if from_tracks:
+            try:
+                run(["python3", str(DIARIZE_SCRIPT), "--session", str(sdir),
+                     "--from-tracks"])
+                audio_stats["diarize"] = "done_from_tracks"
+            except subprocess.CalledProcessError as e:
+                print(f"[session] diarize --from-tracks failed: {e} — 續跑其餘 "
+                      f"pipeline", file=sys.stderr)
+                audio_stats["diarize"] = {"status": "error", "error": str(e)}
+        need_venv = (want_diarize and not from_tracks) or want_prosody or args.cut
+        if need_venv and not AUDIO_VENV.exists():
             print("[session] ⚠ .venv-audio 不存在,音訊分析線(diarize/prosody/cut)跳過。"
                   "安裝:\n  python3.13 -m venv .venv-audio && "
                   ".venv-audio/bin/pip install -r requirements-audio.txt",
                   file=sys.stderr)
             audio_stats["status"] = "skipped_no_venv"
-        else:
-            if want_diarize:
+        elif need_venv:
+            if want_diarize and not from_tracks:
                 cmd = [str(AUDIO_VENV), str(DIARIZE_SCRIPT), "--session", str(sdir)]
                 if args.num_speakers:
                     cmd += ["--num-speakers", str(args.num_speakers)]
@@ -763,7 +830,10 @@ def main():
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     new = sub.add_parser("new", help="Create & run a new session")
-    new.add_argument("audio", help="Path to audio/video file")
+    new.add_argument("audio",
+                     help="Path to audio/video file;或已備好 tracks/<Speaker>.wav "
+                          "的 session 目錄(多軌模式:先 ingest 再走同一條 pipeline,"
+                          "ADR 0003)")
     new.add_argument("--context", help="Context: a string OR a path to a .txt file")
     new.add_argument("--domain", help="Typo dict domain overlay, e.g. parenting")
     new.add_argument("--identity",

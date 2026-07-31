@@ -71,7 +71,9 @@ class SessionWiringBase(unittest.TestCase):
     """monkeypatch session.run + SESSIONS_DIR,記錄指令、偽造產物。"""
 
     def setUp(self):
-        self.tmp = Path(tempfile.mkdtemp(prefix="session_wiring_"))
+        # resolve():macOS 的 tmpdir 是 /var → /private/var symlink,
+        # session.py 內部會 resolve,路徑比對要先對齊
+        self.tmp = Path(tempfile.mkdtemp(prefix="session_wiring_")).resolve()
         self.sessions = self.tmp / "sessions"
         self.sessions.mkdir()
         self.calls: list[list[str]] = []
