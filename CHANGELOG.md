@@ -2,6 +2,16 @@
 
 > 剪輯線（feat/podcast-cut）的功能史。決策的「為什麼」住 `docs/adr/`，這裡只記「什麼時候做了什麼」。
 
+## 2026-08-01
+
+- **新開知識點線 `/good-student`**（ADR 0009）：把 `cleaned.md`（或任意乾淨長文本）
+  切成概念級、好記憶的知識點——一概念一檔、300–800 字 prose、🎯 視角類比＋一句鉤＋
+  它回答的問題。切法承襲 mars-cc `astro-chunking`（domain 結構＝chunk 邊界、
+  受控 frontmatter、parent-child source 指回），記憶點承襲 Step 4 好學生筆記的
+  視角置入；**蒸餾產物，與零省略產線平行不取代**。鐵門：啟動必談切分軸/視角/
+  輸出位置（視角每次重談）、auto mode 也要先試切 5 張驗收才可批量。
+  skill 住 `.claude/skills/good-student/`，另 symlink 進 `~/.claude/skills/` 跨 repo 可用。
+
 ## 2026-07-31
 
 - **統一輸入管線:文件(PDF/EPUB/TXT)接進 `session.py new`,音檔線零改動**

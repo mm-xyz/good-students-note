@@ -229,6 +229,16 @@ Phase A/B/C/D 都在精修同一份 cleaned.md(A/B 產出、C/D 出版前強制�
 - **`SKILL.md`**: Skill 定義,使用者透過 `/good-student-notes` 呼叫
 - **`scripts/groq_transcribe.py`**: Groq Whisper 單檔轉錄(從 `.env` 讀 key,只從輸入檔同目錄讀 context.txt)
 
+### CLI Skill (`/.claude/skills/good-student`)— 知識點線(2026-08-01,ADR 0009)
+
+- 把 `cleaned.md`(或任意乾淨長文本)切成**概念級、好記憶的知識點**(一概念一檔、
+  自足可檢索、帶 🎯 視角類比＋一句鉤;RAG-ready Obsidian 知識庫)
+- **蒸餾產物,與零省略產線平行、不取代**——零省略 checklist 只管 Step 2/3/4,
+  不適用本線;反之亦然
+- 鐵門:啟動必談「切分軸/視角/輸出位置」三件事(視角每次重談);
+  auto mode 也必須**先試切 5 張、使用者驗收後才可批量**
+- 另有 symlink 進 `~/.claude/skills/`,跨 repo 可用 `/good-student` 呼叫
+
 ### Shared Scripts (`/scripts`)
 
 - **`session.py`**: Pipeline 統籌器 — `python3 scripts/session.py new <audio> [--context] [--domain] [--identity]`
@@ -363,6 +373,11 @@ python3 transcribe.py          # Interactive mode(既有互動模式)
 | **Step 4.5** | (檢查報告) | **出版前 QAQC**:確認 cleaned.md/toc.json 結構合規(SSoT: [`prompts/publish_qaqc.md § S4.5`](./prompts/publish_qaqc.md)) | 出版前驗收,避免 markdown 不支援的語法、圖檔 `<>` 包覆、漏 toc 等問題 |
 | Step 5 | `<slug>.html` + 線上網址 | **分頁式 HTML 出版稿,deploy 到 Firebase `goodedunote` 專案** | 要把筆記做成可分享的網頁 |
 | **Step 6** | (審查報告) | **出版後 QAQC**:自動 audit 三本書是否一致(`python3 scripts/publish_qaqc.py`) | 統一書架回連、data.js 完整、OG meta、視覺一致性 |
+
+> **知識點線(`/good-student`,ADR 0009)**:與上表**平行的蒸餾產線**,不在 Step 編號內——
+> 吃 Step 2 的 `cleaned.md`(或任意乾淨長文本),產概念級知識點(`atoms/` 或指定 vault,
+> 一概念一檔、300–800 字、🎯 視角類比＋一句鉤)。**零省略鐵律不適用**(它是濃縮改寫,
+> `confidence: distilled`);想長期記住、建 RAG 知識庫的人走這條。
 
 Web 的差異化定位(未來):**圖像視角好學生筆記** —— 用影像把既有筆記內容**不破壞地**
 疊上專業視角(建築師/醫學/會計/工程)的手寫風格註解,讓學習者在原文上「墊高角度」做知識串聯。
