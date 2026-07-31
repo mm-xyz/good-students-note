@@ -2,6 +2,23 @@
 
 > 剪輯線（feat/podcast-cut）的功能史。決策的「為什麼」住 `docs/adr/`，這裡只記「什麼時候做了什麼」。
 
+## 2026-07-31
+
+- **notes.py 本地筆記蒸餾（#557，取代雲端 subagent，全管線零 token）**：
+  frames 線 Stage 4 筆記蒸餾從「Claude 雲端收尾」改本地 LM Studio
+  map-reduce（`scripts/frames/notes.py`）。map＝SRT cues 沿時間錨點切段
+  （prompt＋輸入＋輸出估算 ≤ context 4096），逐段抽重點/金句候選帶時間碼；
+  機械防幻覺過濾（時間碼界內＋金句去空白 grep 回 SRT flat-text，比照
+  render_cut.validate_program）；reduce＝outline（分小節/TL;DR/挑金句，
+  候選超 context 對半分治）→ 逐小節寫內文。輸出格式逐字鎖死同現有五場
+  筆記，內建機械驗收三件（時間碼界內/金句 grep/格式 lint）不過自動重試
+  （預設 2 輪、`--retries` 可調）；`--out` 指到 compose 骨架保留「## 關鍵
+  畫面」尾段；`--unload` 跑完 lms unload 守 RAM。screen.py 的 HTTP＋JSON
+  修復/reasoning_content 保底抽進 `common.llm_chat`/`extract_json_from_message`
+  共用（urllib 免 requests，系統 python3 直接跑）。`test_notes.py` 34 tests
+  （LLM 全 mock）入 run_all.sh。SKILL.md Stage 4 改「跑 notes.py＋Claude
+  抽查插圖/停頓判讀」。
+
 ## 2026-07-30
 
 - **音訊剪輯線補上全套回歸測試（新增 130 tests，行為鎖定）**：MM 拍板「把現在所有

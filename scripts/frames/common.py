@@ -75,6 +75,49 @@ def save_manifest(slug: str, data: dict) -> None:
     tmp.replace(p)  # atomic：半夜長跑中斷不會留下壞檔
 
 
+def llm_chat(cfg: dict, messages: list, *, max_tokens: int,
+             temperature: float = 0.1, timeout: int = 600) -> dict:
+    """POST {LM_STUDIO_URL}/chat/completions（stdlib urllib，免 requests，
+    系統 python3 直接可跑）→ 回傳 choices[0].message dict。"""
+    import urllib.request
+
+    body = json.dumps({
+        "model": cfg["LM_STUDIO_MODEL"],
+        "messages": messages,
+        "temperature": temperature,
+        # reasoning 模型（如 gemma-4 QAT）思考也吃這個額度，太低會 length 截斷、
+        # content 空白 — 額度要給足，靠 extract_json_from_message 的保底兜住
+        "max_tokens": max_tokens,
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        f"{cfg['LM_STUDIO_URL']}/chat/completions", data=body, method="POST",
+        headers={"Content-Type": "application/json",
+                 "Authorization": f"Bearer {cfg.get('LM_STUDIO_TOKEN', '')}"})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read().decode("utf-8"))["choices"][0]["message"]
+
+
+def extract_json_from_message(msg: dict) -> dict:
+    """LM Studio 回應 message → JSON dict（原 screen.call_vlm 尾段抽共用）。
+    content 抓最外層 {}；content 空白時從 reasoning_content 撈最後一個 JSON
+    物件（reasoning 模型保底）；非法 \\escape 先修再 parse（模型 JSON 偶帶
+    未跳脫反斜線）。沒 JSON 就 raise ValueError。"""
+    content = msg.get("content") or ""
+    m = re.search(r"\{.*\}", content, re.DOTALL)
+    if not m:  # content 空白時退而求其次，從 reasoning_content 撈最後一個 JSON 物件
+        candidates = re.findall(r"\{[^{}]*\}", msg.get("reasoning_content") or "")
+        m = re.search(r"\{.*\}", candidates[-1], re.DOTALL) if candidates else None
+    if not m:
+        raise ValueError(f"回應裡沒有 JSON：{content[:200]}")
+    raw = m.group(0)
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        # 模型 JSON 偶帶非法 \escape（畫面文字裡的反斜線）或漏逗號——先修非法跳脫再試一次
+        repaired = re.sub(r'\\(?!["\\/bfnrtu])', r"\\\\", raw)
+        return json.loads(repaired)
+
+
 def ffprobe_duration(video: Path) -> float:
     out = subprocess.run(
         ["ffprobe", "-v", "error", "-show_entries", "format=duration",

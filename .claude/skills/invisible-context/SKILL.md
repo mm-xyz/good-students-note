@@ -1,6 +1,6 @@
 ---
 name: invisible-context
-description: 影片 → 帶截圖與停頓標注的 Obsidian 逐字稿＋筆記。場景偵測抽幀、地端 VLM（LM Studio Gemma）篩圖寫圖說、SRT 合流成時間錨點逐字稿，Claude 收尾蒸餾筆記。觸發：「把這場演講做成筆記」「影片轉筆記」「/invisible-context」，或給出影片要筆記時。2026-07-28 起併入 good-students-note（frames 線），原獨立 repo 已封存。
+description: 影片 → 帶截圖與停頓標注的 Obsidian 逐字稿＋筆記。場景偵測抽幀、地端 VLM（LM Studio Gemma）篩圖寫圖說、SRT 合流成時間錨點逐字稿，notes.py 本地 map-reduce 蒸餾筆記（零雲端 token），Claude 抽查收尾。觸發：「把這場演講做成筆記」「影片轉筆記」「/invisible-context」，或給出影片要筆記時。2026-07-28 起併入 good-students-note（frames 線），原獨立 repo 已封存。
 ---
 
 # invisible-context — 影片演講 → 看得見畫面的筆記
@@ -55,19 +55,26 @@ python3 scripts/frames/compose.py "<slug>" --course "2026_AI訂閱年會小聚"
 #   逐字稿插圖＝callout＋畫面文字全文；筆記已填內容自動跳過不覆寫（--force-note 強制）
 #   session 若跑過 --prosody：停頓標注改用真實聲學靜音、高昂段落自動標 🔥、
 #   有 transcript.speakers.srt 時段落自帶講者名（音訊線圖層，2026-07-28 併入升級）
+
+# Stage 4 notes：本地 LM Studio map-reduce 蒸餾筆記（#557，取代雲端 subagent）
+python3 scripts/frames/notes.py "<slug>" --out "<folder>_筆記.md 路徑" --unload
+#   沿 SRT 時間錨點切段抽候選→收斂成 TL;DR/小節/金句表，格式鎖死同現有五場；
+#   機械驗收三件（時間碼界內/金句 grep 防幻覺/格式 lint）不過自動重試（--retries）；
+#   --out 指到 compose 骨架會保留「## 關鍵畫面」尾段；--unload 跑完卸模型
 ```
 
 **鐵律：全程地端、零雲端 token**（MM 2026-07-27 拍板）。VLM/LLM 一律走 LM Studio；
 **每批跑完把模型從記憶體卸載**：`lms unload google/gemma-4-26b-a4b-qat`（不然 RAM 會爆）。
 影片檔案的去留由 MM 決定，管線與 Claude 都不主動刪。
 
-### Stage 4 — Claude 收尾（本 skill 的主體工作）
+### Stage 4 — notes.py 蒸餾＋Claude 抽查（2026-07-31 #557 改制）
 
-compose 產出後，Claude 依序做：
+蒸餾主體改本地 `notes.py`（LM Studio map-reduce），**不再吃雲端 token**；
+Claude 只做機器做不了的抽查：
 
-1. **抽查插圖**：Read 逐字稿裡 3–5 張插圖位置前後文，確認圖文對得上；VLM 誤留的講者幀/誤寫的圖說直接改 md（或改 manifest 重跑 compose）。
-2. **填筆記**：打開 `<folder>_筆記.md`，從逐字稿蒸餾——TL;DR、重點筆記（保留講者原始邏輯與案例，不空泛化）、金句／可剪片段候選（**必附起訖時間碼**，供剪 Podcast/Clips/Reels——剪法走同 repo 的 `--cut` 音訊線）。
-3. **停頓判讀**：逐字稿裡的 `⏸ 停頓` 標注，對照前後文判斷是「換頁/操作 demo/現場反應/講者思考」，有意義的在筆記提一句，沒意義的不提。
+1. **跑 notes.py**：`python3 scripts/frames/notes.py <slug> --out <folder>_筆記.md --unload`——TL;DR、重點筆記小節（帶起訖時間碼）、金句／可剪片段候選表自動蒸餾，內建機械驗收（時間碼界內/金句 grep 防幻覺/格式 lint）不過自動重試；compose 骨架的「## 關鍵畫面」gallery 自動保留。品質預期（MM 卡上接受）：TL;DR 較乾、「為什麼值得剪」可留短。
+2. **抽查插圖**：Read 逐字稿裡 3–5 張插圖位置前後文，確認圖文對得上；VLM 誤留的講者幀/誤寫的圖說直接改 md（或改 manifest 重跑 compose）。
+3. **停頓判讀**：逐字稿裡的 `⏸ 停頓` 標注，對照前後文判斷是「換頁/操作 demo/現場反應/講者思考」，有意義的在筆記末尾補一句 blockquote，沒意義的不提。
 4. 對外發布的衍生文字（社群貼文等）另走 `/speak-human-tw`，本 skill 不管。
 
 ## 輸出結構（Obsidian）

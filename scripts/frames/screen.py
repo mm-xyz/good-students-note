@@ -9,16 +9,13 @@
 """
 import argparse
 import base64
-import json
-import re
 import sys
 import time
 from pathlib import Path
 
-import requests
-
 sys.path.insert(0, str(Path(__file__).parent))
-from common import frames_workdir, load_config, load_manifest, save_manifest
+from common import (extract_json_from_message, frames_workdir, llm_chat,
+                    load_config, load_manifest, save_manifest)
 
 ENRICH_PROMPT = """這張畫面幀已確認要插進演講筆記。請把畫面上的文字內容**完整逐字抄錄**（不是摘要）：
 - 保留條列/欄位結構，用換行與「- 」呈現階層
@@ -36,44 +33,23 @@ PROMPT = """你在審一場繁體中文技術演講影片抽出的畫面幀，�
 
 
 def call_vlm(cfg: dict, image_path: Path, prompt: str) -> dict:
+    # HTTP 與 JSON 修復/reasoning_content 保底已抽進 common（#557），notes.py 共用文字版
     b64 = base64.b64encode(image_path.read_bytes()).decode()
-    resp = requests.post(
-        f"{cfg['LM_STUDIO_URL']}/chat/completions",
-        headers={"Authorization": f"Bearer {cfg['LM_STUDIO_TOKEN']}"},
-        json={
-            "model": cfg["LM_STUDIO_MODEL"],
-            "messages": [{
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": prompt},
-                    {"type": "image_url",
-                     "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
-                ],
-            }],
-            "temperature": 0.1,
-            # reasoning 模型（如 gemma-4 QAT）思考也吃這個額度，太低會 length 截斷、content 空白；
-            # 文字密的投影片思考會超標，預設 6000、可用 .env 的 SCREEN_MAX_TOKENS 再加大
-            "max_tokens": int(cfg.get("SCREEN_MAX_TOKENS", "6000")),
-        },
-        timeout=600,
+    msg = llm_chat(
+        cfg,
+        [{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": prompt},
+                {"type": "image_url",
+                 "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
+            ],
+        }],
+        # reasoning 模型（如 gemma-4 QAT）思考也吃這個額度，太低會 length 截斷、content 空白；
+        # 文字密的投影片思考會超標，預設 6000、可用 .env 的 SCREEN_MAX_TOKENS 再加大
+        max_tokens=int(cfg.get("SCREEN_MAX_TOKENS", "6000")),
     )
-    resp.raise_for_status()
-    msg = resp.json()["choices"][0]["message"]
-    content = msg.get("content") or ""
-    m = re.search(r"\{.*\}", content, re.DOTALL)
-    if not m:  # content 空白時退而求其次，從 reasoning_content 撈最後一個 JSON 物件
-        candidates = re.findall(r"\{[^{}]*\}", msg.get("reasoning_content") or "")
-        m = re.search(r"\{.*\}", candidates[-1], re.DOTALL) if candidates else None
-    if not m:
-        raise ValueError(f"回應裡沒有 JSON：{content[:200]}")
-    raw = m.group(0)
-    try:
-        out = json.loads(raw)
-    except json.JSONDecodeError:
-        # 模型 JSON 偶帶非法 \escape（畫面文字裡的反斜線）或漏逗號——先修非法跳脫再試一次
-        repaired = re.sub(r'\\(?!["\\/bfnrtu])', r"\\\\", raw)
-        out = json.loads(repaired)
-    return out
+    return extract_json_from_message(msg)
 
 
 def screen_frame(cfg: dict, image_path: Path) -> dict:
