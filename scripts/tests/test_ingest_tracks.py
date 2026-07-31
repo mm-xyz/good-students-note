@@ -39,18 +39,24 @@ HAS_FFMPEG = shutil.which("ffmpeg") is not None
 # ── synthetic fixture ──────────────────────────────────────────────
 
 def write_wav(path: Path, spans: list[tuple[float, float]], duration: float,
-              sr: int = 16000, freq: float = 440.0, amp: float = 0.5) -> None:
-    """生成測試 wav:spans 內是正弦波(講話),其餘全靜音。16-bit mono。"""
+              sr: int = 16000, freq: float = 440.0, amp: float = 0.5,
+              channels: int = 1, active_channel: int | None = None) -> None:
+    """生成測試 wav:spans 內是正弦波(講話),其餘全靜音。16-bit。
+
+    channels>1 時可用 active_channel 指定只有某一聲道有訊號(其餘聲道全靜音),
+    用來驗證 VAD 的 subsample 沒有固定漏採某個聲道。"""
     n = int(round(duration * sr))
     samples = bytearray()
     for i in range(n):
         t = i / sr
         active = any(a <= t < b for a, b in spans)
         v = int(amp * 32767 * math.sin(2 * math.pi * freq * t)) if active else 0
-        samples += struct.pack("<h", v)
+        for c in range(channels):
+            vc = v if (active_channel is None or c == active_channel) else 0
+            samples += struct.pack("<h", vc)
     path.parent.mkdir(parents=True, exist_ok=True)
     with wave.open(str(path), "wb") as wf:
-        wf.setnchannels(1)
+        wf.setnchannels(channels)
         wf.setsampwidth(2)
         wf.setframerate(sr)
         wf.writeframes(bytes(samples))
@@ -227,6 +233,29 @@ class TestVadUnit(IngestBase):
         p = self.session / "tracks" / "Mute.wav"
         write_wav(p, [], 3.0)
         self.assertEqual(ingest_tracks.energy_vad(p, "Mute"), [])
+
+    def test_energy_vad_stereo_each_channel_sampled(self):
+        """立體聲軌:訊號只在單一聲道時兩個聲道都要被採到(卡 #572)。
+
+        stride 若以 sample 為單位且是偶數(16kHz/30ms 窗 → 舊算法 stride=10),
+        subsample 會固定落在同一聲道 — 訊號在另一聲道的軌整段被判靜音。"""
+        for ch in (0, 1):
+            p = self.session / "tracks" / f"Stereo{ch}.wav"
+            write_wav(p, [(1.0, 2.0)], 3.0, channels=2, active_channel=ch)
+            turns = ingest_tracks.energy_vad(p, f"Stereo{ch}")
+            self.assertEqual(len(turns), 1,
+                             f"聲道 {ch} 的訊號沒被採樣到(turns={turns})")
+            self.assertAlmostEqual(turns[0]["start"], 1.0, delta=0.2)
+            self.assertAlmostEqual(turns[0]["end"], 2.0, delta=0.2)
+
+    def test_energy_vad_mono_unchanged_after_stride_fix(self):
+        """單聲道行為鎖定:frame 對齊修法不得改變 mono 的偵測結果。"""
+        p = self.session / "tracks" / "MonoLock.wav"
+        write_wav(p, [(0.6, 1.4)], 2.0)
+        turns = ingest_tracks.energy_vad(p, "MonoLock")
+        self.assertEqual(len(turns), 1)
+        self.assertAlmostEqual(turns[0]["start"], 0.6, delta=0.1)
+        self.assertAlmostEqual(turns[0]["end"], 1.4, delta=0.1)
 
 
 if __name__ == "__main__":

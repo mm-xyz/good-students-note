@@ -5,6 +5,8 @@ scripts/audio/diarize.py — Speaker diarization stage(pyannote-audio,全本地)
 用 .venv-audio 的 python 跑(重依賴隔離,見 requirements-audio.txt):
     .venv-audio/bin/python scripts/audio/diarize.py --session sessions/<slug> \
         [--num-speakers N] [--min-speakers N] [--max-speakers N] [--device auto|mps|cpu]
+    # 護欄:speakers.json 若是 ingest_tracks 的 ground truth(source=tracks),
+    # 上面的 pyannote 路徑會拒跑 — 分軌對齊走 --from-tracks,確定要覆蓋才加 --force
 
     # speakers_map.json 填好人名後,重新輸出帶人名的 SRT(不重跑模型,任何 python 可跑):
     python3 scripts/audio/diarize.py --session sessions/<slug> --apply-map
@@ -285,6 +287,26 @@ def write_naming_marker(session_dir: Path, speakers: list[str]) -> None:
     print(f"[diarize] speaker 命名待接手: {rel(marker, PROJECT_ROOT)}")
 
 
+def refuse_ingest_overwrite(session_dir: Path, force: bool) -> None:
+    """--force 護欄(卡 #572):speakers.json 若是 ingest_tracks.py 產的
+    ground truth(source=tracks,每軌 VAD=哪軌有能量就是誰),重跑 pyannote
+    會拿聲紋猜測覆蓋真相 — 沒 --force 就拒跑並說明替代路徑。
+    pyannote 自產的 speakers.json(無 source 欄)重跑照舊放行。"""
+    sj = session_dir / "speakers.json"
+    if force or not sj.exists():
+        return
+    try:
+        data = json.loads(sj.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return
+    if isinstance(data, dict) and data.get("source") == "tracks":
+        print("[diarize] FAIL: speakers.json 來自 ingest_tracks(source=tracks,"
+              "每軌 VAD = ground truth),重跑 pyannote 會用聲紋猜測覆蓋它。\n"
+              "  分軌對齊請走 `--from-tracks`;確定要覆蓋才加 `--force`。",
+              file=sys.stderr)
+        sys.exit(1)
+
+
 def apply_map(session_dir: Path) -> None:
     """speakers_map.json → 重寫 transcript.speakers.srt 的 speaker 前綴。"""
     map_path = session_dir / "speakers_map.json"
@@ -324,6 +346,9 @@ def main():
     ap.add_argument("--from-tracks", action="store_true",
                     help="分軌對齊:用 ingest_tracks 的 speakers.json 貼標+切換手,"
                          "零模型(任何 python 可跑)")
+    ap.add_argument("--force", action="store_true",
+                    help="允許 pyannote 覆蓋 ingest_tracks 產的 ground-truth "
+                         "speakers.json(source=tracks;預設拒跑,卡 #572)")
     args = ap.parse_args()
 
     session_dir = Path(args.session).resolve()
@@ -338,6 +363,9 @@ def main():
     if args.from_tracks:
         align_from_tracks(session_dir)
         return
+
+    # pyannote 路徑:先過護欄再做任何事(不動 ground truth,卡 #572)
+    refuse_ingest_overwrite(session_dir, args.force)
 
     import time
     t0 = time.time()

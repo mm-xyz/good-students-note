@@ -4,7 +4,8 @@
 pyannote 模型呼叫不在測試範圍;鎖的是所有確定性邏輯:
 relabel_turns(講最多的人=S1)、assign_speakers(max-overlap 貼標)、
 word_speakers(零 overlap 繼承前字)、split_cues_by_turns(多人 30s 大段
-換手切開,a57f38a,EP17 二航驗證 0 殘留)、align_from_tracks / apply_map e2e。
+換手切開,a57f38a,EP17 二航驗證 0 殘留)、align_from_tracks / apply_map e2e、
+refuse_ingest_overwrite(--force 護欄:不覆蓋 ingest 的 ground truth,卡 #572)。
 
 跑法:
     python3 scripts/tests/test_diarize_align.py
@@ -12,6 +13,7 @@ word_speakers(零 overlap 繼承前字)、split_cues_by_turns(多人 30s 大段
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -22,7 +24,10 @@ sys.path.insert(0, str(AUDIO_DIR))
 
 from srt_utils import parse_srt  # noqa: E402
 from diarize import (relabel_turns, assign_speakers, word_speakers,  # noqa: E402
-                     split_cues_by_turns, align_from_tracks, apply_map)
+                     split_cues_by_turns, align_from_tracks, apply_map,
+                     refuse_ingest_overwrite)
+
+DIARIZE = AUDIO_DIR / "diarize.py"
 
 
 def turn(start, end, speaker):
@@ -201,6 +206,59 @@ class TestApplyMapE2E(unittest.TestCase):
             sdir.mkdir()
             with self.assertRaises(SystemExit):
                 apply_map(sdir)
+
+
+class TestRefuseIngestOverwrite(unittest.TestCase):
+    """--force 護欄(卡 #572):誤跑 pyannote 會拿聲紋猜測覆蓋 ingest_tracks
+    每軌 VAD 的 ground-truth speakers.json — 偵測到 source=tracks 就拒跑。"""
+
+    def _session(self, td: str, payload: str | None) -> Path:
+        sdir = Path(td) / "ep-test"
+        sdir.mkdir()
+        if payload is not None:
+            (sdir / "speakers.json").write_text(payload, encoding="utf-8")
+        return sdir
+
+    def test_ingest_speakers_json_refused_without_force(self):
+        with tempfile.TemporaryDirectory() as td:
+            sdir = self._session(td, json.dumps({"source": "tracks", "turns": []}))
+            with self.assertRaises(SystemExit):
+                refuse_ingest_overwrite(sdir, force=False)
+
+    def test_force_allows_overwrite(self):
+        with tempfile.TemporaryDirectory() as td:
+            sdir = self._session(td, json.dumps({"source": "tracks", "turns": []}))
+            refuse_ingest_overwrite(sdir, force=True)   # 不 raise
+
+    def test_pyannote_speakers_json_not_refused(self):
+        # pyannote 自己寫的 speakers.json(無 source 欄)重跑照舊放行
+        with tempfile.TemporaryDirectory() as td:
+            sdir = self._session(td, json.dumps(
+                {"model": "pyannote/speaker-diarization-community-1", "turns": []}))
+            refuse_ingest_overwrite(sdir, force=False)  # 不 raise
+
+    def test_missing_or_corrupt_speakers_json_not_refused(self):
+        with tempfile.TemporaryDirectory() as td:
+            sdir = self._session(td, None)
+            refuse_ingest_overwrite(sdir, force=False)  # 不 raise
+        with tempfile.TemporaryDirectory() as td:
+            sdir = self._session(td, "{not json")
+            refuse_ingest_overwrite(sdir, force=False)  # 不 raise
+
+    def test_cli_pyannote_path_refuses_before_any_work(self):
+        """CLI 層:護欄要在 ensure_wav/模型載入之前就擋下(不需 torch 也可測)。"""
+        with tempfile.TemporaryDirectory() as td:
+            sdir = self._session(td, json.dumps({"source": "tracks", "turns": []}))
+            r = subprocess.run(
+                [sys.executable, str(DIARIZE), "--session", str(sdir)],
+                capture_output=True, text=True)
+            self.assertNotEqual(r.returncode, 0)
+            out = r.stdout + r.stderr
+            self.assertIn("--from-tracks", out)   # 說明正確替代路徑
+            self.assertIn("--force", out)         # 說明覆蓋開關
+            # speakers.json 原封不動
+            data = json.loads((sdir / "speakers.json").read_text(encoding="utf-8"))
+            self.assertEqual(data["source"], "tracks")
 
 
 if __name__ == "__main__":
