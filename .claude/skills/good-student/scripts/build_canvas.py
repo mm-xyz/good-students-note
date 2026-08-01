@@ -19,10 +19,10 @@ import re
 import sys
 from pathlib import Path
 
-CELL_W, CELL_H = 360, 240
+CELL_W, CELL_H = 560, 420   # 預設格子大小（MM 2026-08-01：調大調寬，拉開不費力）
 HDR_H = 60
-GAP = 40
-BLOCK_GAP = 200
+GAP = 48
+BLOCK_GAP = 240
 WRAP = 6  # section grid 每列幾張
 
 
@@ -63,6 +63,7 @@ def ordered_values(found: list, order: list | None) -> list:
 
 
 def main() -> int:
+    global CELL_W, CELL_H
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("atoms_dir", type=Path)
     ap.add_argument("--vault-root", type=Path, required=True)
@@ -76,7 +77,10 @@ def main() -> int:
                     help="matrix TYPE：只畫上三角（col 在 row 軸序中必須晚於 row，"
                          "如 aspect-pair 快行星只往後配慢行星）；佔位適用，實卡永遠畫")
     ap.add_argument("--out", type=Path, required=True)
+    ap.add_argument("--cell-w", type=int, default=CELL_W)
+    ap.add_argument("--cell-h", type=int, default=CELL_H)
     args = ap.parse_args()
+    CELL_W, CELL_H = args.cell_w, args.cell_h
 
     atoms_dir = args.atoms_dir.resolve()
     vault_root = args.vault_root.resolve()
