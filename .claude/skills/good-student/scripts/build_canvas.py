@@ -151,7 +151,13 @@ def main() -> int:
         cell: dict[tuple[str, str], str] = {}
         row_found, col_found = [], []
         for rel, fm in items:
-            rv, cv = str(fm.get(row_axis)), str(fm.get(col_axis))
+            if "+" in row_axis:  # 複合列軸（如 star+star2：雙星組合不撞單星列）
+                parts = [str(fm.get(a)) for a in row_axis.split("+")
+                         if fm.get(a) not in (None, "None", "null")]
+                rv = "-".join(parts) if parts else "None"
+            else:
+                rv = str(fm.get(row_axis))
+            cv = str(fm.get(col_axis))
             if rv == "None" or cv == "None":
                 warn.append(f"{rel}: 缺 {row_axis}/{col_axis} 欄位，未進矩陣")
                 continue
