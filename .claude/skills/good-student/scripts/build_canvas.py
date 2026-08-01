@@ -72,6 +72,9 @@ def main() -> int:
     ap.add_argument("--order", action="append", default=[],
                     help='"AXIS=v1,v2,..."')
     ap.add_argument("--placeholders", action="store_true")
+    ap.add_argument("--triangular", action="append", default=[],
+                    help="matrix TYPE：只畫上三角（col 在 row 軸序中必須晚於 row，"
+                         "如 aspect-pair 快行星只往後配慢行星）；佔位適用，實卡永遠畫")
     ap.add_argument("--out", type=Path, required=True)
     args = ap.parse_args()
 
@@ -176,6 +179,10 @@ def main() -> int:
                 x0 = (ci + 1) * (CELL_W + GAP)
                 y0 = top + HDR_H + GAP + ri * (CELL_H + GAP)
                 rel = cell.get((rv, cv))
+                if mtype in args.triangular and rel is None:
+                    ref = orders.get(row_axis, row_vals)
+                    if rv in ref and cv in ref and ref.index(cv) <= ref.index(rv):
+                        continue  # 下三角＝無效組合，不放佔位
                 if rel:
                     nodes.append({"id": node_id("file", rel), "type": "file",
                                   "file": rel, "x": x0, "y": y0,
