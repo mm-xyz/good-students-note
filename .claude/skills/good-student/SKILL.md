@@ -48,6 +48,8 @@ allowed-tools: Bash, Read, Write, Glob, Grep, Edit, Agent
 談定之後**先切 5 張再說**：挑 5 個**不同 type、難易混搭**的代表性概念
 （不要挑最簡單的 5 個），完整走格式產出，交使用者驗收。
 
+- **先建 canvas 再請驗收**（見「總覽 canvas」節）：矩陣骨架＋佔位＋5 張實卡，
+  使用者直接在 Obsidian canvas 上看全貌、點卡驗內容。
 - 驗收重點問使用者兩題：
   「隨便挑一張，蓋住內文只看鉤子，你能複述這個概念嗎？」（記憶點檢查）
   「這張的內容你原本就知道嗎？讀起來吃力嗎？」（深度檢查——原本就知道＝太淺、
@@ -79,7 +81,10 @@ created: YYYY-MM-DD
 ---
 ```
 
-- slug 一律英文小寫、落在啟動儀式定出的受控詞彙內；檔名＝slug 可從 frontmatter 推得。
+- slug 一律英文小寫、落在啟動儀式定出的受控詞彙內。
+- **檔名＝`<slug>_<繁中title>.md`**（例：`venus-in-house-07_金星在第七宮.md`）——
+  slug 前綴保受控、可從 frontmatter 推得；繁中讓 Obsidian 圖譜/快切/canvas 一眼可讀。
+  中文取 frontmatter `title` 原文，不簡化不翻譯。
 - 同一概念出現在多章：主檔放最完整那章，其他章內容併入、`chapter` 改多值。
 
 ### 內文（鎖死；記憶點三件套是本線的存在理由，缺一張就是白切）
@@ -101,12 +106,23 @@ created: YYYY-MM-DD
 相關：[[slug|中文]]・[[slug|中文]]
 ```
 
-- 「相關：」只連基礎層概念，`[[slug|中文]]` 形式。
+- 「相關：」只連基礎層概念，`[[<slug>_<中文>|<中文>]]` 形式（連結目標＝完整檔名）。
 - 正文是 prose 不是條列（embedding 讀不好表格式筆記）；
   但 🎯 區塊**必須**是條列——它是給人翻的，不是給 embedding 的。
 - 類比硬湊不如不寫：視角接不上的概念，類比欄寫「（此概念在［視角］無對應，
   鉤子改走反差/畫面）」，鉤子照給。
 - 個案／人物案例不進概念檔正文；一般性教學內容才收。
+
+### RAG 契約（本知識庫之後就是 RAG 的基礎，格式即介面）
+
+- **embedding 單位＝首段摘要＋正文 prose**。所以正文必須自足（脫離上下文可讀）、
+  敘述性、不依賴 🎯 區塊才成立——向量檢索到的是正文，不是鉤子。
+- **🎯 區塊與「相關：」行是給人的**，ingest 時要能確定性剝離：
+  🎯 區塊固定是 `> 🎯` 開頭的連續 blockquote、「相關：」固定是末行——
+  **絕不把類比/鉤子散寫進正文段落**，否則剝不乾淨、視角會污染 embedding。
+- **frontmatter 受控欄位＝檢索 filter**（先 `type/axis` 過濾再語意搜）；
+  slug 檔名前綴＝穩定 ASCII id。這兩者的受控性是 RAG 的地基，
+  切卡時欄位亂填、slug 出受控表，之後整批 index 都要重做。
 
 ## 深度落點（每張卡讓讀者跨「一步」——有點難，但不會太難）
 
@@ -123,6 +139,30 @@ created: YYYY-MM-DD
   零次＝太淺；讀不下去＝太深。深度不是堆術語——「深」的定義是
   **超出使用者現有理解的那一步具體內容**，且橋已搭好讓他跨得過去。
 
+## 總覽 canvas（`_map.canvas`——體系地圖＋驗收介面）
+
+輸出目錄根建一張 Obsidian canvas，把整個體系按啟動儀式定的軸排成矩陣：
+兩軸 type（如 planet-in-house）＝行×列矩陣（軸值順序照受控詞彙表）；
+基礎層／單軸 type＝群組列。生成是確定性工作，**用腳本不用 LLM**（原則 6）：
+
+```bash
+python3 .claude/skills/good-student/scripts/build_canvas.py <輸出目錄> \
+  --vault-root <vault 根> \
+  --section planet --section sign --section house --section aspect \
+  --matrix planet-in-sign:planet:sign \
+  --matrix planet-in-house:planet:house \
+  --order "planet=sun,moon,mercury,venus,mars,jupiter,saturn,uranus,neptune,pluto" \
+  --order "house=1,2,3,4,5,6,7,8,9,10,11,12" \
+  --placeholders --out <輸出目錄>/_map.canvas
+```
+
+- **試切 gate 就要建**：試切 5 張時先產 canvas——完整矩陣骨架＋缺的組合放灰色
+  佔位、試切卡放實卡。使用者在 canvas 上**一目瞭然地驗收**切分軸對不對、
+  體系全貌長怎樣、5 張落點在哪。
+- **批量完成後重跑一次**（同指令）：佔位被實卡取代，缺口一眼可見
+  （還有佔位＝該組合沒切出來，對照派工回報的「沒切出來的預期單位」核對）。
+- 驗收：Obsidian 開啟無破圖、抽 3 個節點點得開、矩陣行列與受控詞彙表一致。
+
 ## 品質守則
 
 - **太籠統的判準**：如果一張知識點換掉 title 後讀起來像在講別的概念，就是籠統，重寫。
@@ -135,7 +175,9 @@ created: YYYY-MM-DD
 - [ ] 每檔 frontmatter 欄位齊全順序一致，slug 全落在受控詞彙內（grep 抽查）
 - [ ] 首段是一句自足摘要；正文 prose；🎯 三件套齊全且鉤子不是內容複述
 - [ ] `source` 真實存在；`source_ts` 落在該檔範圍內（有時間軸時）
-- [ ] 同一概念不重複建檔；檔名⇔frontmatter 可互推
+- [ ] 同一概念不重複建檔；檔名＝`<slug>_<title>.md` 可與 frontmatter 互推
+- [ ] `_map.canvas` 已重跑（批量後版）：無殘留佔位（或佔位＝已知缺口且已回報）、
+      Obsidian 開啟正常、行列與受控詞彙表一致
 - [ ] 抽 3 張自測：蓋住內文只看「一句鉤」，能否複述概念？不能＝重寫該張
 - [ ] 抽 3 張深度自測：這張有沒有至少一個「超出常識的機制/條件/例外/竅門」？
       （沒有＝太淺）正文的前置概念是否都有一句話帶過或 `[[連結]]`？（沒有＝太深）

@@ -37,7 +37,13 @@ mars-cc 的單一領域 skill 裡。
    太淺＝不看材料也寫得出（→ 挖機制/條件/例外/竅門，沒料就併卡）；
    太深＝前置概念沒搭橋（→ 一句話帶過＋`[[連結]]`，或拆卡）。
    深度基準必須逐字進派工 prompt，否則平行 agent 深淺不一。
-7. 通用化自 astro-chunking：frontmatter 受控欄位、slug 慣例、parent-child
+7. **檔名雙語＋總覽 canvas＋RAG 契約**（MM 同日補訂）：
+   檔名＝`<slug>_<繁中title>.md`（slug 保受控 ASCII id、繁中利 Obsidian 閱讀）；
+   輸出根建 `_map.canvas` 按軸排矩陣（`scripts/build_canvas.py` 確定性生成，
+   0 token；試切 gate 先出「骨架＋佔位＋5 張實卡」版**當驗收介面**，
+   批量後重跑補實）；知識庫之後是 RAG 基礎——embedding 單位＝首段＋正文，
+   🎯 區塊/「相關：」行格式固定可確定性剝離，受控欄位＝檢索 filter。
+8. 通用化自 astro-chunking：frontmatter 受控欄位、slug 慣例、parent-child
    （source 指回原文）、派工守則（格式逐字鎖、sonnet 不派 haiku）全數沿用；
    受控詞彙從寫死占星改為啟動儀式時按語料定義。
 

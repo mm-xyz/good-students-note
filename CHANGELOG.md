@@ -11,6 +11,11 @@
   視角置入；**蒸餾產物，與零省略產線平行不取代**。鐵門：啟動必談切分軸/視角/
   輸出位置（視角每次重談）、auto mode 也要先試切 5 張驗收才可批量。
   skill 住 `.claude/skills/good-student/`，另 symlink 進 `~/.claude/skills/` 跨 repo 可用。
+  - 同日補訂（MM）：**深度落點**（每張卡以使用者現有程度為基準恰好跨一步）、
+    **檔名雙語**（`<slug>_<繁中>.md`）、**總覽 canvas**（`scripts/build_canvas.py`
+    確定性生成 `_map.canvas` 矩陣體系地圖；試切 gate 出骨架＋佔位版當驗收介面，
+    實測白瑜 523 檔 → 380 卡＋55 佔位、路徑全數有效）、**RAG 契約**
+    （embedding 單位＝首段＋正文；🎯/相關行固定格式可剝離；受控欄位＝filter）。
 
 ## 2026-07-31
 
