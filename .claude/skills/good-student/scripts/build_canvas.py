@@ -72,6 +72,10 @@ def main() -> int:
                     help="TYPE:ROW_AXIS:COL_AXIS")
     ap.add_argument("--order", action="append", default=[],
                     help='"AXIS=v1,v2,..."')
+    ap.add_argument("--flow", action="append", default=[],
+                    help='"標題:slugA>slugB>slugC"：把判讀流程排成樹狀、卡與卡之間連線。'
+                         "可多次；後一條 flow 若用到已放過的 slug 就從那張卡分岔出去。"
+                         "進了 flow 的卡不會再出現在 --section 群組裡（同一張卡不重複放）。")
     ap.add_argument("--placeholders", action="store_true")
     ap.add_argument("--triangular", action="append", default=[],
                     help="matrix TYPE：只畫上三角（col 在 row 軸序中必須晚於 row，"
@@ -109,8 +113,27 @@ def main() -> int:
     for rel, fm in files:
         by_type.setdefault(fm["type"], []).append((rel, fm))
 
-    nodes, warn = [], []
+    nodes, edges, warn = [], [], []
     y = 0
+
+    # slug＝檔名第一個底線之前那段（受控 ASCII id，見 SKILL.md 檔名慣例）
+    slug_index: dict[str, str] = {}
+    for rel, _fm in files:
+        slug = Path(rel).stem.split("_", 1)[0]
+        if slug in slug_index:
+            warn.append(f"slug 撞號 '{slug}'：{slug_index[slug]} vs {rel}")
+        slug_index[slug] = rel
+
+    flows: list[tuple[str, list[str]]] = []
+    flow_slugs: set[str] = set()
+    for spec in args.flow:
+        label, _, chain = spec.partition(":")
+        slugs = [s.strip() for s in chain.split(">") if s.strip()]
+        if not slugs:
+            warn.append(f"flow '{spec}': 空的鏈，略過")
+            continue
+        flows.append((label.strip() or "flow", slugs))
+        flow_slugs.update(slugs)
 
     def add_group(label: str, x0: int, y0: int, w: int, h: int) -> None:
         pad = GAP
@@ -118,9 +141,46 @@ def main() -> int:
                       "label": label, "x": x0 - pad, "y": y0 - pad,
                       "width": w + 2 * pad, "height": h + 2 * pad})
 
+    # ---- flow 樹狀流程（判讀方法：一張卡接著一張卡）----
+    if flows:
+        top = y
+        placed: dict[str, tuple[str, int, int]] = {}  # slug -> (node_id, x, y)
+        max_col = 0
+        for row, (label, slugs) in enumerate(flows):
+            col, prev_id = 0, None
+            for slug in slugs:
+                rel = slug_index.get(slug)
+                if rel is None:
+                    warn.append(f"flow '{label}': 找不到 slug「{slug}」的卡片")
+                    prev_id, col = None, col + 1
+                    continue
+                if slug in placed:  # 分岔：接回已放過的那張卡，不重複建 node
+                    nid, x0, _y0 = placed[slug]
+                    col = x0 // (CELL_W + GAP)
+                else:
+                    x0 = col * (CELL_W + GAP)
+                    y0 = top + row * (CELL_H + GAP)
+                    nid = node_id("file", rel)
+                    nodes.append({"id": nid, "type": "file", "file": rel,
+                                  "x": x0, "y": y0,
+                                  "width": CELL_W, "height": CELL_H})
+                    placed[slug] = (nid, x0, y0)
+                if prev_id and prev_id != nid:
+                    edges.append({"id": node_id("edge", prev_id, nid),
+                                  "fromNode": prev_id, "fromSide": "right",
+                                  "toNode": nid, "toSide": "left"})
+                prev_id = nid
+                col += 1
+                max_col = max(max_col, col)
+        w = max_col * (CELL_W + GAP) - GAP
+        h = len(flows) * (CELL_H + GAP) - GAP
+        add_group("判讀流程", 0, top, w, h)
+        y = top + h + BLOCK_GAP
+
     # ---- section 群組列 ----
     for sec in args.section:
-        items = by_type.get(sec, [])
+        items = [(rel, fm) for rel, fm in by_type.get(sec, [])
+                 if Path(rel).stem.split("_", 1)[0] not in flow_slugs]
         if not items:
             warn.append(f"section '{sec}': 找不到任何檔案")
             continue
@@ -208,7 +268,7 @@ def main() -> int:
         add_group(f"{mtype}（{row_axis} × {col_axis}）", 0, top, w, h)
         y = top + h + BLOCK_GAP
 
-    canvas = {"nodes": nodes, "edges": []}
+    canvas = {"nodes": nodes, "edges": edges}
     args.out.write_text(json.dumps(canvas, ensure_ascii=False, indent=1),
                         encoding="utf-8")
     n_files = sum(1 for n in nodes if n["type"] == "file")
