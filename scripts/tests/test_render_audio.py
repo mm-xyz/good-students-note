@@ -91,8 +91,18 @@ if not FIXTURES.is_dir():
     print(f"[test] ⚠ 找不到 fixtures:{FIXTURES}"
           "(跑 fixtures/build_fixtures.py 產生)", file=sys.stderr)
 else:
-    for _c in sorted(p for p in FIXTURES.iterdir() if (p / "expect.json").exists()):
+    cases = sorted(p for p in FIXTURES.iterdir() if (p / "expect.json").exists())
+    for _c in cases:
         setattr(TestEP16Regressions, f"test_{_c.name}", _make(_c))
+    # 音訊被 .gitignore 的 *.wav 擋在版控外(4.5MB,而且實測沒有它斷言照樣
+    # 成立、bug 照樣抓得到)。但缺席會讓 refine_boundaries 的波形谷底路徑
+    # 完全沒跑到 — 降級要看得見,不能靜默。
+    _no_wav = [c.name for c in cases if not (c / "audio16k.wav").exists()]
+    if _no_wav:
+        print(f"[test] ⚠ {len(_no_wav)}/{len(cases)} 個 case 沒有 audio16k.wav — "
+              "斷言仍有效,但波形谷底微調(refine_boundaries)這條路徑沒被覆蓋。"
+              "要完整覆蓋:python3 scripts/tests/fixtures/build_fixtures.py "
+              "--session sessions/<有音訊的 session>", file=sys.stderr)
 
 
 if __name__ == "__main__":
