@@ -35,7 +35,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 # 中場 just fun、片尾 to many mind);v2 的三個檔其實是同一首複製三份的佔位。
 # 檔名尾巴標了建議取用區間(`M開_00：00-00：10`),cutplan 的 start=/end= 照它設。
 MATERIAL_DIR = PROJECT_ROOT / "shared-material" / "水星貓的生活實驗室_v1"
-LINE_RE = re.compile(r"^- \[( |x|X)\] ([BG]\d{3,5}) \[([^\]]+)\] (.*)$")
+LINE_RE = re.compile(r"^- \[( |x|X)\] ([BGS]\d{3,5}) \[([^\]]+)\] (.*)$")
 CHAPTER_RE = re.compile(r"^## (.+)$")
 AUDIO_EXTS = (".mp3", ".m4a", ".wav", ".aac", ".flac", ".ogg")
 
@@ -186,6 +186,7 @@ def parse_program(path: Path) -> list[dict]:
     """
     program = []
     clip_mode = False
+    cur_insert = None
     for line in path.read_text(encoding="utf-8").splitlines():
         s = line.strip()
         mcfg = CONFIG_RE.match(s)
@@ -209,6 +210,7 @@ def parse_program(path: Path) -> list[dict]:
         mi = INSERT_RE.match(s)
         if mi:
             params = dict(re.findall(r"(\w+)=([\w.+-]+)", mi.group(2) or ""))
+            cur_insert = mi.group(1)
             program.append({"kind": "insert", "file": mi.group(1),
                             "gain": params.get("gain", "auto"),
                             "start": float(params.get("start", 0.0)),
@@ -241,7 +243,8 @@ def parse_program(path: Path) -> list[dict]:
         body = body.rsplit(" ← ", 1)[0]
         body = re.sub(r"^\[[^\]]{1,20}\]\s*", "", body).strip()  # speaker 前綴
         program.append({"kind": "block", "id": bid, "keep": mark.lower() == "x",
-                        "raw": body, "clip": clip_mode})
+                        "raw": body, "clip": clip_mode,
+                        "insert": cur_insert if bid.startswith("S") else None})
     return program
 
 
@@ -363,7 +366,8 @@ def subtract(ranges: list[list[float]], removals: list[list[float]],
 
 
 def validate_program(blocks: list[dict], program: list[dict],
-                     srt_text: str, gaps: list[dict] | None = None) -> None:
+                     srt_text: str, gaps: list[dict] | None = None,
+                     inserts: list[dict] | None = None) -> None:
     """防幻覺/防手滑驗證 + 逐出現解析字級精剪(spans 掛回 program item)。
     (1) json 每個 block 至少在 md 出現一次;md 不得有 json 沒有的 id
         (重複出現合法 — 🎬 集錦區可複製貼上正文的行)
@@ -373,7 +377,11 @@ def validate_program(blocks: list[dict], program: list[dict],
     """
     json_by_id = {b["id"]: b for b in blocks}
     gap_by_id = {g["id"]: g for g in (gaps or [])}
-    md_ids = {it["id"] for it in program if it["kind"] == "block"}
+    # 補錄 block(S 前綴):真相源是 cutplan.json 的 inserts,時間碼在補錄檔
+    # 自己的時間軸上,文字比對的對象也是補錄自己的 SRT(不是正片來源 SRT)
+    ins_by_id = {b["id"]: b for i in (inserts or []) for b in i["blocks"]}
+    md_ids = {it["id"] for it in program
+              if it["kind"] == "block" and not it["id"].startswith("S")}
     missing = {i for i in json_by_id if i not in md_ids}
     extra = {i for i in md_ids if i not in json_by_id and i not in gap_by_id}
     if missing or extra:
@@ -382,6 +390,18 @@ def validate_program(blocks: list[dict], program: list[dict],
     flat = re.sub(r"\s+", "", srt_text)
     for it in program:
         if it["kind"] != "block":
+            continue
+        if it["id"].startswith("S"):
+            b = ins_by_id.get(it["id"])
+            if not b:
+                sys.exit(f"[render] FAIL: {it['id']} 不在 cutplan.json 的 inserts 裡"
+                         f" — 先跑 scripts/audio/insert_prepare.py 產生補錄 block")
+            clean, spans = parse_strikes(it["raw"])
+            if re.sub(r"\s+", "", clean) != re.sub(r"\s+", "", b["text"]):
+                sys.exit(f"[render] FAIL: {it['id']} 文字與 cutplan.json 不一致"
+                         f"(md「{clean[:20]}」/ json「{b['text'][:20]}」)"
+                         f" — 補錄 block 只准改勾選與加刪除線,不准改字")
+            it["spans"], it["block"] = spans, b
             continue
         if it["id"] in gap_by_id:
             it["spans"] = []
@@ -504,6 +524,33 @@ def refine_boundaries(ranges: list[list[float]], wav_path: Path,
     return [[a, b] for a, b in out if b - a > 0.1]
 
 
+def measure_lufs_ranges(path: Path, ranges: list[list[float]]) -> float | None:
+    """量指定區間集合(合併後)的 integrated LUFS;量不到回 None。
+
+    補錄的電平基準必須是**插入點附近的正片語音**,不是整支 source 的平均。
+    EP16 實測:整支 source 平均 -33.3 LUFS,但插入點前後 30s 差了 3.8dB
+    (前 -15.4 / 後 -19.2)——拿全域平均對齊,補錄接上去就是比後半段大聲,
+    MM 一聽就聽出來(2026-08-10)。
+    """
+    if not ranges:
+        return None
+    parts, labels = [], ""
+    for i, (a, b) in enumerate(ranges):
+        parts.append(f"[0:a]atrim=start={a:.3f}:end={b:.3f},asetpts=PTS-STARTPTS[r{i}]")
+        labels += f"[r{i}]"
+    parts.append(f"{labels}concat=n={len(ranges)}:v=0:a=1[cat]")
+    parts.append("[cat]ebur128=framelog=quiet[out]")
+    try:
+        r = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-nostats", "-i", str(path),
+             "-filter_complex", ";".join(parts), "-map", "[out]", "-f", "null", "-"],
+            capture_output=True, text=True, check=True)
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return None
+    m = re.findall(r"^\s*I:\s*(-?[\d.]+)\s*LUFS", r.stderr, re.M)
+    return float(m[-1]) if m else None
+
+
 def measure_lufs(path: Path) -> float | None:
     """整體響度(EBU R128 integrated LUFS);量不到回 None。
 
@@ -586,9 +633,9 @@ def run_ffmpeg(src: Path, segments: list[dict], musics: list[dict], out: Path,
             # 補錄:走自己的 input,不吃主軌 atrim。tempo 預設 1.0(補錄是另外
             # 錄的,本來就是自然語速);要跟正片同步變速就在 cutplan 寫 tempo=1.06
             it_tempo = s.get("tempo", 1.0)
-            d = s["dur"] / it_tempo
+            d = (s["b"] - s["a"]) / it_tempo
             expr = (f"[{input_idx[s['path']]}:a]"
-                    f"atrim=start={s['ss']:.3f}:end={s['ss'] + s['dur']:.3f},"
+                    f"atrim=start={s['a']:.3f}:end={s['b']:.3f},"
                     f"asetpts=PTS-STARTPTS")
             if abs(it_tempo - 1.0) > 1e-6:
                 expr += f",atempo={it_tempo:.4f}"
@@ -728,6 +775,10 @@ def main():
                          "所以預設全收,要保留的用 G 列勾回來")
     ap.add_argument("--pause-keep", type=float, default=0.6,
                     help="收緊後保留的停頓長度(秒)")
+    ap.add_argument("--insert-ref", type=float, default=15.0,
+                    help="➕ 補錄 gain=auto 的電平基準:插入點前後各取這麼多秒的"
+                         "保留語音當比較對象。用全片平均會對錯——EP16 插入點"
+                         "前後 30s 就差 3.8dB(2026-08-10 MM 實聽抓到補錄偏大)")
     ap.add_argument("--max-block", type=float, default=8.0,
                     help="block 超過此秒數就示警(0=停用)。block 是人審勾選的"
                          "最小單位,過長=那段只能整段留或整段剪,失去粒度;"
@@ -769,7 +820,8 @@ def main():
     spk_srt = sdir / "transcript.speakers.srt"
     srt_src = spk_srt if spk_srt.exists() else pick_transcript(sdir)
     srt_text = "".join(c["text"] for c in parse_srt(srt_src))
-    validate_program(cp["blocks"], program, srt_text, cp.get("gaps"))
+    validate_program(cp["blocks"], program, srt_text, cp.get("gaps"),
+                     cp.get("inserts"))
 
     # ── 把關:過長 block(2026-08-10 MM 指出,ADR 0011)──
     # block 是「勾選」的最小單位。一個 12s 的 block 代表那 12 秒只能整段留或
@@ -812,6 +864,11 @@ def main():
     chapters = []    # {"title","anchor"=下一個 unit 的 index}
     manual_cuts = sorted([[it["a"], it["b"]] for it in program
                           if it["kind"] == "cut" and it["b"] > it["a"]])
+    ins_cfg: dict[str, dict] = {}
+    s_blocks_by_file: dict[str, list] = {}
+    for it in program:
+        if it["kind"] == "block" and it.get("insert"):
+            s_blocks_by_file.setdefault(it["insert"], []).append(it)
     for it in program:
         if it["kind"] in ("config", "cut"):
             continue
@@ -839,15 +896,34 @@ def main():
                 sys.exit(f"[render] FAIL: 補錄檔不存在:{it['file']}"
                          f"(找過 session 目錄/repo 根/絕對路徑)")
             file_dur = ffprobe_duration(path)
-            i_end = min(it["end"], file_dur) if it["end"] else file_dur
-            if i_end - it["start"] < 0.2:
-                sys.exit(f"[render] FAIL: {it['file']} start={it['start']}/"
-                         f"end={i_end}(音檔長 {file_dur:.1f}s)取不出有效區間")
-            units.append({"kind": "insert", "path": path.resolve(),
-                          "ss": it["start"], "dur": i_end - it["start"],
-                          "gain": it["gain"], "gain_db": 0.0,
-                          "fade": it["fade"],
-                          "tempo": it["tempo"], "note": it["note"]})
+            cfg = {"path": path.resolve(), "gain": it["gain"], "gain_db": 0.0,
+                   "fade": it["fade"], "tempo": it["tempo"], "note": it["note"],
+                   "file": it["file"]}
+            ins_cfg[it["file"]] = cfg
+            if it["file"] not in s_blocks_by_file:
+                # 沒有 S block=整段塞(舊模式,仍支援);有 S block 就走
+                # 逐句勾選模式,由下面的 block 分支組 unit(2026-08-10 MM 拍板)
+                i_end = min(it["end"], file_dur) if it["end"] else file_dur
+                if i_end - it["start"] < 0.2:
+                    sys.exit(f"[render] FAIL: {it['file']} start={it['start']}/"
+                             f"end={i_end}(音檔長 {file_dur:.1f}s)取不出有效區間")
+                units.append({"kind": "insert", "a": it["start"], "b": i_end,
+                              "items": [], **cfg})
+        elif it.get("insert") and it["keep"]:
+            # 補錄的 S block:時間碼在**補錄檔自己的時間軸**上,相鄰的併成一段
+            b = it["block"]
+            cfg = ins_cfg.get(it["insert"])
+            if not cfg:
+                sys.exit(f"[render] FAIL: {it['id']} 出現在 `## ➕ {it['insert']}` "
+                         f"標頭之前 — S 行必須排在它所屬的 ➕ 標頭底下")
+            last = units[-1] if units else None
+            if (last and last["kind"] == "insert" and last["file"] == it["insert"]
+                    and 0 <= b["start"] - last["b"] < 2.0):
+                last["b"] = b["end"]
+                last["items"].append(it)
+            else:
+                units.append({"kind": "insert", "a": b["start"], "b": b["end"],
+                              "items": [it], **cfg})
         elif it["keep"]:
             b = it["block"]
             last = units[-1] if units else None
@@ -997,8 +1073,11 @@ def main():
           f"{len(musics)} 首;語音 {fmt_mmss(speech_secs)}"
           f"(原始 {fmt_mmss(total_src)})")
     for s in ins_segs:
-        print(f"[render] ➕ 補錄 {s['path'].name} {s['dur']:.1f}s"
-              f"{'  ' + s['note'] if s.get('note') else ''}")
+        n_kept = len(s.get("items") or [])
+        how = f"{n_kept} 個 S block" if n_kept else "整段"
+        note = f"  {s['note']}" if s.get("note") else ""
+        print(f"[render] ➕ 補錄 {s['path'].name} "
+              f"{s['b'] - s['a']:.1f}s({how}){note}")
     if args.dry_run:
         for s in segments:
             if s["kind"] == "speech":
@@ -1007,6 +1086,9 @@ def main():
                                 else f" out={s['fade_out']}s"
                                 for k in ("fade_in", "fade_out") if s.get(k))
                 print(f"  speech {fmt_mmss(s['a'])}–{fmt_mmss(s['b'])}{tag}{fades}")
+            elif s["kind"] == "insert":
+                print(f"  ➕ 補錄 {s['path'].name} "
+                      f"{fmt_mmss(s['a'])}–{fmt_mmss(s['b'])}")
             else:
                 print(f"  silence {s['dur']:.1f}s")
         for m in musics:
@@ -1025,24 +1107,35 @@ def main():
                if p.suffix.lower() not in (".srt", ".md", ".json", ".txt"))
 
     # ➕ 補錄的電平對齊要等 src 就緒才量得了(正片響度是比較基準)
-    inserts = [s for s in segments if s["kind"] == "insert"]
-    if any(s["gain"] == "auto" for s in inserts):
-        src_l = measure_lufs(src)
-        for s in inserts:
-            if s["gain"] != "auto":
-                s["gain_db"] = float(s["gain"])
-                continue
-            ins_l = measure_lufs(s["path"])
-            if src_l is None or ins_l is None:
-                print(f"[render] ⚠ {s['path'].name} 量不到響度,gain 退回 0dB"
-                      f"(要手動指定就在 cutplan 寫 gain=+3)")
-                continue
-            s["gain_db"] = src_l - ins_l
-            print(f"[render] ➕ {s['path'].name} 電平對齊:正片 {src_l:.1f} LUFS"
-                  f" / 補錄 {ins_l:.1f} LUFS → {s['gain_db']:+.1f}dB")
-    else:
-        for s in inserts:
+    for si, s in enumerate(segments):
+        if s["kind"] != "insert":
+            continue
+        if s["gain"] != "auto":
             s["gain_db"] = float(s["gain"])
+            continue
+        # 基準=插入點**前後最近的保留語音**各湊滿 --insert-ref 秒(不是全片平均)
+        nb: list[list[float]] = []
+        for side in (range(si - 1, -1, -1), range(si + 1, len(segments))):
+            acc = 0.0
+            for j in side:
+                t = segments[j]
+                if t["kind"] != "speech":
+                    continue
+                take = min(t["b"] - t["a"], args.insert_ref - acc)
+                nb.append([t["a"], t["a"] + take] if j > si else [t["b"] - take, t["b"]])
+                acc += take
+                if acc >= args.insert_ref:
+                    break
+        ref_l = measure_lufs_ranges(src, nb)
+        ins_l = measure_lufs(s["path"])
+        if ref_l is None or ins_l is None:
+            print(f"[render] ⚠ {s['path'].name} 量不到響度,gain 退回 0dB"
+                  f"(要手動指定就在 cutplan 寫 gain=+3)")
+            continue
+        s["gain_db"] = max(-12.0, min(12.0, ref_l - ins_l))
+        print(f"[render] ➕ {s['path'].name} 電平對齊(鄰近 {args.insert_ref:.0f}s"
+              f"×2 保留語音):鄰段 {ref_l:.1f} LUFS / 補錄 {ins_l:.1f} LUFS"
+              f" → {s['gain_db']:+.1f}dB")
 
     out = sdir / args.out
     dst_starts, final_dur = run_ffmpeg(src, segments, musics, out, args.fade,

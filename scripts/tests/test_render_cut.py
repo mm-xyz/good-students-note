@@ -491,6 +491,53 @@ class TestInsertRender(TestDryRunE2E):
         self.assertIn("➕ 補錄 補錄.wav", proc.stdout)
         self.assertIn("補錄說明", proc.stdout)
 
+    def _with_s_blocks(self, sdir: Path, marks=("x", "x")) -> None:
+        """補錄改走「逐句 S block」模式(2026-08-10 MM:基於逐字稿下去修)。"""
+        write_wav(sdir / "補錄.wav", 4.0, bursts=[(0.1, 1.9), (2.1, 3.9)])
+        cj = sdir / "cutplan.json"
+        data = json.loads(cj.read_text(encoding="utf-8"))
+        data["inserts"] = [{"file": "補錄.wav", "speaker": "Sarah", "blocks": [
+            {"id": "S0001", "start": 0.1, "end": 1.9, "text": "補錄第一句。",
+             "speaker": "Sarah", "keep": True},
+            {"id": "S0002", "start": 2.1, "end": 3.9, "text": "補錄第二句。",
+             "speaker": "Sarah", "keep": True}]}]
+        cj.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        md = sdir / "cutplan.md"
+        md.write_text(md.read_text(encoding="utf-8").replace(
+            "- [x] B0002",
+            "## ➕ 補錄.wav gain=0  補錄說明\n"
+            f"- [{marks[0]}] S0001 [0:00–0:01] [Sarah] 補錄第一句。\n"
+            f"- [{marks[1]}] S0002 [0:02–0:03] [Sarah] 補錄第二句。\n"
+            "- [x] B0002"), encoding="utf-8")
+
+    def test_s_blocks_are_cut_like_normal_blocks(self):
+        with tempfile.TemporaryDirectory() as td:
+            sdir = self._make_session(td)
+            self._with_s_blocks(sdir)
+            both = self._render(sdir)
+        self.assertEqual(both.returncode, 0, both.stderr or both.stdout)
+        self.assertIn("2 個 S block", both.stdout)
+
+        with tempfile.TemporaryDirectory() as td:
+            sdir = self._make_session(td)
+            self._with_s_blocks(sdir, marks=(" ", "x"))   # 第一句不勾=剪掉
+            one = self._render(sdir)
+        self.assertEqual(one.returncode, 0, one.stderr or one.stdout)
+        self.assertIn("1 個 S block", one.stdout)
+
+    def test_s_block_text_tampering_fails(self):
+        """補錄 block 只准改勾選與加刪除線,不准改字(同正片的防幻覺規則)。"""
+        with tempfile.TemporaryDirectory() as td:
+            sdir = self._make_session(td)
+            self._with_s_blocks(sdir)
+            md = sdir / "cutplan.md"
+            md.write_text(md.read_text(encoding="utf-8")
+                          .replace("補錄第一句。", "我自己編的句子。"),
+                          encoding="utf-8")
+            proc = self._render(sdir)
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("不准改字", proc.stderr + proc.stdout)
+
     def test_missing_insert_file_fails_loudly(self):
         with tempfile.TemporaryDirectory() as td:
             sdir = self._make_session(td)
