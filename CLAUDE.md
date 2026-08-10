@@ -477,6 +477,20 @@ Step 5 只在 `goodedunote` 專案的 hosting 上新增/更新該篇 `<slug>/`,�
   json 文字 ⊂ 來源 SRT),cutplan 只准翻勾選,文字時間碼不可動。
 - **產物**:`speakers.json`、`transcript.speakers.srt`、`prosody.json`、`highlights.md`、
   `cutplan.md/json`、`final_cut.mp3`、`cut_map.json`、`chapters.txt`,全落 `sessions/<slug>/`。
+- **session 目錄分類(2026-08-10,ADR 0011)**:podcast 線的 session 分四類子目錄,
+  與 Google Drive 用同一套語彙——`raw/`(未進管線的原始素材,如事後補錄)、
+  `tracks/`(已對齊的管線分軌,ingest 寫死)、`_meta/`(人看的伴隨檔:highlights/
+  chapters/pipeline_run/文案/封面/生圖 prompt)、`_bak/`(所有 `*.bak-*`)、
+  `vNN_<YYYYMMDD-HHMM>_<標籤>/`(每版成品一個資料夾:mp3 + cutplan 快照 + render.txt)。
+  **管線工作檔(source/audio16k/transcript*/words/prosody/cutplan/cut_map/
+  speakers*/context)留在 session 根不准搬**——這些檔名被 `scripts/audio/*.py`
+  與 `session.py` 寫死。工具:`python3 scripts/audio/tidy_session.py --session <dir>`
+  (預設 dry-run,`--apply` 才搬,只搬不刪)。
+- **➕ 外部補錄插入(2026-08-10,ADR 0011)**:事後補錄的音檔不在 `source.wav`
+  時間軸上,用 `## ➕ <檔案> [gain=auto|±dB start= end= fade= tempo=]  說明`
+  插進 cutplan 的該位置。`gain=auto`(預設)量兩邊 integrated LUFS 差自動對齊電平;
+  `tempo` 預設 1.0(補錄是自然語速,不跟正片變速);接縫走 10ms 微交疊。
+  補錄**不進防幻覺驗證**(文字本來就不在來源 SRT 裡)。
 - **節目結構(2026-07-28)**:cutplan.md 播放順序=文件行序;`## 🎬`=精華集錦區
   (block 行可複製貼上/重複)、`## 🎵 檔案 fadein= fadeout= lead= tail= start= end=`
   =BGM overlay 疊接(音量包絡見原則 11;ADR 0004)、其他 `##`=章節。

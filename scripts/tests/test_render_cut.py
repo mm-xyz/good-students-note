@@ -439,5 +439,75 @@ class TestDryRunE2E(unittest.TestCase):
         self.assertIn("缺 words.json", proc.stderr + proc.stdout)
 
 
+class TestInsertSyntax(unittest.TestCase):
+    """`## ➕ 檔案` 補錄插入(2026-08-10,EP16 Sarah 補錄)。"""
+
+    def _parse(self, content: str):
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "cutplan.md"
+            p.write_text(content, encoding="utf-8")
+            return parse_program(p)
+
+    def test_defaults_and_explicit_params(self):
+        prog = self._parse(
+            "- [x] B0001 [0:00–0:01] [Sarah] 一句。\n"
+            "## ➕ raw/補錄.WAV\n"
+            "## ➕ raw/補錄2.WAV gain=+3.5 start=2.6 end=42.6 fade=0.05 tempo=1.06  說明文字\n")
+        ins = [it for it in prog if it["kind"] == "insert"]
+        self.assertEqual(len(ins), 2)
+        self.assertEqual(ins[0]["file"], "raw/補錄.WAV")
+        self.assertEqual(ins[0]["gain"], "auto")      # 預設自動電平對齊
+        self.assertEqual(ins[0]["start"], 0.0)
+        self.assertIsNone(ins[0]["end"])
+        self.assertEqual(ins[1]["gain"], "+3.5")
+        self.assertEqual(ins[1]["start"], 2.6)
+        self.assertEqual(ins[1]["end"], 42.6)
+        self.assertEqual(ins[1]["tempo"], 1.06)
+        self.assertEqual(ins[1]["note"], "說明文字")
+
+    def test_insert_line_is_not_swallowed_as_a_chapter(self):
+        """CHAPTER_RE 是 `^## (.+)$`,會吃掉所有 `## ` 開頭的行。
+        `## ✂` 曾經因此被當章節標題寫進 IG 文案(2026-08-10 實踩),
+        `## ➕` 不准重蹈覆轍。"""
+        prog = self._parse("## ➕ raw/補錄.WAV  Sarah 補錄\n")
+        self.assertEqual([it["kind"] for it in prog], ["insert"])
+        self.assertNotIn("chapter", [it["kind"] for it in prog])
+
+
+class TestInsertRender(TestDryRunE2E):
+    """補錄插入的端對端行為(沿用 TestDryRunE2E 的合成 session)。"""
+
+    def test_insert_becomes_a_segment_and_is_reported(self):
+        with tempfile.TemporaryDirectory() as td:
+            sdir = self._make_session(td)
+            write_wav(sdir / "補錄.wav", 4.0, bursts=[(0.2, 3.8)])
+            md = sdir / "cutplan.md"
+            # 插在 B0001 與 B0002 中間 → 兩者不得再併成同一個 speech unit
+            md.write_text(md.read_text(encoding="utf-8").replace(
+                "- [x] B0002", "## ➕ 補錄.wav gain=0  補錄說明\n- [x] B0002"),
+                encoding="utf-8")
+            proc = self._render(sdir)
+        self.assertEqual(proc.returncode, 0, proc.stderr or proc.stdout)
+        self.assertIn("➕ 補錄 補錄.wav", proc.stdout)
+        self.assertIn("補錄說明", proc.stdout)
+
+    def test_missing_insert_file_fails_loudly(self):
+        with tempfile.TemporaryDirectory() as td:
+            sdir = self._make_session(td)
+            md = sdir / "cutplan.md"
+            md.write_text(md.read_text(encoding="utf-8")
+                          + "## ➕ 不存在的補錄.wav\n", encoding="utf-8")
+            proc = self._render(sdir)
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("補錄檔不存在", proc.stderr + proc.stdout)
+
+    def test_insert_does_not_disturb_a_plan_without_inserts(self):
+        """沒有 ➕ 的 cutplan,行為必須跟加這個功能之前一模一樣。"""
+        with tempfile.TemporaryDirectory() as td:
+            proc = self._render(self._make_session(td))
+        self.assertEqual(proc.returncode, 0, proc.stderr or proc.stdout)
+        self.assertNotIn("➕", proc.stdout)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

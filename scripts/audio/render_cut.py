@@ -66,6 +66,9 @@ MUSIC_RE = re.compile(r"^##\s*🎵\s*(\S+)((?:\s+\w+=[\d.]+)*)\s*$")
 TEASER_RE = re.compile(r"^##\s*🎬\s*(.*)$")
 CONFIG_RE = re.compile(r"^##\s*⚙️?\s*(.*)$")
 CUT_RE = re.compile(r"^##\s*✂\s*([\d:.]+)\s*[-–~]\s*([\d:.]+)\s*(.*)$")
+# `## ➕ 檔案 [gain=auto|±dB start= end= fade= tempo=0|1]  說明` — 插入外部語音檔
+# (補錄)。檔案不在 source 的時間軸上,所以走自己的 ffmpeg input,不吃 atrim 主軌。
+INSERT_RE = re.compile(r"^##\s*➕\s*(\S+)((?:\s+\w+=[\w.+-]+)*)\s*(.*)$")
 # cutplan ⚙ config 區可覆蓋的數值旋鈕(dash 寫法;config > CLI/預設)
 CONFIG_KEYS = {"clip_gap", "clip_fade_in", "clip_fade_out", "music_speech_fade",
                "bgm_duck", "bgm_solo", "bgm_predrop", "bgm_rise",
@@ -201,6 +204,19 @@ def parse_program(path: Path) -> list[dict]:
                             "start": float(params.get("start", 0.0)),
                             "end": (float(params["end"])
                                     if "end" in params else None)})
+            clip_mode = False
+            continue
+        mi = INSERT_RE.match(s)
+        if mi:
+            params = dict(re.findall(r"(\w+)=([\w.+-]+)", mi.group(2) or ""))
+            program.append({"kind": "insert", "file": mi.group(1),
+                            "gain": params.get("gain", "auto"),
+                            "start": float(params.get("start", 0.0)),
+                            "end": (float(params["end"])
+                                    if "end" in params else None),
+                            "fade": float(params.get("fade", 0.04)),
+                            "tempo": float(params.get("tempo", 1.0)),
+                            "note": mi.group(3).strip()})
             clip_mode = False
             continue
         mx = CUT_RE.match(s)
@@ -488,6 +504,24 @@ def refine_boundaries(ranges: list[list[float]], wav_path: Path,
     return [[a, b] for a, b in out if b - a > 0.1]
 
 
+def measure_lufs(path: Path) -> float | None:
+    """整體響度(EBU R128 integrated LUFS);量不到回 None。
+
+    補錄跟正片是不同時間、不同增益錄的,直接接上去會有明顯的音量落差
+    (人耳對接縫處的音量跳變特別敏感)。用兩邊的 integrated LUFS 差當增益,
+    比拍腦袋填 dB 可靠,而且是確定性的——零 LLM,可重現。
+    """
+    try:
+        r = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-nostats", "-i", str(path),
+             "-af", "ebur128=framelog=quiet", "-f", "null", "-"],
+            capture_output=True, text=True, check=True)
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return None
+    m = re.findall(r"^\s*I:\s*(-?[\d.]+)\s*LUFS", r.stderr, re.M)
+    return float(m[-1]) if m else None
+
+
 def ffprobe_duration(path: Path) -> float:
     out = subprocess.run(
         ["ffprobe", "-v", "error", "-show_entries", "format=duration",
@@ -525,6 +559,10 @@ def run_ffmpeg(src: Path, segments: list[dict], musics: list[dict], out: Path,
     for m in musics:
         if m["path"] not in music_paths:
             music_paths.append(m["path"])
+    # ➕ 補錄檔也各自是一個 ffmpeg input(它不在 source 的時間軸上)
+    for s in segments:
+        if s["kind"] == "insert" and s["path"] not in music_paths:
+            music_paths.append(s["path"])
     input_idx = {p: i + 1 for i, p in enumerate(music_paths)}
 
     durs = []
@@ -544,6 +582,23 @@ def run_ffmpeg(src: Path, segments: list[dict], musics: list[dict], out: Path,
                 expr += f",afade=t=in:d={f_in:.3f}"
             if f_out:
                 expr += f",afade=t=out:st={max(0.0, d - f_out):.3f}:d={f_out:.3f}"
+        elif s["kind"] == "insert":
+            # 補錄:走自己的 input,不吃主軌 atrim。tempo 預設 1.0(補錄是另外
+            # 錄的,本來就是自然語速);要跟正片同步變速就在 cutplan 寫 tempo=1.06
+            it_tempo = s.get("tempo", 1.0)
+            d = s["dur"] / it_tempo
+            expr = (f"[{input_idx[s['path']]}:a]"
+                    f"atrim=start={s['ss']:.3f}:end={s['ss'] + s['dur']:.3f},"
+                    f"asetpts=PTS-STARTPTS")
+            if abs(it_tempo - 1.0) > 1e-6:
+                expr += f",atempo={it_tempo:.4f}"
+            if abs(s.get("gain_db", 0.0)) > 0.05:
+                expr += f",volume={s['gain_db']:.2f}dB"
+            expr += ",aformat=sample_rates=48000:channel_layouts=stereo"
+            fd = min(s.get("fade", 0.04), d / 2 - 0.005)
+            if fd > 0:
+                expr += (f",afade=t=in:d={fd:.3f}"
+                         f",afade=t=out:st={max(0.0, d - fd):.3f}:d={fd:.3f}")
         else:  # silence
             d = s["dur"]
             expr = (f"anullsrc=r=48000:cl=stereo,atrim=start=0:end={d:.3f},"
@@ -554,7 +609,9 @@ def run_ffmpeg(src: Path, segments: list[dict], musics: list[dict], out: Path,
 
     def joint_cf(i: int) -> float:
         a, b = segments[i - 1], segments[i]
-        if (a["kind"] == "silence" or b["kind"] == "silence"
+        # 補錄兩側已經烘好淡入淡出(而且是另一支麥克風的底噪),再疊 40ms
+        # 交疊只會讓兩層底噪重疊出「唰」一聲 → 比照 silence 走 10ms 微交疊
+        if (a["kind"] in ("silence", "insert") or b["kind"] in ("silence", "insert")
                 or a.get("fade_out") or b.get("fade_in")):
             cf = 0.01
         else:
@@ -755,6 +812,21 @@ def main():
                           "dur": m_end - m_start, "ss": m_start,
                           "fadein": it["fadein"], "fadeout": it["fadeout"],
                           "lead": it["lead"], "tail": it["tail"]})
+        elif it["kind"] == "insert":
+            path = resolve_music(it["file"], sdir, args.material_dir)
+            if not path:
+                sys.exit(f"[render] FAIL: 補錄檔不存在:{it['file']}"
+                         f"(找過 session 目錄/repo 根/絕對路徑)")
+            file_dur = ffprobe_duration(path)
+            i_end = min(it["end"], file_dur) if it["end"] else file_dur
+            if i_end - it["start"] < 0.2:
+                sys.exit(f"[render] FAIL: {it['file']} start={it['start']}/"
+                         f"end={i_end}(音檔長 {file_dur:.1f}s)取不出有效區間")
+            units.append({"kind": "insert", "path": path.resolve(),
+                          "ss": it["start"], "dur": i_end - it["start"],
+                          "gain": it["gain"], "gain_db": 0.0,
+                          "fade": it["fade"],
+                          "tempo": it["tempo"], "note": it["note"]})
         elif it["keep"]:
             b = it["block"]
             last = units[-1] if units else None
@@ -824,7 +896,7 @@ def main():
     n_pause = 0
     manual_secs = 0.0
     for ui, u in enumerate(units):
-        if u["kind"] == "silence":
+        if u["kind"] in ("silence", "insert"):
             unit_first_seg[ui] = len(segments)
             segments.append(u)
             continue
@@ -899,9 +971,13 @@ def main():
     speech_secs = sum(s["b"] - s["a"] for s in segments if s["kind"] == "speech")
     n_clip = sum(1 for s in segments if s["kind"] == "speech" and s.get("clip"))
     total_src = cp["blocks"][-1]["end"] if cp["blocks"] else 0
+    ins_segs = [s for s in segments if s["kind"] == "insert"]
     print(f"[render] {len(segments)} segments(集錦 {n_clip} 段)+ 疊接音樂 "
           f"{len(musics)} 首;語音 {fmt_mmss(speech_secs)}"
           f"(原始 {fmt_mmss(total_src)})")
+    for s in ins_segs:
+        print(f"[render] ➕ 補錄 {s['path'].name} {s['dur']:.1f}s"
+              f"{'  ' + s['note'] if s.get('note') else ''}")
     if args.dry_run:
         for s in segments:
             if s["kind"] == "speech":
@@ -926,6 +1002,27 @@ def main():
 
     src = next(p for p in sorted(sdir.glob("source.*"))
                if p.suffix.lower() not in (".srt", ".md", ".json", ".txt"))
+
+    # ➕ 補錄的電平對齊要等 src 就緒才量得了(正片響度是比較基準)
+    inserts = [s for s in segments if s["kind"] == "insert"]
+    if any(s["gain"] == "auto" for s in inserts):
+        src_l = measure_lufs(src)
+        for s in inserts:
+            if s["gain"] != "auto":
+                s["gain_db"] = float(s["gain"])
+                continue
+            ins_l = measure_lufs(s["path"])
+            if src_l is None or ins_l is None:
+                print(f"[render] ⚠ {s['path'].name} 量不到響度,gain 退回 0dB"
+                      f"(要手動指定就在 cutplan 寫 gain=+3)")
+                continue
+            s["gain_db"] = src_l - ins_l
+            print(f"[render] ➕ {s['path'].name} 電平對齊:正片 {src_l:.1f} LUFS"
+                  f" / 補錄 {ins_l:.1f} LUFS → {s['gain_db']:+.1f}dB")
+    else:
+        for s in inserts:
+            s["gain_db"] = float(s["gain"])
+
     out = sdir / args.out
     dst_starts, final_dur = run_ffmpeg(src, segments, musics, out, args.fade,
                                        args.loudnorm or None, args.crossfade,
