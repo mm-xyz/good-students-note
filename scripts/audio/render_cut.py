@@ -267,22 +267,17 @@ def strike_removals(block: dict, spans: list[list[int]], words: list[dict],
     win = [w for w in words if w["end"] > block["start"] - 0.3
            and w["start"] < block["end"] + 0.3]
     # char 座標 → (start_time, end_time)
-    char_times: list[tuple[float, float]] = []
-    pos_ok = True
-    p = 0
-    for w in win:
-        if p >= len(flat):
-            break      # block 文字已對完;win 尾巴那幾個字屬於下一個 block
-        chars = re.sub(r"\s+", "", w["word"])
-        for ch in chars:
-            if p < len(flat) and flat[p] == ch:
-                char_times.append((w["start"], w["end"]))
-                p += 1
-            else:
-                pos_ok = False
-                break
-        if not pos_ok:
-            break
+    # win 取的是 block 時間窗 ±0.3s,**前後都會多抓到鄰接 block 的字**
+    # (EP16 B0024:win[0]=「可能」192.76 其實是前一句 B0023 的尾巴)。
+    # 逐字流對齊若假設 win[0] 就是 block 第一個字,整條座標會偏——B0024 實測
+    # 偏 0.74s,剪點落在「我的partner。」中間,把 partner 切成半個字。
+    # 正解:把 win 攤成字元流,先用 block 文字在裡面定位起點,再取對應時間。
+    stream = [(ch, w["start"], w["end"])
+              for w in win for ch in re.sub(r"\s+", "", w["word"])]
+    at = "".join(c[0] for c in stream).find(flat)
+    pos_ok = at >= 0
+    char_times: list[tuple[float, float]] = (
+        [(a, b) for _, a, b in stream[at:at + len(flat)]] if pos_ok else [])
     out = []
     dur = block["end"] - block["start"]
     for a, b in spans:
@@ -642,13 +637,20 @@ def main():
     ap.add_argument("--tempo", type=float, default=1.0,
                     help="語速倍率(只套語音,配樂不變速也不變長;1.06≈快一成不失真,"
                          ">1.15 會開始有壓迫感)")
-    ap.add_argument("--max-pause", type=float, default=1.5,
-                    help="保留段內超過此秒數的停頓自動收緊(0=停用)")
+    ap.add_argument("--max-pause", type=float, default=0.9,
+                    help="保留段內超過此秒數的停頓自動收緊(0=停用)。"
+                         "2026-08-10 MM 拍板 1.5→0.9:剪掉停頓是常態、留白才是"
+                         "例外——人審在文字上分辨不出 1.4s 和 0.6s 的死寂"
+                         "(EP16 18:28 那個 1.38s 兩位主持人都是聽成品才發現),"
+                         "所以預設全收,要保留的用 G 列勾回來")
     ap.add_argument("--pause-keep", type=float, default=0.6,
                     help="收緊後保留的停頓長度(秒)")
     ap.add_argument("--dry-run", action="store_true", help="只印剪輯範圍,不跑 ffmpeg")
     args = ap.parse_args()
 
+    if not 0.5 <= args.tempo <= 2.0:
+        sys.exit(f"[render] FAIL: tempo={args.tempo} 超出單顆 atempo 的合法範圍 "
+                 f"0.5–2.0(語速用途實務上 0.9–1.2 就夠;要更極端得串接多顆)")
     sdir = Path(args.session).resolve()
     if (sdir / ".cutplan_pending.json").exists():
         sys.exit("[render] FAIL: .cutplan_pending.json 還在 — 剪輯提案未完成,"
