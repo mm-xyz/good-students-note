@@ -728,6 +728,11 @@ def main():
                          "所以預設全收,要保留的用 G 列勾回來")
     ap.add_argument("--pause-keep", type=float, default=0.6,
                     help="收緊後保留的停頓長度(秒)")
+    ap.add_argument("--max-block", type=float, default=8.0,
+                    help="block 超過此秒數就示警(0=停用)。block 是人審勾選的"
+                         "最小單位,過長=那段只能整段留或整段剪,失去粒度;"
+                         "重切正常的 block 中位數約 1s,所以超長幾乎都是"
+                         "「重切沒跑到那一段」的殘留(2026-08-10 MM 指出)")
     ap.add_argument("--dry-run", action="store_true", help="只印剪輯範圍,不跑 ffmpeg")
     ap.add_argument("--dump-ranges", type=Path,
                     help="把保留區間(原始時間軸,毫秒精度)寫成 JSON — "
@@ -765,6 +770,22 @@ def main():
     srt_src = spk_srt if spk_srt.exists() else pick_transcript(sdir)
     srt_text = "".join(c["text"] for c in parse_srt(srt_src))
     validate_program(cp["blocks"], program, srt_text, cp.get("gaps"))
+
+    # ── 把關:過長 block(2026-08-10 MM 指出,ADR 0011)──
+    # block 是「勾選」的最小單位。一個 12s 的 block 代表那 12 秒只能整段留或
+    # 整段剪,人審失去粒度;而正常重切後的 block 中位數約 1s。過長 block 幾乎
+    # 都是「重切沒跑到那一段」的殘留(EP16 開頭 7:33 有 21 個,含兩個正好 30.0s
+    # 的舊上限指紋),不是內容真的講了那麼久沒停。
+    long_blocks = [b for b in cp["blocks"]
+                   if args.max_block > 0 and b["end"] - b["start"] > args.max_block]
+    if long_blocks:
+        worst = sorted(long_blocks, key=lambda b: b["start"] - b["end"])[:5]
+        print(f"[render] ⚠ {len(long_blocks)}/{len(cp['blocks'])} 個 block 超過 "
+              f"{args.max_block}s — 人審在這些段落沒有勾選粒度,"
+              f"通常是重切沒跑到(--max-block 可調):")
+        for b in worst:
+            print(f"           {b['id']} {fmt_mmss(b['start'])} "
+                  f"長 {b['end'] - b['start']:.1f}s  {b['text'][:24]}…")
 
     wp = sdir / "words.json"
     words = json.loads(wp.read_text(encoding="utf-8")) if wp.exists() else None

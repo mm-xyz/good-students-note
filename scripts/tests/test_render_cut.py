@@ -501,6 +501,30 @@ class TestInsertRender(TestDryRunE2E):
         self.assertNotEqual(proc.returncode, 0)
         self.assertIn("補錄檔不存在", proc.stderr + proc.stdout)
 
+    def test_over_long_block_is_flagged(self):
+        """block 是人審勾選的最小單位,過長=那段失去粒度。
+        EP16 開頭 7:33 藏了 21 個(含兩個正好 30.0s 的舊分段指紋),
+        一路帶進四版成品沒人發現 — 2026-08-10 MM 指出後補的把關。"""
+        with tempfile.TemporaryDirectory() as td:
+            sdir = self._make_session(td)
+            cj = sdir / "cutplan.json"
+            data = json.loads(cj.read_text(encoding="utf-8"))
+            data["blocks"][0]["end"] = data["blocks"][0]["start"] + 30.0
+            cj.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+            proc = self._render(sdir)
+        self.assertIn("超過 8.0s", proc.stdout)
+        self.assertIn("長 30.0s", proc.stdout)
+
+    def test_max_block_zero_disables_the_gate(self):
+        with tempfile.TemporaryDirectory() as td:
+            sdir = self._make_session(td)
+            cj = sdir / "cutplan.json"
+            data = json.loads(cj.read_text(encoding="utf-8"))
+            data["blocks"][0]["end"] = data["blocks"][0]["start"] + 30.0
+            cj.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+            proc = self._render(sdir, "--max-block", "0")
+        self.assertNotIn("沒有勾選粒度", proc.stdout)
+
     def test_insert_does_not_disturb_a_plan_without_inserts(self):
         """沒有 ➕ 的 cutplan,行為必須跟加這個功能之前一模一樣。"""
         with tempfile.TemporaryDirectory() as td:
