@@ -62,10 +62,21 @@ def resolve_music(token: str, sdir: Path, material_dir: Path) -> Path | None:
 MUSIC_RE = re.compile(r"^##\s*🎵\s*(\S+)((?:\s+\w+=[\d.]+)*)\s*$")
 TEASER_RE = re.compile(r"^##\s*🎬\s*(.*)$")
 CONFIG_RE = re.compile(r"^##\s*⚙️?\s*(.*)$")
+CUT_RE = re.compile(r"^##\s*✂\s*([\d:.]+)\s*[-–~]\s*([\d:.]+)\s*(.*)$")
 # cutplan ⚙ config 區可覆蓋的數值旋鈕(dash 寫法;config > CLI/預設)
 CONFIG_KEYS = {"clip_gap", "clip_fade_in", "clip_fade_out", "music_speech_fade",
                "bgm_duck", "bgm_solo", "bgm_predrop", "bgm_rise",
-               "max_pause", "pause_keep", "crossfade", "snap_window", "fade"}
+               "max_pause", "pause_keep", "crossfade", "snap_window", "fade",
+               "tempo"}
+
+
+def parse_ts(tok: str) -> float:
+    """`736.45` / `12:16.45` / `1:02:16.4` → 秒。"""
+    parts = tok.split(":")
+    secs = 0.0
+    for p in parts:
+        secs = secs * 60 + float(p)
+    return secs
 
 
 def bgm_envelope(m: dict, duck: float, solo: float, predrop: float,
@@ -160,6 +171,10 @@ def parse_program(path: Path) -> list[dict]:
             lead=音樂提前 L 秒疊進前面語音的尾巴;tail=後面語音提前 T 秒
             疊進音樂的尾巴;中段獨奏長度=採用長度-lead-tail(疊接式進出場);
             start/end=只取音檔的 S–E 秒(可選,預設從頭播到尾)
+      {"kind":"cut", "a", "b", "note"}               — `## ✂ 12:16.3-12:17.4 說明`
+          手動剪除區間(原始時間軸,秒或 mm:ss.s)。人審的逃生艙:whisper 字級
+          時間戳把停頓吃進字的時長時,自動停頓收緊會被 word 保護擋下(EP16 12:00
+          「臨時 任務」中間的 1.3s),這時直接標區間,不受 word_guard 攔阻。
       {"kind":"chapter", "title"}                    — 其他 `## 標題`
     raw = 去掉 speaker 前綴/行尾理由的正文,可能含 `~~刪除線~~`(對照 json 後才解析)。
     """
@@ -184,6 +199,12 @@ def parse_program(path: Path) -> list[dict]:
                             "end": (float(params["end"])
                                     if "end" in params else None)})
             clip_mode = False
+            continue
+        mx = CUT_RE.match(s)
+        if mx:
+            program.append({"kind": "cut", "a": parse_ts(mx.group(1)),
+                            "b": parse_ts(mx.group(2)),
+                            "note": mx.group(3).strip()})
             continue
         mt = TEASER_RE.match(s)
         if mt:
@@ -250,6 +271,8 @@ def strike_removals(block: dict, spans: list[list[int]], words: list[dict],
     pos_ok = True
     p = 0
     for w in win:
+        if p >= len(flat):
+            break      # block 文字已對完;win 尾巴那幾個字屬於下一個 block
         chars = re.sub(r"\s+", "", w["word"])
         for ch in chars:
             if p < len(flat) and flat[p] == ch:
@@ -380,15 +403,23 @@ def validate_program(blocks: list[dict], program: list[dict],
 
 
 def snap_boundaries(ranges: list[list[float]], silences: list[dict],
-                    window: float) -> list[list[float]]:
-    """每個範圍的頭尾若在靜音段 ±window 內,移到該靜音的中點。"""
-    def snap(t: float) -> float:
+                    window: float, long_silence: float = 1.0,
+                    pad: float = 0.12) -> list[list[float]]:
+    """每個範圍的頭尾若在靜音段 ±window 內,移到該靜音的中點。
+
+    長靜音(>long_silence)例外:中點會把半段靜音吃進保留範圍,而前後兩個 unit
+    的邊界又會 snap 到**同一個**靜音的中點 → 整段靜音原封不動留在成品裡
+    (EP16 26:39 的 3.4s 事故:G0010 明明沒勾選,剪除量卻是 0)。長靜音改貼近端、
+    只留 pad 秒呼吸:範圍尾→靜音起點+pad、範圍頭→靜音終點-pad。
+    """
+    def snap(t: float, is_start: bool) -> float:
         for s in silences:
-            mid = (s["start"] + s["end"]) / 2
             if s["start"] - window <= t <= s["end"] + window:
-                return mid
+                if s["end"] - s["start"] > long_silence:
+                    return s["end"] - pad if is_start else s["start"] + pad
+                return (s["start"] + s["end"]) / 2
         return t
-    return [[snap(a), snap(b)] for a, b in ranges]
+    return [[snap(a, True), snap(b, False)] for a, b in ranges]
 
 
 def merge_ranges(ranges: list[list[float]], min_gap: float = 0.2) -> list[list[float]]:
@@ -450,7 +481,7 @@ def ffprobe_duration(path: Path) -> float:
 
 def run_ffmpeg(src: Path, segments: list[dict], musics: list[dict], out: Path,
                fade: float, loudnorm: str | None, crossfade: float,
-               dynaudnorm: str | None) -> tuple[list[float], float]:
+               dynaudnorm: str | None, tempo: float = 1.0) -> tuple[list[float], float]:
     """出片(節目結構 2026-07-28 v2:音樂改 overlay 疊接,不進 concat 鏈)。
 
     concat 鏈只有 speech/silence:
@@ -466,6 +497,10 @@ def run_ffmpeg(src: Path, segments: list[dict], musics: list[dict], out: Path,
     音量走 env(bgm_envelope 的疊軌感知包絡,volume expr 逐 frame 內插),
     取代舊的 afade in/out。
     語音鏈之後依序:dynaudnorm(人聲動態均衡)→ amix 音樂 → loudnorm。
+
+    tempo>1 = 語速加速:atempo **只烘進語音 segment**(音樂走 overlay 支線,
+    不變速、長度不變),所以先加速再算 dst 時間軸,音樂錨點自然落在加速後的
+    位置——等同「語速調完才拼 opening/closing」。
     回傳 (每個 segment 在新時間軸上的起點, 成品總長)。
     """
     n = len(segments)
@@ -479,10 +514,13 @@ def run_ffmpeg(src: Path, segments: list[dict], musics: list[dict], out: Path,
     parts = []
     for i, s in enumerate(segments):
         if s["kind"] == "speech":
-            d = s["b"] - s["a"]
+            d = (s["b"] - s["a"]) / tempo
             expr = (f"[0:a]atrim=start={s['a']:.3f}:end={s['b']:.3f},"
-                    f"asetpts=PTS-STARTPTS,aformat=sample_rates=48000:"
-                    f"channel_layouts=stereo")
+                    f"asetpts=PTS-STARTPTS")
+            if abs(tempo - 1.0) > 1e-6:
+                expr += f",atempo={tempo:.4f}"
+            expr += (f",aformat=sample_rates=48000:"
+                     f"channel_layouts=stereo")
             f_in = s.get("fade_in") or (fade if i == 0 else 0.0)
             f_out = s.get("fade_out") or (fade if i == n - 1 else 0.0)
             if f_in:
@@ -601,6 +639,9 @@ def main():
     ap.add_argument("--dynaudnorm", default="m=4:p=0.9",
                     help="人聲動態均衡參數(ffmpeg dynaudnorm;多人同軌音量拉齊,"
                          "預設 m=4:p=0.9 保守增益;傳空字串停用)")
+    ap.add_argument("--tempo", type=float, default=1.0,
+                    help="語速倍率(只套語音,配樂不變速也不變長;1.06≈快一成不失真,"
+                         ">1.15 會開始有壓迫感)")
     ap.add_argument("--max-pause", type=float, default=1.5,
                     help="保留段內超過此秒數的停頓自動收緊(0=停用)")
     ap.add_argument("--pause-keep", type=float, default=0.6,
@@ -660,8 +701,10 @@ def main():
     #    blocks 併成一個 speech unit;🎬 集錦行自成 clip units)──
     units = []       # {"kind":"speech","start","end","items":[...],"clip"} | music
     chapters = []    # {"title","anchor"=下一個 unit 的 index}
+    manual_cuts = sorted([[it["a"], it["b"]] for it in program
+                          if it["kind"] == "cut" and it["b"] > it["a"]])
     for it in program:
-        if it["kind"] == "config":
+        if it["kind"] in ("config", "cut"):
             continue
         if it["kind"] == "chapter":
             chapters.append({"title": it["title"], "anchor": len(units)})
@@ -740,6 +783,7 @@ def main():
     segments = []
     unit_first_seg = {}
     n_pause = 0
+    manual_secs = 0.0
     for ui, u in enumerate(units):
         if u["kind"] == "silence":
             unit_first_seg[ui] = len(segments)
@@ -769,6 +813,12 @@ def main():
         ranges = refine_boundaries(ranges, sdir / "audio16k.wav")
         if words:
             ranges = word_guard(ranges, words)
+        if manual_cuts:
+            # ✂ 手動剪除擺在 word_guard 之後:人審點名的區間說了算,不受
+            # 「whisper 說這裡有字」的保護攔阻(那正是它要救的失效情境)
+            before = sum(b - a for a, b in ranges)
+            ranges = subtract(ranges, manual_cuts)
+            manual_secs += before - sum(b - a for a, b in ranges)
         ranges = merge_ranges(ranges, min_gap=0.05)
         if ranges and u.get("start_exact"):
             ranges[0][0] = u["start"]
@@ -792,6 +842,14 @@ def main():
         print(f"[render] 字級精剪: {n_strike} 處刪除線")
     if n_pause:
         print(f"[render] 停頓收緊: {n_pause} 處 >{args.max_pause}s")
+    if manual_cuts:
+        print(f"[render] ✂ 手動剪除: {len(manual_cuts)} 段標記,實際剪掉 "
+              f"{manual_secs:.2f}s")
+        if manual_secs < 0.05:
+            print("[render] ⚠ ✂ 標記一秒都沒剪到 — 區間是不是落在已被剪掉的"
+                  "範圍、或時間碼寫成成品時間軸了?(✂ 吃的是原始錄音時間軸)")
+    if abs(args.tempo - 1.0) > 1e-6:
+        print(f"[render] 語速 {args.tempo}x(只套語音,配樂原速)")
 
     speech_secs = sum(s["b"] - s["a"] for s in segments if s["kind"] == "speech")
     n_clip = sum(1 for s in segments if s["kind"] == "speech" and s.get("clip"))
@@ -826,7 +884,7 @@ def main():
     out = sdir / args.out
     dst_starts, final_dur = run_ffmpeg(src, segments, musics, out, args.fade,
                                        args.loudnorm or None, args.crossfade,
-                                       args.dynaudnorm or None)
+                                       args.dynaudnorm or None, args.tempo)
 
     cut_map = [{"src_start": round(s["a"], 3), "src_end": round(s["b"], 3),
                 "dst_start": round(d, 3)}
@@ -845,6 +903,7 @@ def main():
         "generated_at": dt.datetime.now().isoformat(timespec="seconds"),
         "final_duration_secs": round(final_dur, 3),
         "speech_secs": round(speech_secs, 3),
+        "tempo": args.tempo,   # dst→src 反查要乘回去(語音已加速,音樂沒有)
         "ranges": cut_map,
         "music": music_map,
     }, ensure_ascii=False, indent=2), encoding="utf-8")
