@@ -74,6 +74,21 @@ class TestSemanticDiff(unittest.TestCase):
         out = "\n".join(semantic_diff(self.a, b))
         self.assertIn("block 集合不一致", out)
 
+    def test_music_param_change_reported(self) -> None:
+        """🎵 參數(lead/end)動了要看得見 — EP16 的結語就是被 lead=13 蓋掉的。"""
+        head = HEAD + "## 🎵 ending fadein=2 lead=13\n"
+        a = write(self.d, "ma.md", head + ROWS)
+        b = write(self.d, "mb.md",
+                  HEAD + "## 🎵 ending end=20 fadein=2 lead=3\n" + ROWS)
+        out = "\n".join(semantic_diff(a, b))
+        self.assertIn("🎵 ending", out)
+        self.assertIn("lead 13.0→3.0", out)
+        self.assertIn("end None→20.0", out)
+
+    def test_music_only_on_one_side_reported(self) -> None:
+        b = write(self.d, "mb.md", HEAD + "## 🎵 break start=0 end=8\n" + ROWS)
+        self.assertIn("🎵 break:只在 B", "\n".join(semantic_diff(self.a, b)))
+
     def test_cosmetic_only_diff_says_no_edit_impact(self) -> None:
         b = write(self.d, "b.md", HEAD + "> 隨手寫的註解\n" + ROWS)
         self.assertIn("不影響剪輯", "\n".join(semantic_diff(self.a, b)))

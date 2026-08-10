@@ -72,8 +72,8 @@ def find_drive_dir(sdir: Path, override: Path | None) -> Path | None:
 def semantic_diff(a: Path, b: Path) -> list[str]:
     """兩份 cutplan 的**語意**差異(不是逐行 diff):勾選翻轉、刪除線增減、
     ✂ 手動剪除、⚙ 參數。逐行 diff 對這種一行幾百字的檔案沒有可讀性。"""
-    def load(p: Path) -> tuple[dict, dict, set, dict]:
-        keep, strikes, cuts, cfg = {}, {}, set(), {}
+    def load(p: Path) -> tuple[dict, dict, set, dict, dict]:
+        keep, strikes, cuts, cfg, mus = {}, {}, set(), {}, {}
         for it in parse_program(p):
             if it["kind"] == "block":
                 keep[it["id"]] = it["keep"]
@@ -82,10 +82,14 @@ def semantic_diff(a: Path, b: Path) -> list[str]:
                 cuts.add((round(it["a"], 2), round(it["b"], 2)))
             elif it["kind"] == "config":
                 cfg.update(it["params"])
-        return keep, strikes, cuts, cfg
+            elif it["kind"] == "music":
+                mus[it["file"]] = {k: it[k] for k in
+                                   ("start", "end", "fadein", "fadeout",
+                                    "lead", "tail")}
+        return keep, strikes, cuts, cfg, mus
 
-    ka, sa, ca, ga = load(a)
-    kb, sb, cb, gb = load(b)
+    ka, sa, ca, ga, ma = load(a)
+    kb, sb, cb, gb, mb = load(b)
     out = []
     flipped = [i for i in ka if i in kb and ka[i] != kb[i]]
     if flipped:
@@ -106,6 +110,14 @@ def semantic_diff(a: Path, b: Path) -> list[str]:
     if dg:
         out.append("  ⚙ " + "、".join(f"{k}: {ga.get(k, '無')}→{gb.get(k, '無')}"
                                       for k in sorted(dg)))
+    for f in sorted(set(ma) | set(mb)):
+        if ma.get(f) == mb.get(f):
+            continue
+        if f not in ma or f not in mb:
+            out.append(f"  🎵 {f}:{'只在 B' if f in mb else '只在 A'}")
+            continue
+        d = [f"{k} {ma[f][k]}→{mb[f][k]}" for k in ma[f] if ma[f][k] != mb[f][k]]
+        out.append(f"  🎵 {f}:" + "、".join(d))
     only = set(ka) ^ set(kb)
     if only:
         out.append(f"  ⚠ block 集合不一致({len(only)} 個只在一邊)"

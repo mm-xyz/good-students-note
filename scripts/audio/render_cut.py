@@ -70,7 +70,7 @@ CUT_RE = re.compile(r"^##\s*✂\s*([\d:.]+)\s*[-–~]\s*([\d:.]+)\s*(.*)$")
 CONFIG_KEYS = {"clip_gap", "clip_fade_in", "clip_fade_out", "music_speech_fade",
                "bgm_duck", "bgm_solo", "bgm_predrop", "bgm_rise",
                "max_pause", "pause_keep", "crossfade", "snap_window", "fade",
-               "tempo"}
+               "tempo", "music_lead_max"}
 
 
 def parse_ts(tok: str) -> float:
@@ -656,6 +656,10 @@ def main():
     ap.add_argument("--dynaudnorm", default="m=4:p=0.9",
                     help="人聲動態均衡參數(ffmpeg dynaudnorm;多人同軌音量拉齊,"
                          "預設 m=4:p=0.9 保守增益;傳空字串停用)")
+    ap.add_argument("--music-lead-max", type=float, default=3.0,
+                    help="音樂最多能疊進前段人聲幾秒(預設 3;lead 寫得比這大"
+                         "會被夾住並印警告 — 結語被音樂蓋掉是聽感事故,"
+                         "不該靠每集手調 lead 避開)")
     ap.add_argument("--tempo", type=float, default=1.0,
                     help="語速倍率(只套語音,配樂不變速也不變長;1.06≈快一成不失真,"
                          ">1.15 會開始有壓迫感)")
@@ -781,6 +785,14 @@ def main():
         has_prev = any(v["kind"] == "speech" for v in units[:i])
         nxt = next((v for v in units[i + 1:] if v["kind"] == "speech"), None)
         lead = u["lead"] if has_prev else 0.0
+        if lead > args.music_lead_max:
+            # lead 是盲目的秒數,不管那幾秒裡還有沒有話要講:EP16 的 ending
+            # lead=13 把整段結語(「希望你可以在工作中找到你的成就感」「拜拜」)
+            # 全壓在音樂底下。夾住上限,人聲講完才交給音樂。
+            print(f"[render] ⚠ {u['path'].name} 的 lead={u['lead']}s 會蓋住"
+                  f" {u['lead']:.0f}s 人聲,夾到 {args.music_lead_max}s"
+                  f"(要更長就調 --music-lead-max)")
+            lead = args.music_lead_max
         tail = u["tail"] if nxt else 0.0
         m = {"path": u["path"], "dur": u["dur"], "ss": u["ss"],
              "fadein": u["fadein"], "fadeout": u["fadeout"],
