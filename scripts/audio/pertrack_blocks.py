@@ -155,16 +155,23 @@ def main() -> int:
                         for j in range(len(tracks)) if j != i)
         print(f"    {ti['speaker']:6s} ← {row}")
 
-    # ── 有文字的 block:該軌能量要超出串音預測才算自己講的 ──
+    # ── 有文字的 block:**波形支配**判定(2026-08-11 MM:「用波形看這段聲音
+    #    主要在誰那,就用誰的為主」)。文字歸屬與附和偵測是兩件事,要用兩個判準:
+    #      文字歸屬 → 支配(誰大聲就是誰的話);串音轉出來的重複句自然被排除
+    #      附和偵測 → 串音校準的 excess(見下一段);小聲但真的有出聲照樣抓得到
+    #    先前把兩者都換成 excess,結果 KIN 附和時他的軌通過檢定,連帶把 Mars
+    #    串音轉出來的文字也算成 KIN 的話(K0054-K0057)。分開用就對了。 ──
     for i, t in enumerate(tracks):
         kept = []
         for c in t["cues"]:
-            ex = excess_db(tracks, g, i, c["start"], c["end"])
-            if ex < args.excess:
-                continue                      # 串音而已,這句是別人的
+            lv = [(rms_db(o["env"], c["start"], c["end"]), j)
+                  for j, o in enumerate(tracks)]
+            lv.sort(reverse=True)
+            if lv[0][1] != i:
+                continue                      # 這段主要不在他那,串音而已
             kept.append({"start": round(c["start"], 3), "end": round(c["end"], 3),
                          "text": c["text"].strip(), "kind": "speech",
-                         "excess_db": round(ex, 1)})
+                         "excess_db": round(lv[0][0] - lv[1][0], 1)})
         t["kept"] = kept
         print(f"[pertrack] {t['speaker']:6s} {len(t['cues'])} 句 → 自己的 "
               f"{len(kept)} 句(判為串音 {len(t['cues']) - len(kept)})")
