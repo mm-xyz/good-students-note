@@ -31,7 +31,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from srt_utils import parse_srt, pick_transcript, fmt_mmss, sec_to_ts
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
-MATERIAL_DIR = PROJECT_ROOT / "shared-material" / "水星貓的生活實驗室_v2"
+# 2026-08-10 MM:節目音樂用 v1(三首各自的正式曲——開場 Park Avenue、
+# 中場 just fun、片尾 to many mind);v2 的三個檔其實是同一首複製三份的佔位。
+# 檔名尾巴標了建議取用區間(`M開_00：00-00：10`),cutplan 的 start=/end= 照它設。
+MATERIAL_DIR = PROJECT_ROOT / "shared-material" / "水星貓的生活實驗室_v1"
 LINE_RE = re.compile(r"^- \[( |x|X)\] ([BG]\d{3,5}) \[([^\]]+)\] (.*)$")
 CHAPTER_RE = re.compile(r"^## (.+)$")
 AUDIO_EXTS = (".mp3", ".m4a", ".wav", ".aac", ".flac", ".ogg")
@@ -630,7 +633,7 @@ def main():
                     help="人聲結束後 BGM 從 duck 升到 solo 的秒數(預設 1.5)")
     ap.add_argument("--material-dir", type=Path, default=MATERIAL_DIR,
                     help="共用素材庫(🎵 檔名找不到時在此做前綴匹配;"
-                         "預設 shared-material/水星貓的生活實驗室_v2)")
+                         "預設 shared-material/水星貓的生活實驗室_v1)")
     ap.add_argument("--dynaudnorm", default="m=4:p=0.9",
                     help="人聲動態均衡參數(ffmpeg dynaudnorm;多人同軌音量拉齊,"
                          "預設 m=4:p=0.9 保守增益;傳空字串停用)")

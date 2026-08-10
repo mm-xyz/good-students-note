@@ -1,0 +1,112 @@
+#!/usr/bin/env python3
+"""test_cut.py — cut.py(一行出片)的行為鎖定測試。
+
+鎖的是不碰 ffmpeg / 不碰 Drive 的純邏輯:Drive↔session cutplan 的語意差異
+比對、Drive 資料夾配對(memo 優先)、輸出檔名遞增。
+
+跑法:
+    python3 scripts/tests/test_cut.py
+"""
+from __future__ import annotations
+
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "audio"))
+from cut import find_drive_dir, next_out_name, semantic_diff  # noqa: E402
+
+HEAD = "# Cutplan — test\n\n## ⚙ max-pause=1.5 tempo=1.0\n"
+ROWS = ("- [x] B0001 [0:02–0:05] [Sarah] 嗨大家好。\n"
+        "- [x] B0002 [0:06–0:09] [KIN] 我是KIN。\n"
+        "- [ ] B0003 [0:10–0:12] [Mars] 呃這個。\n")
+
+
+def write(d: Path, name: str, body: str) -> Path:
+    p = d / name
+    p.write_text(body, encoding="utf-8")
+    return p
+
+
+class TestSemanticDiff(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.d = Path(self.tmp.name)
+        self.a = write(self.d, "a.md", HEAD + ROWS)
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def test_keep_flip_reported_with_direction(self) -> None:
+        b = write(self.d, "b.md", HEAD + ROWS.replace(
+            "- [x] B0002", "- [ ] B0002"))
+        out = "\n".join(semantic_diff(self.a, b))
+        self.assertIn("勾選翻轉 1 個", out)
+        self.assertIn("B0002(留→剪)", out)
+
+    def test_strike_count_change_reported(self) -> None:
+        b = write(self.d, "b.md", HEAD + ROWS.replace(
+            "[KIN] 我是KIN。", "[KIN] 我是~~KIN~~。"))
+        out = "\n".join(semantic_diff(self.a, b))
+        self.assertIn("刪除線變動", out)
+        self.assertIn("B0002 0→1", out)
+
+    def test_manual_cut_rows_diffed_per_side(self) -> None:
+        b = write(self.d, "b.md", HEAD + "## ✂ 12.5-13.5 空白\n" + ROWS)
+        out = "\n".join(semantic_diff(self.a, b))
+        self.assertIn("✂ 只在 B", out)
+        self.assertIn("12.5-13.5", out)
+
+    def test_config_change_reported(self) -> None:
+        b = write(self.d, "b.md", (HEAD.replace("max-pause=1.5", "max-pause=0.9")
+                                   + ROWS))
+        out = "\n".join(semantic_diff(self.a, b))
+        self.assertIn("max-pause: 1.5→0.9", out)
+
+    def test_block_set_mismatch_warns_regenerated_cutplan(self) -> None:
+        """一邊重新產生過(block 編號位移)→ 必須警告,不能無腦覆蓋。"""
+        b = write(self.d, "b.md", HEAD + ROWS
+                  + "- [x] B0004 [0:13–0:15] [Sarah] 多一句。\n")
+        out = "\n".join(semantic_diff(self.a, b))
+        self.assertIn("block 集合不一致", out)
+
+    def test_cosmetic_only_diff_says_no_edit_impact(self) -> None:
+        b = write(self.d, "b.md", HEAD + "> 隨手寫的註解\n" + ROWS)
+        self.assertIn("不影響剪輯", "\n".join(semantic_diff(self.a, b)))
+
+
+class TestOutName(unittest.TestCase):
+    def test_explicit_name_wins(self) -> None:
+        with tempfile.TemporaryDirectory() as t:
+            self.assertEqual(next_out_name(Path(t), "x.mp3"), "x.mp3")
+
+    def test_increments_past_existing_versions(self) -> None:
+        with tempfile.TemporaryDirectory() as t:
+            d = Path(t)
+            self.assertEqual(next_out_name(d, None), "final_cut_v2.mp3")
+            (d / "final_cut_v2.mp3").touch()
+            (d / "final_cut_v3.mp3").touch()
+            self.assertEqual(next_out_name(d, None), "final_cut_v4.mp3")
+
+
+class TestFindDriveDir(unittest.TestCase):
+    def test_override_is_remembered(self) -> None:
+        with tempfile.TemporaryDirectory() as t:
+            sdir, drive = Path(t) / "s", Path(t) / "drive"
+            sdir.mkdir()
+            drive.mkdir()
+            self.assertEqual(find_drive_dir(sdir, drive), drive)
+            # 第二次不給 override 也要從 memo 撈回來
+            self.assertEqual(find_drive_dir(sdir, None), drive)
+
+    def test_stale_memo_pointing_nowhere_is_ignored(self) -> None:
+        with tempfile.TemporaryDirectory() as t:
+            sdir = Path(t) / "2026-01-01_EP99-無此集"
+            sdir.mkdir()
+            (sdir / ".drive_dir").write_text("/nope/gone", encoding="utf-8")
+            self.assertIsNone(find_drive_dir(sdir, None))
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

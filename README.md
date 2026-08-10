@@ -139,6 +139,20 @@ render 會直接 FAIL(防手滑/防 AI 幻覺)。高昂精華段參考 `highligh
 
 ### 4. 出片
 
+平常用這個(一行跑完 Drive 對照 → 驗證 → 出片 → 同步回 Drive):
+
+```bash
+python3 scripts/audio/cut.py --session sessions/<slug>          # 出片
+python3 scripts/audio/cut.py --session sessions/<slug> --check  # 只驗證不出片
+```
+
+人審是在 **Drive 副本**上改的,render 的真相源卻是 session 那份(ADR 0001)——
+`cut.py` 開頭就對照兩邊:內容一樣直接往下,不一樣就列出**語意差異**(哪些 block
+勾選翻了、刪除線增減、`✂`/`⚙` 改了什麼)再讓人選用哪一份,預設較新的那份。
+出片檔名自動遞增 `final_cut_vN.mp3`,不覆蓋既有成品。
+
+只想跑 render 本身:
+
 ```bash
 python3 scripts/audio/render_cut.py --session sessions/<slug>
 ```
@@ -147,7 +161,8 @@ python3 scripts/audio/render_cut.py --session sessions/<slug>
 時間對照,之後剪 shorts/影片用)。自動處理:
 
 - **剪點平滑**:滑到波形能量谷底下刀 + word 邊界保護(絕不切在字中間)+ 接縫 40ms crossfade
-- **停頓收緊**:>1.5s 的真停頓(與字區間求差,不會誤吃小聲字尾)自動壓到 0.6s
+- **停頓收緊**:>0.9s 的真停頓(與字區間求差,不會誤吃小聲字尾)自動壓到 0.6s
+- **語速**:`--tempo`/`⚙ tempo=` 只加速語音,配樂不變速也不變長
 - **音量一致化**:EBU R128 loudnorm 拉到 podcast 標準 -16 LUFS(多人麥距不同也拉齊)
 
 改完 cutplan 隨時重跑,一分鐘出新版。先 `--dry-run` 可只看剪輯範圍不出片。

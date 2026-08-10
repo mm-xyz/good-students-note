@@ -23,7 +23,7 @@ import sys
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
-DEFAULT_TEMPLATE = (PROJECT_ROOT / "shared-material" / "水星貓的生活實驗室_v2"
+DEFAULT_TEMPLATE = (PROJECT_ROOT / "shared-material" / "水星貓的生活實驗室_v1"
                     / "prompt_集數文案.md")
 LINE_RE = re.compile(r"^- \[(x|X)\] (B\d{3,5}) \[([^\]]+)\] (?:\[([^\]]{1,20})\] )?(.*)$")
 MUSIC_RE = re.compile(r"^##\s*🎵")
