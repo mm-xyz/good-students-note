@@ -137,12 +137,19 @@ def ask(prompt: str, options: str, default: str) -> str:
             return a
 
 
+OUT_RE = re.compile(r"^final_cut_v(\d+)\.")
+
+
 def next_out_name(sdir: Path, given: str | None) -> str:
+    """接**最大**號往上,不是找第一個沒被佔用的空號。
+
+    後者在「v3 在、v2 被刪或改名」時會產生 v2,版本號往回跳 — 檔名的先後
+    順序就不再等於出片的先後順序,對照哪一版是哪一版會錯亂。
+    """
     if given:
         return given
-    n = 2
-    while (sdir / f"final_cut_v{n}.mp3").exists():
-        n += 1
+    n = max((int(m.group(1)) for p in sdir.iterdir()
+             for m in [OUT_RE.match(p.name)] if m), default=1) + 1
     return f"final_cut_v{n}.mp3"
 
 

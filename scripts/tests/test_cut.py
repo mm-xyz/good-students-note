@@ -107,6 +107,20 @@ class TestOutName(unittest.TestCase):
             (d / "final_cut_v3.mp3").touch()
             self.assertEqual(next_out_name(d, None), "final_cut_v4.mp3")
 
+    def test_continues_from_highest_not_first_free_slot(self) -> None:
+        """v3 在、v2 不在 → 要 v4。找空號會產生 v2,版本號往回跳。"""
+        with tempfile.TemporaryDirectory() as t:
+            d = Path(t)
+            (d / "final_cut_v3.mp3").touch()
+            self.assertEqual(next_out_name(d, None), "final_cut_v4.mp3")
+
+    def test_other_files_do_not_confuse_numbering(self) -> None:
+        with tempfile.TemporaryDirectory() as t:
+            d = Path(t)
+            for n in ("final_cut.mp3", "cutplan.md", "final_cut_v3.mp3"):
+                (d / n).touch()
+            self.assertEqual(next_out_name(d, None), "final_cut_v4.mp3")
+
 
 class TestVersionDir(unittest.TestCase):
     NOW = dt.datetime(2026, 8, 10, 18, 30)
