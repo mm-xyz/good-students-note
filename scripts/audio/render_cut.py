@@ -307,19 +307,10 @@ def pause_removals(ranges: list[list[float]], silences: list[dict],
         for s in silences:
             if not (s["start"] > a + 0.3 and s["end"] < b - 0.3):
                 continue
-            lo, hi = s["start"], s["end"]
-            if words:
-                for w in words:
-                    if w["end"] <= lo or w["start"] >= hi:
-                        continue
-                    # word 侵入靜音段:縮短靜音窗到字的邊界外
-                    if w["start"] <= lo:
-                        lo = max(lo, w["end"] + 0.05)
-                    elif w["end"] >= hi:
-                        hi = min(hi, w["start"] - 0.05)
-                    else:  # word 整個在中間 → 這段不是真停頓,放棄
-                        lo, hi = 0.0, 0.0
-                        break
+            c = clamp_silence(s, words)
+            if not c:
+                continue
+            lo, hi = c
             if hi - lo > max_pause:
                 out.append([lo + keep / 2, hi - keep / 2])
     return out
@@ -400,8 +391,28 @@ def validate_program(blocks: list[dict], program: list[dict],
         it["block"] = b
 
 
+def clamp_silence(s: dict, words: list[dict] | None) -> tuple[float, float] | None:
+    """把靜音段夾進「真正沒有字」的區間;字橫跨整段就不是停頓,回 None。
+
+    RMS 門檻會把講得小聲的字尾算成靜音(EP15 0:49 事故),照著下刀會切掉字。
+    pause_removals 與 snap_boundaries 共用這道保護。
+    """
+    lo, hi = s["start"], s["end"]
+    for w in words or []:
+        if w["end"] <= lo or w["start"] >= hi:
+            continue
+        if w["start"] <= lo:
+            lo = max(lo, w["end"] + 0.05)
+        elif w["end"] >= hi:
+            hi = min(hi, w["start"] - 0.05)
+        else:
+            return None       # 字整個在中間 → 這段不是真停頓
+    return (lo, hi) if hi > lo else None
+
+
 def snap_boundaries(ranges: list[list[float]], silences: list[dict],
-                    window: float, long_silence: float = 1.0,
+                    window: float, words: list[dict] | None = None,
+                    long_silence: float = 1.0,
                     pad: float = 0.12) -> list[list[float]]:
     """每個範圍的頭尾若在靜音段 ±window 內,移到該靜音的中點。
 
@@ -409,13 +420,21 @@ def snap_boundaries(ranges: list[list[float]], silences: list[dict],
     的邊界又會 snap 到**同一個**靜音的中點 → 整段靜音原封不動留在成品裡
     (EP16 26:39 的 3.4s 事故:G0010 明明沒勾選,剪除量卻是 0)。長靜音改貼近端、
     只留 pad 秒呼吸:範圍尾→靜音起點+pad、範圍頭→靜音終點-pad。
+
+    貼近端前先過 clamp_silence:靜音段的頭尾常含小聲字尾,直接貼會把字切掉
+    (EP16「那你先說」的「說」被切 0.3s)。夾完仍算長靜音才貼,否則照中點走。
     """
     def snap(t: float, is_start: bool) -> float:
         for s in silences:
-            if s["start"] - window <= t <= s["end"] + window:
-                if s["end"] - s["start"] > long_silence:
-                    return s["end"] - pad if is_start else s["start"] + pad
-                return (s["start"] + s["end"]) / 2
+            if not (s["start"] - window <= t <= s["end"] + window):
+                continue
+            if s["end"] - s["start"] > long_silence:
+                c = clamp_silence(s, words)
+                if c and c[1] - c[0] > long_silence:
+                    return c[1] - pad if is_start else c[0] + pad
+                if c is None:
+                    return t          # 字橫跨整段:根本不是停頓,別動邊界
+            return (s["start"] + s["end"]) / 2
         return t
     return [[snap(a, True), snap(b, False)] for a, b in ranges]
 
@@ -649,6 +668,9 @@ def main():
     ap.add_argument("--pause-keep", type=float, default=0.6,
                     help="收緊後保留的停頓長度(秒)")
     ap.add_argument("--dry-run", action="store_true", help="只印剪輯範圍,不跑 ffmpeg")
+    ap.add_argument("--dump-ranges", type=Path,
+                    help="把保留區間(原始時間軸,毫秒精度)寫成 JSON — "
+                         "回歸測試與 debug 用,dry-run 的 mm:ss 看不出毫秒差")
     args = ap.parse_args()
 
     if not 0.5 <= args.tempo <= 2.0:
@@ -802,7 +824,7 @@ def main():
         if words:
             extend_unit_edges(u, words)
         ranges = merge_ranges(snap_boundaries([[u["start"], u["end"]]],
-                                              silences, args.snap_window))
+                                              silences, args.snap_window, words))
         removals = []
         for it in u["items"]:
             if it.get("spans"):
@@ -855,6 +877,12 @@ def main():
                   "範圍、或時間碼寫成成品時間軸了?(✂ 吃的是原始錄音時間軸)")
     if abs(args.tempo - 1.0) > 1e-6:
         print(f"[render] 語速 {args.tempo}x(只套語音,配樂原速)")
+
+    if args.dump_ranges:
+        args.dump_ranges.write_text(json.dumps(
+            [[round(s["a"], 3), round(s["b"], 3)]
+             for s in segments if s["kind"] == "speech"],
+            ensure_ascii=False), encoding="utf-8")
 
     speech_secs = sum(s["b"] - s["a"] for s in segments if s["kind"] == "speech")
     n_clip = sum(1 for s in segments if s["kind"] == "speech" and s.get("clip"))
