@@ -115,7 +115,7 @@ class TestMigrateParseBlocks(unittest.TestCase):
         lines = ["# Cutplan — test", "",
                  "- [x] B0001 [0:00–0:04] [Sarah] 你打扮,~~嗯~~不對 ← 假起頭",
                  "隨便一行不是 block"]
-        blocks, stream, spans = parse_blocks(lines)
+        blocks, stream, spans, cuts = parse_blocks(lines)
         self.assertEqual(len(blocks), 1)
         self.assertEqual(blocks[0]["text"], "你打扮,嗯不對")   # ~~ 已剝掉
         self.assertEqual(blocks[0]["suffix"], " ← 假起頭")
@@ -124,7 +124,7 @@ class TestMigrateParseBlocks(unittest.TestCase):
 
     def test_unchecked_block_also_parsed(self):
         lines = ["- [ ] B0002 [0:04–0:05] [Mars] 剪掉段"]
-        blocks, stream, spans = parse_blocks(lines)
+        blocks, stream, spans, cuts = parse_blocks(lines)
         self.assertEqual(len(blocks), 1)
         self.assertEqual(spans, [])
 
@@ -208,6 +208,56 @@ class TestMigrateE2E(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertIn("無事可做", proc.stdout)
         self.assertNotIn("~~", out)
+
+
+
+
+
+class TestCheckboxMigration(unittest.TestCase):
+    """勾選遷移(2026-08-11 MM):重切後 block id 全換,人審的「剪掉」決定
+    不能跟著消失。migrate_marks 原本只搬 ~~刪除線~~,明講不搬勾選。"""
+
+    OLD = (
+        "# Cutplan — old\n\n"
+        "- [x] B0001 [0:00–0:02] [Mars] 這句要留下來，很重要。\n"
+        "- [ ] B0002 [0:02–0:04] [KIN] 這整段是離題的廢話應該剪掉。 ← 離題\n"
+        "- [x] B0003 [0:04–0:06] [Sarah] 最後這句也要留著。\n")
+    # 重切:同樣的字,切點不同、id 全換
+    NEW = (
+        "# Cutplan — new\n\n"
+        "- [x] M0001 [0:00–0:01] [Mars] 這句要留下來，\n"
+        "- [x] M0002 [0:01–0:02] [Mars] 很重要。\n"
+        "- [x] K0001 [0:02–0:03] [KIN] 這整段是離題的廢話\n"
+        "- [x] K0002 [0:03–0:04] [KIN] 應該剪掉。\n"
+        "- [x] S0001 [0:04–0:06] [Sarah] 最後這句也要留著。\n")
+
+    def _migrate(self, *extra: str):
+        td = tempfile.TemporaryDirectory()
+        self.addCleanup(td.cleanup)
+        sdir = Path(td.name)
+        (sdir / "cutplan.md").write_text(self.NEW, encoding="utf-8")
+        old = sdir / "old.md"
+        old.write_text(self.OLD, encoding="utf-8")
+        proc = run_script("migrate_marks.py", "--session", str(sdir),
+                          "--old", str(old), *extra)
+        return proc, (sdir / "cutplan.md").read_text(encoding="utf-8")
+
+    def test_unchecked_block_migrates_across_resegmentation(self):
+        proc, out = self._migrate("--with-checkboxes")
+        self.assertEqual(proc.returncode, 0, proc.stderr or proc.stdout)
+        # 舊的 B0002 被剪掉 → 重切後涵蓋同一段文字的兩個 block 都要取消勾選
+        self.assertIn("- [ ] K0001", out)
+        self.assertIn("- [ ] K0002", out)
+        # 沒被剪的內容不准被誤傷
+        self.assertIn("- [x] M0001", out)
+        self.assertIn("- [x] M0002", out)
+        self.assertIn("- [x] S0001", out)
+
+    def test_checkboxes_untouched_without_the_flag(self):
+        """預設行為不變——只搬刪除線,不動勾選(既有呼叫方不受影響)。"""
+        proc, out = self._migrate()
+        self.assertEqual(proc.returncode, 0, proc.stderr or proc.stdout)
+        self.assertNotIn("- [ ]", out)
 
 
 if __name__ == "__main__":

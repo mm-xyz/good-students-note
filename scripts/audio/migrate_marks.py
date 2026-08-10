@@ -23,7 +23,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from srt_utils import rel
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
-BLOCK_RE = re.compile(r"^(- \[[ x]\] B\d{4} \[[^\]]+\] \[[^\]]+\] )(.*)$")
+BLOCK_RE = re.compile(
+    r"^(?P<prefix>- \[(?P<mark>[ xX])\] (?P<bid>[BGSMKI]\d{3,5}) "
+    r"\[[^\]]+\] \[(?P<spk>[^\]]+)\] )(?P<body>.*)$")
 MARK_RE = re.compile(r"~~(.+?)~~")
 
 
@@ -33,12 +35,14 @@ def parse_blocks(md_lines: list[str]):
     blocks = []
     stream = []
     offset = 0
-    spans = []  # 舊檔用:字元流座標的刪除線區間
+    spans = []       # 舊檔用:字元流座標的刪除線區間
+    cut_spans = []   # 舊檔用:未勾選(=剪掉)的 block 整段區間
     for i, line in enumerate(md_lines):
         m = BLOCK_RE.match(line)
         if not m:
             continue
-        prefix, body = m.groups()
+        prefix, body = m.group("prefix"), m.group("body")
+        mark, spk = m.group("mark"), m.group("spk")
         body, sep, reason = body.partition(" ← ")
         suffix = sep + reason if sep else ""
         plain = []
@@ -53,11 +57,16 @@ def parse_blocks(md_lines: list[str]):
             pos = mk.end()
         plain.append(body[pos:])
         plain = "".join(plain)
+        if mark == " ":
+            # 未勾選=這段被剪掉。整段文字視為一個「剪除區間」,跟刪除線走
+            # 同一套字元流對齊搬到新版(2026-08-11 MM:重切不能弄丟人審決定)
+            cut_spans.append((offset, offset + len(plain)))
         blocks.append({"line": i, "prefix": prefix, "text": plain,
-                       "suffix": suffix, "start": offset})
+                       "suffix": suffix, "start": offset, "mark": mark,
+                       "speaker": spk.strip()})
         stream.append(plain)
         offset += len(plain)
-    return blocks, "".join(stream), spans
+    return blocks, "".join(stream), spans, cut_spans
 
 
 def map_spans(spans, old_stream, new_stream):
@@ -86,6 +95,12 @@ def main():
     ap = argparse.ArgumentParser(description="cutplan ~~刪除線~~ 跨版遷移")
     ap.add_argument("--session", required=True)
     ap.add_argument("--old", required=True, help="帶刪除線的舊版 cutplan.md 路徑")
+    ap.add_argument("--with-checkboxes", action="store_true",
+                    help="連人審的勾選一起搬(未勾選=剪掉)。migrate_marks 原本只搬"
+                         "刪除線,重切後 34 個剪除決定會整批消失(2026-08-11 MM 指出)")
+    ap.add_argument("--cut-threshold", type=float, default=0.6,
+                    help="新 block 有多少比例的字被舊剪除區間覆蓋才取消勾選"
+                         "(預設 0.6;重切後邊界會挪,不能要求 100%% 覆蓋)")
     args = ap.parse_args()
 
     session_dir = Path(args.session).resolve()
@@ -93,16 +108,18 @@ def main():
     old_lines = Path(args.old).read_text(encoding="utf-8").splitlines()
     new_lines = new_path.read_text(encoding="utf-8").splitlines()
 
-    _, old_stream, old_spans = parse_blocks(old_lines)
-    new_blocks, new_stream, existing = parse_blocks(new_lines)
+    old_blocks, old_stream, old_spans, old_cuts = parse_blocks(old_lines)
+    new_blocks, new_stream, existing, _ = parse_blocks(new_lines)
     if existing:
         print(f"新 cutplan 已有 {len(existing)} 處刪除線,不重複遷移", file=sys.stderr)
         sys.exit(1)
-    if not old_spans:
-        print("舊 cutplan 沒有刪除線,無事可做")
+    # 只有刪除線與勾選都沒東西可搬才是真的無事可做——舊版只有勾選、沒有
+    # 刪除線的 cutplan 一樣要搬(2026-08-11 實踩:提早 return 讓勾選遷移沒跑到)
+    if not old_spans and not (args.with_checkboxes and old_cuts):
+        print("舊 cutplan 沒有刪除線,也沒有要搬的勾選,無事可做")
         return
 
-    mapped, n_drop = map_spans(old_spans, old_stream, new_stream)
+    mapped, n_drop = map_spans(old_spans, old_stream, new_stream) if old_spans else ([], 0)
 
     # span 按新 block 邊界拆開、逐 block 由後往前插 ~~
     n_inserted = 0
@@ -118,6 +135,25 @@ def main():
             text = text[:s] + "~~" + text[s:]
             n_inserted += 1
         new_lines[b["line"]] = b["prefix"] + text + b["suffix"]
+
+    # ── 勾選遷移(--with-checkboxes):未勾選=剪掉,同一套字元流對齊搬過來 ──
+    n_uncheck = 0
+    n_cut_drop = 0
+    if args.with_checkboxes and old_cuts:
+        cuts, n_cut_drop = map_spans(old_cuts, old_stream, new_stream)
+        for b in new_blocks:
+            b_end = b["start"] + len(b["text"])
+            covered = sum(min(e, b_end) - max(s_, b["start"])
+                          for s_, e in cuts
+                          if s_ < b_end and e > b["start"])
+            n_chars = max(1, len(b["text"]))
+            if covered / n_chars >= args.cut_threshold and b["mark"] != " ":
+                line = new_lines[b["line"]]
+                new_lines[b["line"]] = line.replace("- [x] ", "- [ ] ", 1)
+                n_uncheck += 1
+        print(f"[migrate-marks] 勾選遷移:舊版 {len(old_cuts)} 個剪除 block → "
+              f"新版取消勾選 {n_uncheck} 個(對不上丟棄 {n_cut_drop} 處，"
+              f"覆蓋率門檻 {args.cut_threshold:.0%})")
 
     note = (f"> 🤖 Gemma 贅字預標已從舊版 cutplan 遷移(字元流對齊;原 "
             f"{len(old_spans)} 處 → 落到新 block {n_inserted} 段,對不上丟棄 "
