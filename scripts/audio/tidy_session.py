@@ -37,6 +37,10 @@ PIPELINE_KEEP = {
     "speakers.json", "speakers_map.json", "context.txt",
     "corrections.json", "metadata.json", "pipeline_log.jsonl",
     "cleaned.md", "cleaned.srt", "transcript.cleaned.srt",
+    # copy_prompt_build.py 的輸入與輸出,兩者都寫死在 session 根:
+    # copy_material.md 缺席會直接 FAIL(2026-08-10 實踩,分類時把它掃進 _meta/)。
+    # 人看的**產出**(copy_draft_*/ig_copy_*/cover_*)才歸 _meta/。
+    "copy_material.md", "copy_prompt.md",
 }
 # 管線子目錄:不動
 KEEP_DIRS = {"tracks", "images", "note", "frames", "raw", "_meta", "_bak"}

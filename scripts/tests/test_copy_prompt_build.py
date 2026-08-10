@@ -90,6 +90,27 @@ class TestBuildTranscript(unittest.TestCase):
     def test_unchecked_block_excluded(self):
         self.assertNotIn("剪掉的", build_transcript(self.sdir))
 
+    def test_program_markers_never_become_chapter_headings(self):
+        """`## ` 開頭的節目項不是章節標題,不准漏進文案 prompt。
+
+        2026-08-10 `## ✂` 曾經被當章節標題寫進 IG 文案;同日新增 `## ➕`
+        補錄插入標記時**又踩同一個坑**(排除清單漏加)。這條測試把整組節目項
+        一起鎖住,下次再加新標記時會直接紅燈。
+        """
+        md = self.sdir / "cutplan.md"
+        md.write_text(
+            md.read_text(encoding="utf-8")
+            + "## ✂ 12.0-13.0 手動剪除說明\n"
+            + "## ➕ raw/補錄.WAV gain=auto start=2.6  Sarah 補錄說明\n"
+            + "## 🎵 opening fadein=2\n"
+            + "## ⚙ max-pause=0.9\n"
+            + "## 🎬 精華集錦\n",
+            encoding="utf-8")
+        out = build_transcript(self.sdir)
+        for leak in ("➕", "✂", "🎵", "⚙", "🎬",
+                     "補錄.WAV", "gain=auto", "max-pause", "手動剪除說明"):
+            self.assertNotIn(leak, out, f"節目項標記漏進文案 prompt:{leak}")
+
 
 TEMPLATE = """meta 說明(--- 前不進 prompt)
 ---

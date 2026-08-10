@@ -30,6 +30,7 @@ MUSIC_RE = re.compile(r"^##\s*🎵")
 TEASER_RE = re.compile(r"^##\s*🎬")
 CONFIG_RE = re.compile(r"^##\s*⚙")
 CUT_RE = re.compile(r"^##\s*✂")     # 手動剪除標記,不是章節標題
+INSERT_RE = re.compile(r"^##\s*➕")  # 外部補錄插入標記,不是章節標題(ADR 0011)
 
 
 def hms(t: float) -> str:
@@ -59,7 +60,8 @@ def build_transcript(sdir: Path) -> str:
         if TEASER_RE.match(s):
             clip = True
             continue
-        if MUSIC_RE.match(s) or CONFIG_RE.match(s) or CUT_RE.match(s):
+        if (MUSIC_RE.match(s) or CONFIG_RE.match(s) or CUT_RE.match(s)
+                or INSERT_RE.match(s)):
             clip = False
             continue
         if s.startswith("## "):
