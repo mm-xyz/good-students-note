@@ -134,6 +134,32 @@ def next_out_name(sdir: Path, given: str | None) -> str:
     return f"final_cut_v{n}.mp3"
 
 
+VER_RE = re.compile(r"^v(\d+)_\d{8}-\d{4}")
+
+
+def drive_cutplan(ddir: Path) -> Path:
+    """Drive 端 MM 編輯的那份住 `_meta/cutplan.md`。
+
+    「正在編輯的 cutplan」與「某一版出片當下的快照」必須分開放,否則人會
+    對著版本資料夾裡的快照改,改完發現下次出片沒吃到。舊結構(cutplan.md
+    躺在集數資料夾根)自動搬進 _meta,同資料夾內搬,要退回很容易。
+    """
+    meta = ddir / "_meta"
+    new, old = meta / "cutplan.md", ddir / "cutplan.md"
+    if not new.exists() and old.exists():
+        meta.mkdir(exist_ok=True)
+        shutil.move(str(old), str(new))
+        print(f"[cut] 舊結構:cutplan.md → _meta/cutplan.md(以後編輯這份)")
+    return new
+
+
+def next_version_dir(ddir: Path, ai: bool, now: dt.datetime) -> Path:
+    """`v3_20260810-1830-AI/`;版本號接著既有最大號,-AI 只在有 AI 介入時掛。"""
+    n = max((int(m.group(1)) for p in ddir.iterdir() if p.is_dir()
+             for m in [VER_RE.match(p.name)] if m), default=0) + 1
+    return ddir / (f"v{n}_{now:%Y%m%d-%H%M}" + ("-AI" if ai else ""))
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="改完 cutplan → 出片 → 同步 Drive")
     ap.add_argument("--session", required=True)
@@ -143,6 +169,8 @@ def main() -> None:
     ap.add_argument("--no-push", action="store_true", help="出片後不推回 Drive")
     ap.add_argument("--check", action="store_true",
                     help="只做 cutplan 對照與 dry-run,不出片(改完先驗證用)")
+    ap.add_argument("--ai", action="store_true",
+                    help="這一版有 AI 介入剪輯決策(版本資料夾掛 -AI 後綴)")
     args, passthru = ap.parse_known_args()
 
     sdir = Path(args.session).resolve()
@@ -150,7 +178,7 @@ def main() -> None:
     if not local.exists():
         sys.exit(f"[cut] FAIL: 找不到 {local}")
     ddir = find_drive_dir(sdir, args.drive)
-    drive = ddir / "cutplan.md" if ddir else None
+    drive = drive_cutplan(ddir) if ddir else None
 
     # ── 1. 對照 Drive vs local ──
     if drive and drive.exists():
@@ -185,9 +213,9 @@ def main() -> None:
               "--session", str(sdir), *passthru]
     print("\n[cut] ── dry-run ──")
     r = subprocess.run(render + ["--dry-run"], capture_output=True, text=True)
-    for line in r.stdout.splitlines():
-        if line.startswith("[render]"):
-            print("  " + line)
+    summary = [l for l in r.stdout.splitlines() if l.startswith("[render]")]
+    for line in summary:
+        print("  " + line)
     if r.returncode != 0:
         print(r.stdout[-2000:] or r.stderr[-2000:])
         sys.exit("[cut] FAIL: dry-run 沒過 — cutplan 有問題,先修再跑")
@@ -203,13 +231,19 @@ def main() -> None:
     if subprocess.run(render + ["--out", out]).returncode != 0:
         sys.exit("[cut] FAIL: render 失敗")
 
-    # ── 4. 推回 Drive ──
+    # ── 4. 推回 Drive:一版一個資料夾,連當次的 cutplan 一起封存 ──
     if ddir and not args.no_push:
-        shutil.copy2(local, ddir / "cutplan.md")
+        vdir = next_version_dir(ddir, args.ai, dt.datetime.now())
+        vdir.mkdir(parents=True)
         ep = EP_RE.search(sdir.name)
-        stem = (ep.group(1) if ep else "cut") + "_" + Path(out).stem
-        shutil.copy2(sdir / out, ddir / f"{stem}.mp3")
-        print(f"[cut] ☑️ 已推回 Drive:cutplan.md + {stem}.mp3")
+        stem = (ep.group(1) if ep else "cut") + "_" + vdir.name.split("_")[0]
+        shutil.copy2(sdir / out, vdir / f"{stem}.mp3")
+        shutil.copy2(local, vdir / "cutplan.md")      # 這一版是照哪份剪的
+        (vdir / "render.txt").write_text(
+            "\n".join(summary) + f"\n\n出片檔:{stem}.mp3\nsession:{sdir}\n",
+            encoding="utf-8")
+        shutil.copy2(local, drive)                     # _meta 保持最新工作版
+        print(f"[cut] ☑️ Drive:{vdir.name}/(mp3 + cutplan 快照 + render.txt)")
     print(f"[cut] ✅ 完成 → {sdir / out}")
 
 

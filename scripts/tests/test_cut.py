@@ -14,8 +14,11 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import datetime as dt  # noqa: E402
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "audio"))
-from cut import find_drive_dir, next_out_name, semantic_diff  # noqa: E402
+from cut import (drive_cutplan, find_drive_dir, next_out_name,  # noqa: E402
+                 next_version_dir, semantic_diff)
 
 HEAD = "# Cutplan — test\n\n## ⚙ max-pause=1.5 tempo=1.0\n"
 ROWS = ("- [x] B0001 [0:02–0:05] [Sarah] 嗨大家好。\n"
@@ -88,6 +91,46 @@ class TestOutName(unittest.TestCase):
             (d / "final_cut_v2.mp3").touch()
             (d / "final_cut_v3.mp3").touch()
             self.assertEqual(next_out_name(d, None), "final_cut_v4.mp3")
+
+
+class TestVersionDir(unittest.TestCase):
+    NOW = dt.datetime(2026, 8, 10, 18, 30)
+
+    def test_first_version_and_ai_suffix(self) -> None:
+        with tempfile.TemporaryDirectory() as t:
+            d = Path(t)
+            self.assertEqual(next_version_dir(d, False, self.NOW).name,
+                             "v1_20260810-1830")
+            self.assertEqual(next_version_dir(d, True, self.NOW).name,
+                             "v1_20260810-1830-AI")
+
+    def test_number_continues_and_ignores_non_version_dirs(self) -> None:
+        """_meta/raw 這種非版本資料夾不能影響編號。"""
+        with tempfile.TemporaryDirectory() as t:
+            d = Path(t)
+            for n in ("v1_20260810-1830-AI", "v2_20260810-1900", "_meta", "raw"):
+                (d / n).mkdir()
+            self.assertEqual(next_version_dir(d, False, self.NOW).name,
+                             "v3_20260810-1830")
+
+
+class TestDriveCutplanMigration(unittest.TestCase):
+    def test_legacy_root_cutplan_moves_into_meta(self) -> None:
+        with tempfile.TemporaryDirectory() as t:
+            d = Path(t)
+            (d / "cutplan.md").write_text("legacy", encoding="utf-8")
+            p = drive_cutplan(d)
+            self.assertEqual(p, d / "_meta" / "cutplan.md")
+            self.assertEqual(p.read_text(encoding="utf-8"), "legacy")
+            self.assertFalse((d / "cutplan.md").exists(), "舊檔要搬走,不留兩份分叉")
+
+    def test_existing_meta_wins_and_root_left_alone(self) -> None:
+        with tempfile.TemporaryDirectory() as t:
+            d = Path(t)
+            (d / "_meta").mkdir()
+            (d / "_meta" / "cutplan.md").write_text("new", encoding="utf-8")
+            (d / "cutplan.md").write_text("stale", encoding="utf-8")
+            self.assertEqual(drive_cutplan(d).read_text(encoding="utf-8"), "new")
 
 
 class TestFindDriveDir(unittest.TestCase):
