@@ -371,6 +371,36 @@ class TestDryRunE2E(unittest.TestCase):
         # B0001+B0002 併一個 unit,刪「二」切成兩段;B0003 沒勾不出現
         self.assertEqual(len(speech), 2)
 
+    def test_music_lead_clamped_so_it_cannot_bury_the_closing(self):
+        """lead 是盲目秒數,不管那幾秒裡還有沒有話 — EP16 的 ending lead=13
+        把整段結語壓在音樂底下。超過 --music-lead-max 要夾住並講出來。"""
+        with tempfile.TemporaryDirectory() as td:
+            sdir = self._make_session(td)
+            write_wav(sdir / "ending_x.wav", 30.0, bursts=[(0.0, 30.0)])
+            md = sdir / "cutplan.md"
+            md.write_text(md.read_text(encoding="utf-8")
+                          + "## 🎵 ending_x.wav fadein=2 lead=13\n",
+                          encoding="utf-8")
+            proc = self._render(sdir)
+        self.assertEqual(proc.returncode, 0, proc.stderr or proc.stdout)
+        self.assertIn("夾到 3.0s", proc.stdout)
+        # 包絡的 duck 段長度=夾過的 lead,不是 cutplan 寫的 13
+        env = next(l for l in proc.stdout.splitlines() if "env " in l)
+        self.assertIn("3.0s:15%", env)
+        self.assertNotIn("13.0s:15%", env)
+
+    def test_music_lead_within_limit_untouched(self):
+        with tempfile.TemporaryDirectory() as td:
+            sdir = self._make_session(td)
+            write_wav(sdir / "ending_x.wav", 30.0, bursts=[(0.0, 30.0)])
+            md = sdir / "cutplan.md"
+            md.write_text(md.read_text(encoding="utf-8")
+                          + "## 🎵 ending_x.wav fadein=2 lead=2\n",
+                          encoding="utf-8")
+            proc = self._render(sdir)
+        self.assertEqual(proc.returncode, 0, proc.stderr or proc.stdout)
+        self.assertNotIn("夾到", proc.stdout)
+
     def test_pending_marker_refuses(self):
         with tempfile.TemporaryDirectory() as td:
             sdir = self._make_session(td)
