@@ -5,6 +5,10 @@
   反白內文加/去刪除線。id、時間碼、speaker、逐字稿文字全部唯讀渲染
   (不是 <input>,是純文字 <span>,連 contenteditable 都沒開)。
 
+  2026-08-11 MM 追加需求:選取「穩定」後自動套用 toggleStrike,不用再點
+  按鈕;原本的「加/去刪除線」按鈕改成「復原」,浮動貼在剛套用那段選取範圍
+  的右上角(見下方「選取穩定判定」與「復原按鈕定位」兩段 JS 註解)。
+
   存檔一律經過 CutplanCore.serializeCutplan() 重組全文字串送後端,前端不自己
   拼字串(規格要求)。CutplanCore 來自 cutplan-core-inline.html
   (= cutplan-core.js 逐字包一層 <script>,見 tests/inline-sync.test.js)。
@@ -119,23 +123,24 @@
   }
   .block-body s { background: var(--strike-bg); text-decoration: line-through; }
   .block-card.unchecked .block-body { opacity: .55; }
-  #strikeBar {
-    position: fixed;
-    left: 50%;
-    bottom: 76px;
-    transform: translateX(-50%);
+  /* 復原按鈕:絕對定位(不是 fixed)——JS 用「選取範圍的 client rect +
+     window.scrollX/scrollY」換算文件座標,讓按鈕跟著頁面內容一起捲動,
+     不會捲走了還指著錯的位置(見 Index.html 內 JS 註解與 README)。 */
+  #undoFloat {
+    position: absolute;
     display: none;
-    z-index: 10;
+    z-index: 15;
   }
-  #strikeBar button {
-    font-size: 15px;
-    padding: 10px 18px;
+  #undoFloat button {
+    font-size: 14px;
+    padding: 8px 16px;
     border-radius: 999px;
     border: none;
     background: var(--accent);
     color: #04241a;
     font-weight: 700;
-    box-shadow: 0 2px 10px rgba(0, 0, 0, .3);
+    box-shadow: 0 2px 10px rgba(0, 0, 0, .35);
+    white-space: nowrap;
   }
   footer {
     position: fixed;
@@ -187,7 +192,7 @@
 <div id="status"></div>
 <div id="blockList"></div>
 
-<div id="strikeBar"><button id="strikeBtn" type="button"></button></div>
+<div id="undoFloat"><button id="undoBtn" type="button">復原</button></div>
 
 <footer>
   <span class="dirty-dot" id="dirtyDot" title="尚未儲存"></span>
@@ -204,15 +209,15 @@
     fileId: null,
     doc: null,
     dirty: false,
-    selection: null, // {lineIndex, start, end, mode}
+    history: Core.createHistory(), // undo 堆疊(純資料,見 cutplan-core.js)
   };
 
   var els = {
     episodeSelect: document.getElementById('episodeSelect'),
     status: document.getElementById('status'),
     blockList: document.getElementById('blockList'),
-    strikeBar: document.getElementById('strikeBar'),
-    strikeBtn: document.getElementById('strikeBtn'),
+    undoFloat: document.getElementById('undoFloat'),
+    undoBtn: document.getElementById('undoBtn'),
     saveBtn: document.getElementById('saveBtn'),
     dirtyDot: document.getElementById('dirtyDot'),
   };
@@ -269,6 +274,8 @@
     setStatus('載入 cutplan.md…');
     els.blockList.innerHTML = '';
     setDirty(false);
+    state.history = Core.createHistory();
+    hideUndoFloat();
     google.script.run
       .withSuccessHandler(function (res) {
         state.fileId = res.fileId;
@@ -368,7 +375,7 @@
     return card;
   }
 
-  // ── 反白 → 加/去刪除線 ───────────────────────────────────────────────
+  // ── 反白 → 選取穩定後自動套用刪除線 ─────────────────────────────────
 
   // 把目前的 window selection 換算成「某個 .block-body 容器內」的 clean
   // 字元座標(逐字元累加 textContent 長度;<s> 標籤不影響座標,因為
@@ -400,50 +407,198 @@
     return { lineIndex: Number(bodyEl.dataset.lineIndex), start: start, end: end };
   }
 
-  document.addEventListener('selectionchange', function () {
-    var picked = resolveSelection();
-    if (!picked) {
-      hideStrikeBar();
-      return;
+  // offsetWithin 的反向:把某行 clean 座標換算回 DOM 的 (text node, offset),
+  // 給「復原按鈕要畫在畫面哪裡」用——history 只存 lineIndex/start/end 這種
+  // 邏輯位置(見 cutplan-core.js),每次都要在**目前這次 render() 之後**的
+  // 真實 DOM 上重新算一次,不能快取舊的 Range(render() 會整個重建
+  // .block-body,舊 Range 指到的節點早就不在文件裡了)。
+  function nodeAndOffsetForClean(bodyEl, cleanOffset) {
+    var walker = document.createTreeWalker(bodyEl, NodeFilter.SHOW_TEXT, null);
+    var acc = 0;
+    var current;
+    var last = null;
+    while ((current = walker.nextNode())) {
+      var len = current.textContent.length;
+      if (cleanOffset <= acc + len) {
+        return { node: current, offset: cleanOffset - acc };
+      }
+      acc += len;
+      last = current;
     }
-    var line = state.doc.lines[picked.lineIndex];
-    var mode = Core.classifySelection(line.bodyRaw, picked.start, picked.end);
-    // 'empty'(合法索引但沒反白任何文字)理論上 resolveSelection 已經濾掉了
-    // (collapsed selection 直接回 null),這裡跟 'invalid' 一起當「沒有可用
-    // 選取」處理,純防禦——不靜默假裝沒事,只是沒有東西可顯示按鈕。
-    if (mode === 'invalid' || mode === 'empty') {
-      hideStrikeBar();
-      return;
-    }
-    state.selection = picked;
-    els.strikeBtn.textContent = mode === 'add' ? '加刪除線' : '去刪除線';
-    els.strikeBar.style.display = 'block';
-  });
-
-  function hideStrikeBar() {
-    state.selection = null;
-    els.strikeBar.style.display = 'none';
+    return last ? { node: last, offset: last.textContent.length } : null;
   }
 
-  els.strikeBtn.addEventListener('click', function () {
-    // 手機上常見:手指點按鈕的當下,系統先把文字選取收掉(collapse)才觸發
-    // click,state.selection 因此變成 null——這正是 MM 回報「沒辦法取消
-    // 標記」的另一個成因(不是判定邏輯錯,是選取在按鈕點下去那一刻已經沒了)。
-    // 這裡不再靜默 return,給使用者看得到的提示,不要讓按鈕像沒反應一樣。
-    if (!state.selection) {
-      setStatus('沒有偵測到反白的文字,請重新選取要加/去刪除線的範圍', 'error');
+  function rangeForClean(lineIndex, start, end) {
+    var bodyEl = els.blockList.querySelector('.block-body[data-line-index="' + lineIndex + '"]');
+    if (!bodyEl) return null;
+    var a = nodeAndOffsetForClean(bodyEl, start);
+    var b = nodeAndOffsetForClean(bodyEl, end);
+    if (!a || !b) return null;
+    var range = document.createRange();
+    range.setStart(a.node, a.offset);
+    range.setEnd(b.node, b.offset);
+    return range;
+  }
+
+  // ── 選取穩定判定 ─────────────────────────────────────────────────────
+  //
+  // `selectionchange` 在拖曳選取控制點(handle)的過程中會連續觸發,不能
+  // 一有變化就套用,否則手機上「拖著調整範圍」會變成「連續套用又取消」。
+  //
+  // Prior art(這是有風險的互動設計問題,查過才動手,不是自己發明):
+  //   - Robert Knight(Hypothesis 網頁註解工具作者)2016 年的跨瀏覽器
+  //     selection 事件測試筆記,結論是 `selectionchange` 本身無法分辨
+  //     「還在調整」與「調整完了」,必須搭配 `touchend`/`mouseup` 這種
+  //     「手指/滑鼠放開」的完成訊號一起用。
+  //     https://gist.github.com/robertknight/ad9f1bca8280b3fa325817aa3ed9935c
+  //   - W3C selection-api repo issue #146("Having a matching `selectend`
+  //     event?")討論串,現況共識是瀏覽器沒有原生 selectend,一般作法是
+  //     `selectionchange` + debounce/timer,再疊 `mouseup`/`touchend`/
+  //     `pointerup` 當完成訊號。
+  //     https://github.com/w3c/selection-api/issues/146
+  //
+  // 採用的判定策略(在上述兩個來源的共識上,多加一條處理「二次調整」):
+  //   1. `selectionchange`(拖曳全程都會連續觸發)→ 重新排一個「保底」
+  //      debounce 計時器(SETTLE_DEBOUNCE_MS)。這條專門對付鍵盤選取
+  //      (桌機 shift+方向鍵)——鍵盤選取沒有 pointerup/mouseup 可以當
+  //      完成訊號,只能純靠「一段時間沒有再變化」判定穩定。
+  //   2. `pointerup`/`touchend`/`mouseup`(手指/滑鼠放開)→ 排一個短很多
+  //      的計時器(SETTLE_AFTER_POINTER_MS),取代保底的那個——放開了就是
+  //      有強訊號,不必等那麼久,行動裝置上等 450ms 會感覺明顯delay。
+  //   3. `pointerdown`/`touchstart`/`mousedown`(手指/滑鼠再次按下)→
+  //      **立刻取消**任何還在等待的計時器。這是本次在兩份 prior art 之外
+  //      自己補的一條:文件/issue 討論的是「單次選取何時算完成」,沒有處理
+  //      「放開後在很短時間內又抓住 handle 二次調整」這個情境——如果不擋,
+  //      使用者放開手指想拖 handle 微調範圍時,那個 60ms 的短計時器可能在
+  //      手指再次按下之前就先套用了,把選取清掉、剛好搗亂使用者正在做的
+  //      調整動作。加了這條防線後最壞情況只是「多套用一次、可以直接復原」
+  //      (見下方 trySettle 的 try/catch 與 undo 堆疊),不會弄壞資料。
+  //   計時器只有一個(pendingSettleTimer),新排程一律先清舊的——不會有兩個
+  //   計時器互相搶跑的問題。
+  var SETTLE_AFTER_POINTER_MS = 60;
+  var SETTLE_DEBOUNCE_MS = 450;
+  var pendingSettleTimer = null;
+
+  function scheduleSettle(delayMs) {
+    if (pendingSettleTimer) clearTimeout(pendingSettleTimer);
+    pendingSettleTimer = setTimeout(trySettle, delayMs);
+  }
+
+  function cancelPendingSettle() {
+    if (pendingSettleTimer) {
+      clearTimeout(pendingSettleTimer);
+      pendingSettleTimer = null;
+    }
+  }
+
+  function trySettle() {
+    pendingSettleTimer = null;
+    var picked = resolveSelection();
+    // 沒有選取,或選取是 collapsed——這是最常見的狀態(單純點一下移游標、
+    // 點 checkbox…),不是「使用者想套用刪除線但失敗了」,不提示,靜默
+    // 什麼都不做才是對的行為(對照:空選取仍然無法套用,但那是 API 層的
+    // 保證——見 cutplan-core.js classifySelection 的 'empty' 狀態,直接
+    // 呼叫 toggleStrike/applyStrike 一樣會丟錯,不會靜默失敗)。
+    if (!picked) return;
+    var line = state.doc.lines[picked.lineIndex];
+    var mode = Core.classifySelection(line.bodyRaw, picked.start, picked.end);
+    if (mode !== 'add' && mode !== 'remove') return; // 'empty'/'invalid' 防禦,理論上不會走到
+    try {
+      var result = Core.applyStrikeWithHistory(
+        state.doc, state.history, picked.lineIndex, picked.start, picked.end,
+      );
+      state.doc = result.doc;
+      state.history = result.history;
+      setDirty(true);
+      window.getSelection().removeAllRanges();
+      render();
+      positionUndoFloat(picked.lineIndex, picked.start, picked.end);
+    } catch (e) {
+      setStatus('自動套用刪除線失敗:' + e.message, 'error');
+    }
+  }
+
+  document.addEventListener('selectionchange', function () {
+    scheduleSettle(SETTLE_DEBOUNCE_MS);
+  });
+  document.addEventListener('pointerdown', cancelPendingSettle);
+  document.addEventListener('touchstart', cancelPendingSettle);
+  document.addEventListener('mousedown', cancelPendingSettle);
+  document.addEventListener('pointerup', function () { scheduleSettle(SETTLE_AFTER_POINTER_MS); });
+  document.addEventListener('touchend', function () { scheduleSettle(SETTLE_AFTER_POINTER_MS); });
+  document.addEventListener('mouseup', function () { scheduleSettle(SETTLE_AFTER_POINTER_MS); });
+
+  // ── 復原按鈕:浮動貼在剛套用那段選取範圍的右上角 ─────────────────────
+  //
+  // MM 指定:不要固定在畫面某處的 bar——剪的時候視線停在正在處理的那段
+  // 文字上,undo 要就近才點得到。
+  //
+  // 定位用 absolute + 文件座標(range 的 client rect + window.scrollX/Y),
+  // 不是 fixed + 視窗座標——這樣頁面捲動時按鈕會跟著內容一起移動,不會
+  // 捲走了還指著錯誤的位置。取捨:另一個選項是「捲動就整個隱藏」,兩個
+  // 都在規格允許範圍內,選「跟著捲」是因為剪輯是斷續的,人可能盯著聽一段
+  // 音檔才回頭決定要不要復原,捲動看別的段落時按鈕消失會讓人以為沒得復原
+  // 了(跟「不設自動淡出計時器」是同一個理由:不要在使用者還沒決定的時候
+  // 就把選項收走)。
+  var UNDO_GAP = 8;
+  var VIEWPORT_MARGIN = 8;
+
+  function positionUndoFloat(lineIndex, start, end) {
+    var range = rangeForClean(lineIndex, start, end);
+    if (!range) { hideUndoFloat(); return; }
+    // 選取橫跨多行時 getBoundingClientRect() 回的是整體外框(含中間行的
+    // 滿版寬度),不符合「剛剛選的那裡」的直覺;getClientRects()[0] 是
+    // 第一行(選取起點那一行)的 rect,貼這裡才對。
+    var rects = range.getClientRects();
+    var rect = rects.length ? rects[0] : range.getBoundingClientRect();
+    if (!rect || (rect.width === 0 && rect.height === 0)) { hideUndoFloat(); return; }
+
+    var el = els.undoFloat;
+    el.style.visibility = 'hidden';
+    el.style.display = 'block';
+    var w = el.offsetWidth;
+    var h = el.offsetHeight;
+
+    // 先在「視窗座標」算好貼右上角、clamp 進可視範圍的位置,最後才加
+    // scrollX/scrollY 轉成文件座標存進 style——這樣邏輯只要考慮「現在看
+    // 得到的範圍」,不用同時想文件座標的 clamp 邊界。
+    var viewportLeft = rect.right - w;
+    viewportLeft = Math.min(viewportLeft, window.innerWidth - w - VIEWPORT_MARGIN);
+    viewportLeft = Math.max(viewportLeft, VIEWPORT_MARGIN);
+
+    var viewportTop = rect.top - h - UNDO_GAP; // 預設貼在選取範圍「上方」
+    if (viewportTop < VIEWPORT_MARGIN) {
+      viewportTop = rect.bottom + UNDO_GAP; // 太靠近視窗上緣會被裁掉,改貼下方
+    }
+    viewportTop = Math.min(viewportTop, window.innerHeight - h - VIEWPORT_MARGIN);
+    viewportTop = Math.max(viewportTop, VIEWPORT_MARGIN);
+
+    el.style.left = (viewportLeft + window.scrollX) + 'px';
+    el.style.top = (viewportTop + window.scrollY) + 'px';
+    el.style.visibility = 'visible';
+  }
+
+  function hideUndoFloat() {
+    els.undoFloat.style.display = 'none';
+  }
+
+  els.undoBtn.addEventListener('click', function () {
+    var result = Core.undo(state.doc, state.history);
+    if (!result.undone) {
+      hideUndoFloat(); // 防禦:理論上按鈕沒東西可復原時本來就該是隱藏的
       return;
     }
-    var { lineIndex, start, end } = state.selection;
-    try {
-      state.doc = Core.applyStrike(state.doc, lineIndex, start, end);
-      setDirty(true);
-    } catch (e) {
-      setStatus('刪除線操作失敗:' + e.message, 'error');
-    }
-    window.getSelection().removeAllRanges();
-    hideStrikeBar();
+    state.doc = result.doc;
+    state.history = result.history;
+    setDirty(true);
     render();
+    var next = Core.peekHistory(state.history);
+    if (next) {
+      // 點一次撤一步,按鈕跳到「再上一步」操作的位置(還有東西可以復原)。
+      positionUndoFloat(next.lineIndex, next.start, next.end);
+    } else {
+      hideUndoFloat();
+    }
   });
 
   // ── 儲存 ──────────────────────────────────────────────────────────────
@@ -456,6 +611,8 @@
     google.script.run
       .withSuccessHandler(function () {
         setDirty(false);
+        state.history = Core.createHistory(); // 已落地就不需要再回頭復原
+        hideUndoFloat();
         setStatus('已儲存 ✓', 'ok');
       })
       .withFailureHandler(function (err) {
