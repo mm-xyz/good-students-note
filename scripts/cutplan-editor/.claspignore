@@ -1,0 +1,6 @@
+# Node 專用檔案，不推上 Apps Script（那邊沒有 require / node:test，推上去會編譯失敗）
+**/tests/**
+**/tools/**
+
+# 文件不是 Apps Script 專案的一部分
+**/*.md
