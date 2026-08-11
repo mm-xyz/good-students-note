@@ -477,7 +477,7 @@ Step 5 只在 `goodedunote` 專案的 hosting 上新增/更新該篇 `<slug>/`,�
   json 文字 ⊂ 來源 SRT),cutplan 只准翻勾選,文字時間碼不可動。
 - **產物**:`speakers.json`、`transcript.speakers.srt`、`prosody.json`、`highlights.md`、
   `cutplan.md/json`、`final_cut.mp3`、`cut_map.json`、`chapters.txt`,全落 `sessions/<slug>/`。
-- **標準流程(2026-08-11 MM 定,ADR 0013)**:丟音檔改好名 → **初剪(全自動,
+- **標準流程(2026-08-11 MM 定,ADR 0015)**:丟音檔改好名 → **初剪(全自動,
   不需要 MM 介入)** → 給 cutplan(**集數資料夾根**,session 與 GDrive 同一位置,
   不進 `_meta/`)→ 跑 script/文案/生圖 → 建版本目錄 → 備份 cutplan →
   依最後一版開剪 → **給 diff 片段**(`diff_clips.py`,只切改動處 ±5s,不產文檔)
@@ -485,7 +485,7 @@ Step 5 只在 `goodedunote` 專案的 hosting 上新增/更新該篇 `<slug>/`,�
   **每次執行都要同步 GDrive 與 local 的 cutplan:詢問,預設擇新**(`cut.py`)。
   render 參數與路線住 cutplan 的 `## ⚙`(含 `line=pertrack|mixdown`),
   **不住 render.txt**——cutplan 是參數真相源,重跑時它是輸入不只是紀錄。
-- **剪輯路線由素材決定(2026-08-11 MM 拍板,ADR 0012)**:**有分軌走分軌線,
+- **剪輯路線由素材決定(2026-08-11 MM 拍板,ADR 0014)**:**有分軌走分軌線,
   只有混音軌走混音線**——`render_cut.py` 依 `cutplan.json` 有沒有 `tracks` 區
   自動分流,不需要旗標也不需要人選。分軌線是**加法不是替換**:EP15 是單軌錄的、
   來賓遠端連線與舊素材也只有合軌,那些永遠走混音線。兩條線的人審介面同形

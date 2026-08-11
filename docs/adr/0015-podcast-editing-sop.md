@@ -1,9 +1,9 @@
-# ADR 0013 — podcast 剪輯線標準流程（SOP）
+# ADR 0015 — podcast 剪輯線標準流程（SOP）
 
 - 日期：2026-08-11
 - 狀態：已採納
 - 相關：ADR 0001（cutplan 是人審真相源）、ADR 0010（停頓預設剪掉）、
-  ADR 0011（session 目錄與外部補錄）、ADR 0012（素材決定剪輯路線）
+  ADR 0011（session 目錄與外部補錄）、ADR 0014（素材決定剪輯路線）
 
 ## 脈絡
 
@@ -60,7 +60,7 @@ cutplan」要跟「某一版出片當下的快照」分開，避免人對著版�
 ## ⚙ line=pertrack clip-gap=0.5 bgm-duck=0.15 max-pause=0.9 tempo=1.06
 ```
 
-`line=pertrack|mixdown` 明寫就以它為準，沒寫才照 ADR 0012 自動偵測（保留
+`line=pertrack|mixdown` 明寫就以它為準，沒寫才照 ADR 0014 自動偵測（保留
 「素材決定路線」，又讓人能刻意指定，例如有分軌但想聽混音版對照）。寫了
 `line=pertrack` 卻沒有 `tracks` 區直接 FAIL，不靜默退回混音。
 
