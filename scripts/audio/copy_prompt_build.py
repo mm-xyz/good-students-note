@@ -25,7 +25,10 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 DEFAULT_TEMPLATE = (PROJECT_ROOT / "shared-material" / "水星貓的生活實驗室_v1"
                     / "prompt_集數文案.md")
-LINE_RE = re.compile(r"^- \[(x|X)\] (B\d{3,5}) \[([^\]]+)\] (?:\[([^\]]{1,20})\] )?(.*)$")
+# `B`=正片 block、`S`=`## ➕` 外部補錄插入的逐句 block(ADR 0011)。
+# 補錄也是節目內容,漏收會讓文案缺一整段(2026-08-12 EP16 實踩:Sarah 的
+# 36.9 秒補錄整段沒進 copy_prompt.md)。
+LINE_RE = re.compile(r"^- \[(x|X)\] ([BS]\d{3,5}) \[([^\]]+)\] (?:\[([^\]]{1,20})\] )?(.*)$")
 MUSIC_RE = re.compile(r"^##\s*🎵")
 TEASER_RE = re.compile(r"^##\s*🎬")
 CONFIG_RE = re.compile(r"^##\s*⚙")
@@ -77,7 +80,10 @@ def build_transcript(sdir: Path) -> str:
         if spk == prev_spk:
             lines[-1] += body
         else:
-            dst = to_dst(blocks[bid]["start"])
+            # 補錄(S)的時間碼長在**補錄檔自己的時間軸**上(0 起算),拿去查
+            # cut_map 會對出離譜位置(diff_clips.py 踩過:補錄在成品 22:33
+            # 卻被切在 0:04)。沒有可靠錨點就不掰時間戳,內容照樣要進去。
+            dst = None if bid.startswith("S") else to_dst(blocks[bid]["start"])
             ts = f"({hms(dst)}) " if dst is not None else ""
             lines.append(f"{ts}{spk}:{body}")
             prev_spk = spk

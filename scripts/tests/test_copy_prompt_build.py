@@ -82,6 +82,35 @@ class TestBuildTranscript(unittest.TestCase):
             "Sarah:掰掰",
         ])
 
+    def test_external_insert_blocks_are_in_the_transcript(self):
+        """`## ➕` 補錄的 S block 也是節目內容,不能從文案素材裡消失。
+
+        2026-08-12 EP16 實踩:Sarah 的 36.9 秒補錄(S0001–S0014,「工作的火花
+        在哪」)整段沒進 copy_prompt.md —— LINE_RE 只收 `B` 開頭。文案引擎
+        看不到那 37 秒,寫出來的摘要與章節就會缺一塊。
+
+        S block 的時間碼長在**補錄檔自己的時間軸**上(0 起算),不能拿去查
+        cut_map(會對出離譜位置);錨點取它前面那個正片 block 的成品時間
+        (與 diff_clips.py 同一套處理,ADR 0015)。
+        """
+        md = self.sdir / "cutplan.md"
+        md.write_text(CUTPLAN_MD + (
+            "## ➕ raw/補錄.WAV gain=auto  Sarah 補錄\n"
+            "- [x] S0001 [0:03–0:06] [Sarah] 補錄第一句\n"
+            "- [x] S0002 [0:06–0:07] [Sarah] 補錄第二句\n"), encoding="utf-8")
+        cj = json.loads((self.sdir / "cutplan.json").read_text(encoding="utf-8"))
+        cj["blocks"] += [{"id": "S0001", "start": 3.0, "end": 6.0,
+                          "text": "補錄第一句", "kind": "insert"},
+                         {"id": "S0002", "start": 6.0, "end": 7.0,
+                          "text": "補錄第二句", "kind": "insert"}]
+        (self.sdir / "cutplan.json").write_text(json.dumps(cj, ensure_ascii=False),
+                                                encoding="utf-8")
+        out = build_transcript(self.sdir)
+        self.assertIn("補錄第一句", out)
+        self.assertIn("補錄第二句", out)
+        # 錨點=前一個正片 block(B0005,無 dst)→ 不硬掰時間戳,但內容要在
+        self.assertNotIn("(00:00:03)", out, "補錄時間碼不可直接當成品時間")
+
     def test_clip_section_excluded(self):
         # 🎬 集錦區的重複 B0002 不進逐字稿(只出現在正文合併句裡一次)
         out = build_transcript(self.sdir)
