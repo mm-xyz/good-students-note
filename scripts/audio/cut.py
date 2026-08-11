@@ -157,18 +157,20 @@ VER_RE = re.compile(r"^v(\d+)_\d{8}-\d{4}")
 
 
 def drive_cutplan(ddir: Path) -> Path:
-    """Drive 端 MM 編輯的那份住 `_meta/cutplan.md`。
+    """Drive 端 MM 編輯的那份住**集數資料夾根**的 `cutplan.md`。
 
-    「正在編輯的 cutplan」與「某一版出片當下的快照」必須分開放,否則人會
-    對著版本資料夾裡的快照改,改完發現下次出片沒吃到。舊結構(cutplan.md
-    躺在集數資料夾根)自動搬進 _meta,同資料夾內搬,要退回很容易。
+    2026-08-11 MM 拍板:「一開始可以直接放在 /{EP Folder}/cutplan.md 不用進
+    Meta(不論在 session 或 GDrive 上)」——兩邊同一個位置,不用記哪邊多一層。
+
+    原本搬進 `_meta/` 的理由是「正在編輯的 cutplan」要跟「某一版出片當下的
+    快照」分開,否則人會對著版本資料夾裡的快照改。這個顧慮**現在的結構仍然
+    滿足**:活的那份在集數根、快照在 `vNN_<時戳>/` 裡面,`_meta/` 只是多一層
+    而已。既有的 `_meta/cutplan.md` 自動搬回根(同資料夾內搬,要退回很容易)。
     """
-    meta = ddir / "_meta"
-    new, old = meta / "cutplan.md", ddir / "cutplan.md"
+    new, old = ddir / "cutplan.md", ddir / "_meta" / "cutplan.md"
     if not new.exists() and old.exists():
-        meta.mkdir(exist_ok=True)
         shutil.move(str(old), str(new))
-        print(f"[cut] 舊結構:cutplan.md → _meta/cutplan.md(以後編輯這份)")
+        print("[cut] 結構調整:_meta/cutplan.md → cutplan.md(以後編輯這份)")
     return new
 
 

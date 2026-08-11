@@ -196,7 +196,9 @@ def parse_program(path: Path) -> list[dict]:
         mcfg = CONFIG_RE.match(s)
         if mcfg:
             params = dict(re.findall(r"([\w-]+)=([\d.]+)", mcfg.group(1)))
-            program.append({"kind": "config", "params": params})
+            raw = dict(re.findall(r"([\w-]+)=([\w.-]+)", mcfg.group(1)))
+            program.append({"kind": "config", "params": params,
+                            "params_raw": raw})
             continue
         mm_ = MUSIC_RE.match(s)
         if mm_:
@@ -863,6 +865,19 @@ def main():
     tk_prefix = {t["prefix"] for t in cp.get("tracks", [])}
     pertrack = bool(tk_prefix) and any(
         it["kind"] == "block" and it["id"][:2] in tk_prefix for it in program)
+    # `## ⚙ line=pertrack|mixdown` 明寫就以它為準,沒寫才自動偵測(2026-08-11
+    # MM:路線放 cutplan config 不放 render.txt——cutplan 是參數真相源,會跟著
+    # 一起備份、一起進版本目錄,而且重跑時它是**輸入**不只是紀錄)。
+    for it in program:
+        if it["kind"] != "config":
+            continue
+        want = it["params_raw"].get("line") if "params_raw" in it else None
+        if want in ("pertrack", "mixdown"):
+            if want == "pertrack" and not tk_prefix:
+                sys.exit("[render] FAIL: cutplan 寫了 line=pertrack,但 "
+                         "cutplan.json 沒有 tracks 區 — 先跑 pertrack_blocks.py")
+            pertrack = (want == "pertrack")
+            print(f"[render] ⚙ line={want}(cutplan 指定,覆蓋自動偵測)")
 
     # ── ⚙ config 區:cutplan 是參數真相源,覆蓋 CLI/預設 ──
     applied = {}

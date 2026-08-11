@@ -144,22 +144,35 @@ class TestVersionDir(unittest.TestCase):
 
 
 class TestDriveCutplanMigration(unittest.TestCase):
-    def test_legacy_root_cutplan_moves_into_meta(self) -> None:
+    """2026-08-11 MM 拍板反轉:編輯中的 cutplan 住**集數資料夾根**,不進 _meta。
+    兩邊(session 與 GDrive)同一個位置,不用記哪邊多一層。"""
+
+    def test_root_cutplan_is_the_one(self) -> None:
         with tempfile.TemporaryDirectory() as t:
             d = Path(t)
-            (d / "cutplan.md").write_text("legacy", encoding="utf-8")
+            (d / "cutplan.md").write_text("live", encoding="utf-8")
             p = drive_cutplan(d)
-            self.assertEqual(p, d / "_meta" / "cutplan.md")
-            self.assertEqual(p.read_text(encoding="utf-8"), "legacy")
-            self.assertFalse((d / "cutplan.md").exists(), "舊檔要搬走,不留兩份分叉")
+            self.assertEqual(p, d / "cutplan.md")
+            self.assertEqual(p.read_text(encoding="utf-8"), "live")
 
-    def test_existing_meta_wins_and_root_left_alone(self) -> None:
+    def test_meta_cutplan_moves_back_to_root(self) -> None:
         with tempfile.TemporaryDirectory() as t:
             d = Path(t)
             (d / "_meta").mkdir()
-            (d / "_meta" / "cutplan.md").write_text("new", encoding="utf-8")
-            (d / "cutplan.md").write_text("stale", encoding="utf-8")
-            self.assertEqual(drive_cutplan(d).read_text(encoding="utf-8"), "new")
+            (d / "_meta" / "cutplan.md").write_text("legacy", encoding="utf-8")
+            p = drive_cutplan(d)
+            self.assertEqual(p, d / "cutplan.md")
+            self.assertEqual(p.read_text(encoding="utf-8"), "legacy")
+            self.assertFalse((d / "_meta" / "cutplan.md").exists(),
+                             "舊檔要搬走,不留兩份分叉")
+
+    def test_existing_root_wins_and_meta_left_alone(self) -> None:
+        with tempfile.TemporaryDirectory() as t:
+            d = Path(t)
+            (d / "_meta").mkdir()
+            (d / "_meta" / "cutplan.md").write_text("stale", encoding="utf-8")
+            (d / "cutplan.md").write_text("live", encoding="utf-8")
+            self.assertEqual(drive_cutplan(d).read_text(encoding="utf-8"), "live")
 
 
 class TestFindDriveDir(unittest.TestCase):
