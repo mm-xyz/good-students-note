@@ -299,6 +299,72 @@ function applyStrike(doc, lineIndex, cleanStart, cleanEnd) {
   return { lines };
 }
 
+// ── undo 堆疊(2026-08-11:選取穩定後自動套用,原按鈕改「復原」)──────────
+//
+// History = { stack: Entry[] },Entry = { doc, lineIndex, start, end }。
+// 純資料、不含任何 DOM 參照——doc 是套用「這筆操作之前」的完整文件快照,
+// lineIndex/start/end 是這筆操作套用當下的邏輯位置(給 UI 換算畫面上復原
+// 按鈕該出現在哪裡用)。用快照而不是存反向操作,是因為 toggleStrike 的
+// 'remove' 分支在新語意下一次可能拆好幾段刪除線,反向操作不是單純再呼叫
+// 一次就能還原;存快照最簡單也保證復原後逐 byte 跟套用前完全相同。
+//
+// 全部函式都不會改動傳入的 history/doc(回傳新物件),跟這支檔案其餘函式
+// 的不可變風格一致。
+
+function createHistory() {
+  return { stack: [] };
+}
+
+function pushHistory(history, entry) {
+  return { stack: [...history.stack, entry] };
+}
+
+function popHistory(history) {
+  if (history.stack.length === 0) {
+    return { history, entry: null };
+  }
+  const entry = history.stack[history.stack.length - 1];
+  const stack = history.stack.slice(0, -1);
+  return { history: { stack }, entry };
+}
+
+function canUndo(history) {
+  return history.stack.length > 0;
+}
+
+// 堆疊頂端(最近一次操作)的邏輯位置,不 pop——UI 拿它算復原按鈕要指向
+// 畫面上的哪個位置。堆疊空時回 null。
+function peekHistory(history) {
+  if (history.stack.length === 0) return null;
+  const top = history.stack[history.stack.length - 1];
+  return { lineIndex: top.lineIndex, start: top.start, end: top.end };
+}
+
+// applyStrike + 自動推入歷史的便利包裝。選取不合法一樣丟錯(沿用
+// applyStrike/toggleStrike 既有行為),丟錯時不會推入任何東西——
+// 呼叫端傳入的 history 物件本身也不會被動到(不可變)。
+function applyStrikeWithHistory(doc, history, lineIndex, cleanStart, cleanEnd) {
+  const nextDoc = applyStrike(doc, lineIndex, cleanStart, cleanEnd);
+  const nextHistory = pushHistory(history, {
+    doc,
+    lineIndex,
+    start: cleanStart,
+    end: cleanEnd,
+  });
+  return { doc: nextDoc, history: nextHistory };
+}
+
+// 復原一步。堆疊空時優雅不做事(undone:false,doc 原封不動回傳同一個
+// 物件),不丟錯——「復原到底之後再復原」是使用者正常會做的事,不是
+// 呼叫端的程式錯誤,跟 requireEditableLine 那種丟錯的情境不同。
+function undo(doc, history) {
+  const popped = popHistory(history);
+  if (popped.entry === null) {
+    return { doc, history: popped.history, undone: false };
+  }
+  return { doc: popped.entry.doc, history: popped.history, undone: true };
+}
+
 const api = {
   parseCutplan,
   serializeCutplan,
@@ -308,6 +374,13 @@ const api = {
   toggleStrike,
   applyStrike,
   isEditableLine,
+  createHistory,
+  pushHistory,
+  popHistory,
+  canUndo,
+  peekHistory,
+  applyStrikeWithHistory,
+  undo,
   BLOCK_LINE_RE,
   SPEAKER_PREFIX_RE,
   REASON_SEP,
