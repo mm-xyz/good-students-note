@@ -106,3 +106,6 @@ build/
 
 # 分軌 render 的中繼 speech bus(每次 render 重生,幾百 MB)
 .pertrack_bus.wav
+
+# clasp 本機專案綁定（含個人 scriptId），不進版控
+scripts/cutplan-editor/.clasp.json
