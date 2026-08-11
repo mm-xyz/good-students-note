@@ -743,6 +743,10 @@ def run_ffmpeg(src: Path, segments: list[dict], musics: list[dict], out: Path,
     else:
         parts.append(f"[{post}]anull[out]")
 
+    # 輸出目錄不存在就建:`--out vNN_xxx/foo.mp3` 是常用寫法(版本目錄),
+    # 少了這行會在寫暫存 filter 檔時炸 FileNotFoundError,而且訊息指向
+    # `.render_filter.txt` 看不出真因(2026-08-11 自踩)
+    out.parent.mkdir(parents=True, exist_ok=True)
     script = out.parent / ".render_filter.txt"
     script.write_text(";\n".join(parts), encoding="utf-8")
     codec = {".wav": [],
