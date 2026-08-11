@@ -225,6 +225,34 @@ class TestFinalCutTranscript(unittest.TestCase):
                attach_speakers(cues, plan_sequence(self.sdir))]
         self.assertEqual(got, [(5.0, "Sarah"), (6.0, "Mars"), (9.0, "Sarah")])
 
+    def test_asr_wording_differences_do_not_collapse_the_speakers(self):
+        """成品是重轉的,用字跟原始逐字稿本來就有出入 —— 不能因為對不上就
+        一路沿用前一位(2026-08-12 實踩:EP16 整整 20 分鐘被併成一行全掛在
+        同一個人身上)。這裡刻意讓每個 cue 都有錯字/多字。
+        """
+        cues = [{"start": 5.0, "end": 6.0, "text": "哈囉嗯大家欸歡迎收聽"},
+                {"start": 6.0, "end": 7.0, "text": "我是Mars啦"},
+                {"start": 9.0, "end": 9.5, "text": "那就掰掰囉"}]
+        got = [c["speaker"] for c in
+               attach_speakers(cues, plan_sequence(self.sdir))]
+        self.assertEqual(got, ["Sarah", "Mars", "Sarah"])
+
+    def test_long_monologue_is_split_so_timestamps_stay_available(self):
+        """同講者連續不能無上限併成一大段 —— 併掉的是時間錨點,章節時間戳
+        就沒得抓(EP16 實踩:併出一段十分鐘沒有任何時間戳的巨大段落)。"""
+        srt = Path(self._td.name) / "long.srt"
+        blocks = []
+        for i in range(40):
+            blocks += [str(i + 1),
+                       f"00:00:{i:02d},000 --> 00:00:{i:02d},900",
+                       "哈囉嗯大家" * 2, ""]
+        srt.write_text("\n".join(blocks), encoding="utf-8")
+        out = build_transcript_from_final(self.sdir, srt)
+        self.assertGreater(len(out.splitlines()), 1,
+                           "長獨白沒有被切開,整段只有一個時間戳")
+        for line in out.splitlines():
+            self.assertLess(len(line), 400)
+
     def test_timestamps_come_from_the_final_srt_not_cut_map(self):
         """cut_map 說 B0005「掰掰」對不到任何 range(舊法無時間戳);
         成品逐字稿說它在 00:00:09 —— 以成品為準。"""

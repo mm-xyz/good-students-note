@@ -17,6 +17,7 @@ cutplan 保留 block → sessions/<slug>/copy_prompt.md(貼給 agy/codex 即用)
 """
 
 import argparse
+import difflib
 import json
 import re
 import sys
@@ -118,6 +119,7 @@ def plan_sequence(sdir: Path) -> list[tuple[str, str]]:
 
 
 _PUNCT_RE = re.compile(r"[^\w]+", re.UNICODE)
+MERGE_MAX = 220     # 同講者連續 cue 併行的字數上限(超過就換行重打時間戳)
 
 
 def attach_speakers(cues: list[dict], seq: list[tuple[str, str]]) -> list[dict]:
@@ -129,30 +131,40 @@ def attach_speakers(cues: list[dict], seq: list[tuple[str, str]]) -> list[dict]:
     改成:**時間以成品逐字稿為準**(那是聽眾真正會聽到的東西),cutplan 只
     提供它獨有的知識——誰在講。
 
-    對齊法:把 cutplan 文字接成一條字流(每個字記得它屬於誰),用一個只往前走
-    的指標,在字流裡找每個 cue 開頭幾個字的位置,取該段字的多數講者。ASR 與
-    cutplan 的用字會有出入,所以找不到就沿用前一位,不硬猜。
+    對齊法:兩條字流跑 difflib 的最長共同子序列,把成品的每個字對到 cutplan
+    的同一個字,取該 cue 涵蓋範圍的多數講者。
+
+    **不能用「往前找開頭幾個字」那種貪婪指標**(2026-08-12 實踩):成品是重新
+    轉錄的,用字跟原始逐字稿本來就有出入(「費備」vs「feedback」),找不到就
+    沿用前一位的話,一次失配會一路沿用到底 —— EP16 整整 20 分鐘被併成一行
+    全掛在同一個人身上。difflib 對插入/刪除/改寫是穩的,失配只影響該處。
     """
-    stream, owner = [], []
+    owner: list[str] = []
+    parts: list[str] = []
     for spk, text in seq:
         t = _PUNCT_RE.sub("", text)
-        stream.append(t)
+        parts.append(t)
         owner += [spk] * len(t)
-    flat = "".join(stream)
-    out, p, last = [], 0, seq[0][0] if seq else "?"
-    for c in cues:
-        t = _PUNCT_RE.sub("", c.get("text", ""))
-        spk = last
-        if t:
-            k = min(6, len(t))
-            q = flat.find(t[:k], p, p + 600)
-            if q < 0:                              # 放寬:整份找一次最近的
-                q = flat.find(t[:k], p)
-            if q >= 0:
-                span = owner[q:q + max(1, len(t))]
-                if span:
-                    spk = max(set(span), key=span.count)
-                p = q + max(1, int(len(t) * 0.9))
+    plan_flat = "".join(parts)
+
+    cue_txt = [_PUNCT_RE.sub("", c.get("text", "")) for c in cues]
+    cue_of: list[int] = []
+    for i, t in enumerate(cue_txt):
+        cue_of += [i] * len(t)
+    asr_flat = "".join(cue_txt)
+
+    votes: list[dict[str, int]] = [{} for _ in cues]
+    if plan_flat and asr_flat:
+        sm = difflib.SequenceMatcher(None, plan_flat, asr_flat, autojunk=False)
+        for i, j, n in sm.get_matching_blocks():
+            for k in range(n):
+                v = votes[cue_of[j + k]]
+                who = owner[i + k]
+                v[who] = v.get(who, 0) + 1
+
+    out, last = [], seq[0][0] if seq else "?"
+    for c, v in zip(cues, votes):
+        spk = max(v, key=v.get) if v else last
         out.append({**c, "speaker": spk})
         last = spk
     return out
@@ -169,7 +181,9 @@ def build_transcript_from_final(sdir: Path, final_srt: Path) -> str:
         body = c["text"].strip()
         if not body:
             continue
-        if c["speaker"] == prev:
+        # 同講者連續就併,但**併到 MERGE_MAX 字就換行重打時間戳** —— 不設上限
+        # 的話一段長獨白會變成沒有任何時間錨點的巨大段落,章節時間戳就沒得抓。
+        if c["speaker"] == prev and len(lines[-1]) < MERGE_MAX:
             lines[-1] += body
         else:
             lines.append(f"({hms(c['start'])}) {c['speaker']}:{body}")
@@ -206,6 +220,13 @@ def main():
                     if args.final_srt else build_transcript(sdir)))
     src = ("**定稿成品重轉的逐字稿**(時間即成品時間,講者取自 cutplan)"
            if args.final_srt else "cutplan 保留段(時間經 cut_map 換算)")
+    if args.final_srt:
+        # 素材(copy_material.md)常常是早幾版寫的,它的時間戳會過期 ——
+        # EP16 實踩:素材寫到 00:30:20 收尾,而定稿只有 28:45。逐字稿是對著
+        # **定稿本人**轉出來的,時間永遠以它為準,素材只提供內容與金句。
+        out = ("⚠️ 時間戳規則:逐字稿的時間來自**定稿成品**,是唯一正確的時間軸。"
+               "素材(copy_material)裡的時間戳可能來自舊版本,**一律以逐字稿為準**,"
+               "不要照抄素材的時間。\n\n" + out)
     dst = sdir / "copy_prompt.md"
     dst.write_text(
         f"# EP{args.ep} 集數文案 — 組裝完成的完整 prompt(貼給 agy/codex 即用)\n"
