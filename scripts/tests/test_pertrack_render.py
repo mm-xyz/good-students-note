@@ -260,7 +260,8 @@ class TestMixRanges(unittest.TestCase):
         y = rng.normal(0, 0.02, SR * 6)          # 全域底噪(較吵)
         y[:SR] = rng.normal(0, 0.002, SR)        # 0–1s:最安靜,但中間有一聲
         y[int(0.5 * SR):int(0.52 * SR)] *= 10    #        ← 呼吸/人聲事件
-        y[SR * 2:SR * 3] = rng.normal(0, 0.005, SR)   # 2–3s:稍吵但乾淨平坦
+        y[SR * 2:SR * 3] = rng.normal(0, 0.005, SR)   # 2–3s:安靜且平坦 ← 正解
+        y[SR * 4:SR * 5] = rng.normal(0, 0.05, SR)    # 4–5s:很大聲但也很平坦
         with wave.open(str(w), "wb") as f:
             f.setnchannels(1)
             f.setsampwidth(2)
@@ -270,6 +271,10 @@ class TestMixRanges(unittest.TestCase):
         self.assertTrue(spans, "應該還找得到乾淨窗")
         a, _b = spans[0]
         self.assertGreaterEqual(a, 1.9, "含事件的窗即使能量最低也不該被選中")
+        self.assertLess(a, 3.1,
+                        "平坦不等於安靜 —— 連續講話在 20ms 尺度上也很平坦,"
+                        "只看平坦度會挑到有人穩定說話的窗(EP18 修 bug 時實踩:"
+                        "底噪從 −60.9 變 −42.1dBFS,比原本更吵)")
 
     def test_room_tone_has_no_audible_events_or_period(self):
         """鋪底必須是**穩態**的:沒有事件、沒有可聽出的循環(ADR 0017)。

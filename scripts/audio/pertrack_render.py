@@ -123,6 +123,11 @@ def find_quiet_spans(tracks, dur: float, sr: int, want: int = 8,
     那些事件被鋪成每 7.84 秒重複一次的循環,MM 實聽在 0:36–0:38 抓到。
     **能量低不等於乾淨**,挑窗必須同時看平坦度。
 
+    **安靜與平坦兩個條件都要**,不能只換判準:連續講話在 20ms 短窗尺度上
+    同樣很平坦,只看平坦度會挑到「有人穩定說話」的窗(修這支 bug 時實踩:
+    底噪從 −60.9 變 −42.1dBFS,比原本更吵)。做法是先取最安靜的一小群
+    候選,再在裡面挑最平坦的。
+
     平坦的窗不足 `want` 個時回傳較少(甚至 0)——寧可不鋪底,也不鋪一段
     帶事件的音訊;呼叫端負責 fallback。
     """
@@ -139,8 +144,12 @@ def find_quiet_spans(tracks, dur: float, sr: int, want: int = 8,
             acc = x if acc is None else acc + x[:len(acc)]
         cand.append((e, t, _spread_db(acc, sr)))
         t += step
-    flat = sorted((e, t) for e, t, s in cand if s <= max_spread_db)
-    return [(t, t + seg) for _e, t in flat[:want]]
+    if not cand:
+        return []
+    cand.sort()                                   # 先按能量:最安靜的在前
+    pool = cand[:max(want * 4, math.ceil(0.1 * len(cand)))]
+    quiet_and_flat = [(e, t) for e, t, s in pool if s <= max_spread_db]
+    return [(t, t + seg) for _e, t in quiet_and_flat[:want]]
 
 
 def measure_noise_floor(tracks, spans, sr: int, win: float = 0.02,
