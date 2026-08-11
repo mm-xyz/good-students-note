@@ -199,6 +199,14 @@ class TestRetainedRangesAndEnvelopes(unittest.TestCase):
                               silent_db=-60.0)
         self.assertEqual(env["KIN"], [(0.0, 1.0, -27.0), (1.0, 2.0, 0.0)])
 
+    def test_envelope_offsets_are_sample_quantised_when_sr_is_given(self):
+        cells = build_cells([T("Mars", blk("MR1", 0.0, 0.11111)),
+                             T("KIN", blk("KN1", 5.0, 5.11111))])
+        env = track_envelopes(cells, [[0.0, 0.11111], [5.0, 5.11111]],
+                              duck_db=-27.0, silent_db=-60.0, sr=44100)
+        n0 = int(round(0.11111 * 44100)) - 0
+        self.assertAlmostEqual(env["KIN"][1][0], n0 / 44100, places=9)
+
     def test_equal_power_ramp_preserves_power_at_the_midpoint(self):
         ramp = equal_power_ramp(1.0, 0.0, 5)      # 1.0 → 0.0 振幅
         self.assertAlmostEqual(ramp[0], 1.0, places=6)

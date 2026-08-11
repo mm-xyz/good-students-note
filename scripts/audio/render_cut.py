@@ -369,6 +369,32 @@ def subtract(ranges: list[list[float]], removals: list[list[float]],
     return out
 
 
+def enforce_monotonic(segments: list[dict], min_frag: float = 0.12) -> list[dict]:
+    """保證來源時間軸上**同一段音訊不會播兩次**。
+
+    剪點微調(snap 靜音、谷底、word_guard)是逐 unit 各自算的:前一段的尾巴
+    可以被往後推、後一段的頭可以被往前拉,兩邊推到重疊,那段就在成品裡播兩次。
+    2026-08-11 實測:混音線 v7 有 1 處 0.48s 重複;分軌線剪點密集,放大成 44 處
+    共 15.6s —— 12:16「臨時任務」的「任務」在成品裡念了兩次(本地 whisper
+    重轉抓到,dry-run 的秒數看不出來)。
+
+    只夾**往前推進**的相鄰語音段;`🎬 集錦`本來就會回頭重播,不動。
+    """
+    out = []
+    prev = None
+    for s_ in segments:
+        if s_["kind"] != "speech" or s_.get("clip"):
+            out.append(s_)
+            continue
+        if prev is not None and prev["a"] < s_["a"] < prev["b"]:
+            s_ = dict(s_, a=prev["b"])
+        if s_["b"] - s_["a"] < min_frag:
+            continue
+        out.append(s_)
+        prev = s_
+    return out
+
+
 def validate_program(blocks: list[dict], program: list[dict],
                      srt_text: str, gaps: list[dict] | None = None,
                      inserts: list[dict] | None = None) -> None:
@@ -802,6 +828,15 @@ def main():
                          "**不做** 40ms 時間 crossfade —— 那是全域剪除才用的)")
     ap.add_argument("--mask-lookahead", type=float, default=0.05)
     ap.add_argument("--mask-hangover", type=float, default=0.15)
+    ap.add_argument("--room-tone-db", type=float, default=0.0,
+                    help="分軌:room-tone 鋪底相對真實底噪的增益(dB)。"
+                         "0=照真實電平鋪,底噪整集連續;停用用 --no-room-tone")
+    ap.add_argument("--no-room-tone", action="store_true",
+                    help="停用 room-tone 鋪底(全軌被 duck 的區間會掉到近數位靜音)")
+    ap.add_argument("--track-offset", default="auto",
+                    help="分軌相對混音 source.wav 的時間位移(秒;auto=互相關"
+                         "自動量,0=停用)。block 時間碼長在 source.wav 上,"
+                         "分軌不見得跟它對齊 —— EP16 實測固定差 4.97ms")
     ap.add_argument("--pan", default="",
                     help="分軌:等功率 pan 位置,如 Mars=-0.2,KIN=0.2"
                          "(預設全置中 —— 把三個人拉開是節目聲音的重大改動,"
@@ -1145,13 +1180,18 @@ def main():
                                          args.music_speech_fade)
         segments.extend(segs)
 
+    n_seg0 = len(segments)
+    segments = enforce_monotonic(segments)
+    if len(segments) != n_seg0:
+        print(f"[render] ⚠ 剪點微調造成 {n_seg0 - len(segments)} 個段落被"
+              f"相鄰段落吃掉(重疊=同一段音訊播兩次),已丟棄")
     if not any(s["kind"] == "speech" for s in segments):
         sys.exit("[render] FAIL: 沒有任何保留 block")
     if n_strike:
         print(f"[render] 字級精剪: {n_strike} 處刪除線")
     if n_pause:
         print(f"[render] 停頓收緊: {n_pause} 處 >{args.max_pause}s")
-    if manual_cuts:
+    if manual_cuts and not pertrack:
         print(f"[render] ✂ 手動剪除: {len(manual_cuts)} 段標記,實際剪掉 "
               f"{manual_secs:.2f}s")
         if manual_secs < 0.05:
@@ -1215,20 +1255,46 @@ def main():
         with _wave.open(str(sdir / tracks_plan[0].file), "rb") as _f:
             bus_sr = _f.getframerate()
         envs = track_envelopes(kept_cells, bus_ranges, args.duck_db,
-                               args.silent_db)
+                               args.silent_db, sr=bus_sr)
         static = ptr.measure_static_gains(sdir, tracks_plan, kept_cells)
         if static:
             print("[render] 分軌 static gain(各軌自己 KEEP 區間的 LUFS 拉齊):"
                   + " ".join(f"{n}{v:+.1f}dB" for n, v in static.items()))
         pan = {kv.split("=")[0]: float(kv.split("=")[1])
                for kv in args.pan.split(",") if "=" in kv}
+        if args.track_offset == "auto":
+            toff = {t.name: ptr.measure_track_offset(src, sdir / t.file,
+                                                     sr=bus_sr)
+                    for t in tracks_plan}
+        else:
+            toff = {t.name: float(args.track_offset) for t in tracks_plan}
+        print("[render] 分軌時間對齊(相對 source.wav):"
+              + " ".join(f"{n}{v * 1000:+.2f}ms" for n, v in toff.items()))
+        bed = None
+        if not args.no_room_tone:
+            spans = ptr.find_quiet_spans(
+                [(t.name, sdir / t.file) for t in tracks_plan],
+                ffprobe_duration(sdir / tracks_plan[0].file), bus_sr,
+                want=8, seg=1.2, probes=300)
+            n_bus = sum(int(round(b * bus_sr)) - int(round(a * bus_sr))
+                        for a, b in bus_ranges)
+            tt = [(t.name, sdir / t.file) for t in tracks_plan]
+            floor_db = ptr.measure_noise_floor(tt, spans, bus_sr)
+            bed = ptr.build_room_tone(
+                tt, spans, n_bus, bus_sr,
+                normalize_to_db=floor_db + args.room_tone_db)
+            import numpy as _np
+            print(f"[render] room-tone 鋪底:取樣 {len(spans)} 段真靜音,"
+                  f"實測底噪 {floor_db:.1f}dBFS → 鋪底 "
+                  f"{20 * _np.log10(float(_np.sqrt((bed ** 2).mean())) + 1e-12):.1f}dBFS")
         bus = sdir / ".pertrack_bus.wav"
         print(f"[render] 混 speech bus:{len(bus_ranges)} 段 × "
               f"{len(tracks_plan)} 軌 @ {bus_sr}Hz …")
         info = ptr.mix_ranges([(t.name, sdir / t.file) for t in tracks_plan],
                               bus_ranges, envs, bus, sr=bus_sr,
                               gate_fade=args.gate_fade, static_db=static,
-                              pan=pan, duck_default_db=args.duck_db)
+                              pan=pan, duck_default_db=args.duck_db,
+                              track_offset=toff, room_tone=bed)
         print(f"[render] speech bus {info['frames'] / bus_sr:.1f}s"
               f"、peak {20 * math.log10(max(info['peak'], 1e-9)):.1f}dBFS"
               f"、削頂 {info['clipped']} 樣本")

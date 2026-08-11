@@ -314,10 +314,13 @@ def retained_ranges(cells: list[dict]) -> list[list[float]]:
 
 
 def track_envelopes(cells: list[dict], ranges: list[list[float]],
-                    duck_db: float = -27.0,
-                    silent_db: float = -60.0) -> dict[str, list[tuple]]:
+                    duck_db: float = -27.0, silent_db: float = -60.0,
+                    sr: int | None = None) -> dict[str, list[tuple]]:
     """每軌的增益包絡,**換算到 bus 時間軸**(= ranges 依序接起來之後的時間)。
 
+    給了 sr 就用**取樣量化**的位移(round(b·sr)−round(a·sr)),跟實際寫進 bus
+    的樣本數同一套算法 —— 用 Σ(b−a) 浮點累加,146 段之後會差好幾個樣本,
+    gate 時間點逐段漂移。
     回傳 {track: [(bus_start, bus_end, gain_db), ...]},相鄰同增益已合併。
     """
     names = list(cells[0]["state"]) if cells else []
@@ -337,7 +340,8 @@ def track_envelopes(cells: list[dict], ranges: list[list[float]],
                     out[n][-1] = (out[n][-1][0], bb, g)
                 else:
                     out[n].append((ba, bb, g))
-        off += rb - ra
+        off += ((int(round(rb * sr)) - int(round(ra * sr))) / sr if sr
+                else rb - ra)
     return out
 
 

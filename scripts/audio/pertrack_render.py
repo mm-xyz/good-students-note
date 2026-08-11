@@ -100,10 +100,137 @@ def _read_mono(path: Path, sr: int, a: float, b: float):
     return np.concatenate([x, np.zeros(max(0, n - len(x)))])[:n]
 
 
+def find_quiet_spans(tracks, dur: float, sr: int, want: int = 8,
+                      seg: float = 1.2, probes: int = 400):
+    """在整集裡找最安靜的幾段(三軌能量和最小)當 room-tone 取樣點。"""
+    paths = [t[1] if isinstance(t, tuple) else Path(t) for t in tracks]
+    cand = []
+    step = max(seg, (dur - seg) / max(1, probes))
+    t = 0.0
+    while t + seg <= dur:
+        e = 0.0
+        for p in paths:
+            x = _read_mono(p, sr, t, t + seg)
+            e += float((x ** 2).mean())
+        cand.append((e, t))
+        t += step
+    cand.sort()
+    return [(t, t + seg) for _e, t in cand[:want]]
+
+
+def measure_noise_floor(tracks, spans, sr: int, win: float = 0.02,
+                        pct: float = 25.0) -> float:
+    """真實底噪電平(dBFS):取樣段內 win 秒短窗 RMS 的第 pct 百分位。
+
+    取樣段本身的平均沒有用 —— 1.2 秒的窗幾乎一定含呼吸或衣物摩擦,拿它當
+    鋪底電平會高出十幾 dB。要的是「窗裡最安靜的那部分」。
+    """
+    paths = [t[1] if isinstance(t, tuple) else Path(t) for t in tracks]
+    vals = []
+    w = max(1, int(win * sr))
+    for a, b in spans:
+        acc = None
+        for p in paths:
+            x = _read_mono(p, sr, a, b)
+            acc = x if acc is None else acc + x[:len(acc)]
+        if acc is None:
+            continue
+        m = len(acc) // w * w
+        if m:
+            vals += list(np.sqrt((acc[:m].reshape(-1, w) ** 2).mean(axis=1)))
+    if not vals:
+        return -90.0
+    return float(20 * np.log10(max(np.percentile(vals, pct), 1e-9)))
+
+
+def build_room_tone(tracks, spans, n: int, sr: int, seg: float = 1.0,
+                    xfade: float = 0.02, normalize_to_db: float | None = None):
+    """真靜音區取樣 → 等功率 crossfade 串成長度 n 的 room-tone bed。
+
+    D5:每次關麥噪聲地板都抽動一下,聽起來會「呼吸」。鋪一層固定的房間底噪
+    就不會 —— EP16 實測不鋪的話,全軌都被 duck 的區間會掉到 −92dBFS
+    (幾乎是數位靜音),跟旁邊 −68dBFS 的開麥底噪差 24dB。
+
+    **不用單一片段迴圈**:那樣每繞一圈接縫就 click 一次。改成多段真實底噪
+    輪流接,接縫走等功率 crossfade,頭尾功率互補。
+    """
+    paths = [t[1] if isinstance(t, tuple) else Path(t) for t in tracks]
+    chunks = []
+    for a, b in spans:
+        take = min(seg, b - a)
+        if take < xfade * 3:
+            continue
+        acc = None
+        for p in paths:
+            x = _read_mono(p, sr, a, a + take)
+            acc = x if acc is None else acc + x[:len(acc)]
+        if acc is not None and len(acc) > int(xfade * sr) * 3:
+            chunks.append(acc)
+    if not chunks:
+        return np.zeros(n)
+    h = int(xfade * sr)
+    x = np.linspace(0.0, 1.0, h)
+    fo, fi = np.cos(np.pi * x / 2), np.sin(np.pi * x / 2)
+    out = np.zeros(n)
+    at = 0
+    k = 0
+    while at < n:
+        c = chunks[k % len(chunks)]
+        k += 1
+        body = len(c) - h
+        if at:                                   # 與前一段等功率交疊
+            lo = max(0, at - h)
+            m = min(h, n - lo, len(c))
+            out[lo:lo + m] = out[lo:lo + m] * fo[:m] + c[:m] * fi[:m]
+            at = lo + m
+            c = c[m:]
+        m = min(len(c), n - at)
+        out[at:at + m] = c[:m]
+        at += m
+        if body <= 0:
+            break
+    if normalize_to_db is not None:
+        cur = float(np.sqrt((out ** 2).mean()))
+        if cur > 1e-12:
+            out = out * (10 ** (normalize_to_db / 20) / cur)
+    return out
+
+
+def measure_track_offset(ref: Path, track: Path, probes=None, sr: int = 44100,
+                         min_rho: float = 0.55) -> float:
+    """量「分軌相對於混音 source.wav」的時間位移(秒,負值＝分軌比較早)。
+
+    所有 block 時間碼都長在 source.wav 的時間軸上,分軌卻不見得跟它對齊 ——
+    EP16 實測整集固定差 219 樣本(4.97ms),規格只講三軌彼此 sample-aligned,
+    沒講混音那條。不補位移,每個剪點都偏 5ms。
+    只採信相關係數 ≥min_rho 的探測點(那代表這一段是這位在主講),取中位數。
+    """
+    probes = probes or [(t, t + 4.0) for t in (30, 200, 500, 900, 1400, 1900)]
+    lags = []
+    for a, b in probes:
+        try:
+            x = _read_mono(ref, sr, a, b)
+            y = _read_mono(track, sr, a, b)
+        except Exception:
+            continue
+        n = min(len(x), len(y))
+        if n < sr:
+            continue
+        x, y = x[:n] - x[:n].mean(), y[:n] - y[:n].mean()
+        c = np.correlate(x, y, "full")
+        den = math.sqrt(float((x ** 2).sum() * (y ** 2).sum())) or 1.0
+        if float(c.max()) / den >= min_rho:
+            lags.append(int(c.argmax()) - (n - 1))
+    if not lags:
+        return 0.0
+    return -float(np.median(lags)) / sr
+
+
 def mix_ranges(tracks, ranges, env: dict, out: Path, sr: int = 44100,
                gate_fade: float = 0.015, static_db: dict | None = None,
                pan: dict | None = None, duck_default_db: float = -27.0,
-               highpass: float = 0.0) -> dict:
+               track_offset: dict | None = None,
+               room_tone=None, highpass: float = 0.0) -> dict:
     """三軌 → speech bus WAV(32-bit PCM,留足 headroom)。
 
     tracks  = [Path, ...] 或 [(name, Path), ...](只給 Path 時 name=檔名 stem)
@@ -115,9 +242,9 @@ def mix_ranges(tracks, ranges, env: dict, out: Path, sr: int = 44100,
             for t in tracks]
     static_db = static_db or {}
     pan = pan or {}
-    total = sum(b - a for a, b in ranges)
+    track_offset = track_offset or {}
     n_total = sum(int(round(b * sr)) - int(round(a * sr)) for a, b in ranges)
-    curves = {n: envelope_curve(env.get(n, []), sr, total, gate_fade,
+    curves = {n: envelope_curve(env.get(n, []), sr, n_total / sr, gate_fade,
                                 duck_default_db) for n, _p in norm}
     lr = {}
     for n, _p in norm:
@@ -140,7 +267,8 @@ def mix_ranges(tracks, ranges, env: dict, out: Path, sr: int = 44100,
             cb = ca + take / sr
             acc = np.zeros((take, 2))
             for n, p in norm:
-                x = _read_mono(p, sr, ca, cb)[:take]
+                d = track_offset.get(n, 0.0)
+                x = _read_mono(p, sr, max(0.0, ca + d), cb + d)[:take]
                 if len(x) < take:
                     x = np.concatenate([x, np.zeros(take - len(x))])
                 gs = static_db.get(n, 0.0)
@@ -150,6 +278,12 @@ def mix_ranges(tracks, ranges, env: dict, out: Path, sr: int = 44100,
                 l, r = lr[n]
                 acc[:, 0] += x * l
                 acc[:, 1] += x * r
+            if room_tone is not None:
+                bed = room_tone[off + done:off + done + take]
+                if len(bed) < take:
+                    bed = np.concatenate([bed, np.zeros(take - len(bed))])
+                acc[:, 0] += bed
+                acc[:, 1] += bed
             peak = max(peak, float(np.max(np.abs(acc))) if take else 0.0)
             clipped += int(np.count_nonzero(np.abs(acc) > 1.0))
             proc.stdin.write(np.clip(acc, -1.0, 1.0)

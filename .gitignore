@@ -103,3 +103,6 @@ build/
 # 尾斜線只匹配目錄不匹配 symlink,曾因此漏 ignore 造成 symlink 被誤 add。
 .venv-doc
 .venv-audio
+
+# 分軌 render 的中繼 speech bus(每次 render 重生,幾百 MB)
+.pertrack_bus.wav
