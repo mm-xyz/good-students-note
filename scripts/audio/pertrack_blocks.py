@@ -177,8 +177,11 @@ def main() -> int:
             words = json.loads(wj.read_text(encoding="utf-8"))
             fine = []
             for c in cues:
+                # 用**字的中點**歸屬,不是「時間有交集」——後者會讓相鄰 cue
+                # 共用邊界字,切出來的 block 互相重疊(SOL 評審實測抓到 957 組)。
+                # 同軌重疊 block 會讓 render 的 atomic cell 出現矛盾勾選狀態。
                 ws = [w for w in words
-                      if w["end"] > c["start"] - 1e-6 and w["start"] < c["end"] + 1e-6]
+                      if c["start"] - 1e-6 <= (w["start"] + w["end"]) / 2 < c["end"] + 1e-6]
                 parts = split_words_to_phrases(ws, c["text"], max_secs=args.max_secs)
                 fine.extend(parts if parts else [c])
             print(f"    {t['speaker']:6s} {len(cues)} cues → 細切 {len(fine)}"
