@@ -614,6 +614,25 @@ class TestInsertRender(TestDryRunE2E):
             proc = self._render(sdir, "--max-block", "0")
         self.assertNotIn("沒有勾選粒度", proc.stdout)
 
+    def test_strike_survives_boundary_polish(self):
+        """刪除線不准被 refine_boundaries／word_guard 還原。
+
+        2026-08-11 MM 實聽:「滿多字已經標刪除線了,但是卻還是有聽到」。
+        機制:subtract 剪掉字之後,refine_boundaries 把切點微調進那個字裡面,
+        word_guard 盡忠職守把邊界推到詞尾外 → **整個字被塞回去**,兩段重疊
+        再被 merge 合併。EP16 實測 146 處刪除線只有 39 處(27%)真的生效。
+        `## ✂` 手動剪除早就因為同樣理由被放在 word_guard 之後。
+        """
+        with tempfile.TemporaryDirectory() as td:
+            sdir = self._make_session(td)
+            dump = Path(td) / "ranges.json"
+            proc = self._render(sdir, "--dump-ranges", str(dump))
+            self.assertEqual(proc.returncode, 0, proc.stderr or proc.stdout)
+            rs = json.loads(dump.read_text(encoding="utf-8"))
+        # B0002「第~~二~~句。」的「二」在 1.4–1.6s,不准落在任何保留段裡
+        hit = [r for r in rs if r[0] < 1.6 - 1e-6 and r[1] > 1.4 + 1e-6]
+        self.assertEqual(hit, [], f"被刪除線標記的字仍在成品裡:{hit}")
+
     def test_insert_does_not_disturb_a_plan_without_inserts(self):
         """沒有 ➕ 的 cutplan,行為必須跟加這個功能之前一模一樣。"""
         with tempfile.TemporaryDirectory() as td:

@@ -1167,14 +1167,24 @@ def main():
                                 args.pause_keep, words)
             n_pause += len(pr)
             removals += pr
-        if removals:
-            ranges = subtract(ranges, removals)
+        # 邊界微調(谷底/word 保護)先做,**再**套人審點名的剪除。
+        #
+        # 2026-08-11 MM 實聽:「滿多字已經標刪除線了,但是卻還是有聽到」。
+        # 原本順序是 subtract → refine → word_guard,結果 refine 把切點微調進
+        # 被刪的字裡面,word_guard 盡忠職守把邊界推到詞尾外 → **整個字被塞
+        # 回去**,兩段重疊再被 merge 合併。EP16 實測 146 處刪除線只有 39 處
+        # (27%)真的生效,77 處(53%)完全沒剪掉、30.1 秒該消失卻還在。
+        #
+        # `## ✂` 手動剪除本來就因為同樣理由放在 word_guard 之後(見下方原註解),
+        # 刪除線與停頓收緊是同一類「人審點名」,只是當初漏了。
         ranges = refine_boundaries(ranges, sdir / "audio16k.wav")
         if words_guard:
             ranges = word_guard(ranges, words_guard)
+        if removals:
+            ranges = subtract(ranges, removals)
         if manual_cuts and not u.get("pertrack"):
-            # ✂ 手動剪除擺在 word_guard 之後:人審點名的區間說了算,不受
-            # 「whisper 說這裡有字」的保護攔阻(那正是它要救的失效情境)
+            # ✂ 手動剪除:人審點名的區間說了算,不受「whisper 說這裡有字」的
+            # 保護攔阻(那正是它要救的失效情境)
             before = sum(b - a for a, b in ranges)
             ranges = subtract(ranges, manual_cuts)
             manual_secs += before - sum(b - a for a, b in ranges)
