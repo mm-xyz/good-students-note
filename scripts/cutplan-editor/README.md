@@ -125,3 +125,20 @@ node --test "scripts/cutplan-editor/tests/**/*.test.js"
   (`saveCutplan` 沒有版本檢查)。單人使用場景下風險低,先不做。
 - 不支援新增/刪除 block、新增章節、編輯 G 列說明文字——這些本來就不在
   卡片範圍內(唯讀是設計,不是還沒做完)。
+- **前導空白的 block 行會被視為唯讀**(⚠️ Minor,2026-08-11 independent
+  reviewer 找到)。`cutplan-core.js` 的 `parseLine` 從行首直接匹配
+  `BLOCK_LINE_RE`,而 `scripts/audio/render_cut.py` 的 `LINE_RE` 是套用在
+  `line.strip()` 之後——若 cutplan.md 出現縮排的 block 行,render 端仍當
+  正常 block 處理,但本編輯器會把它鎖成唯讀、無法勾選/加刪除線。方向是
+  安全的(保守側,不會誤判唯讀行為可編輯造成污染),四份真實 cutplan
+  掃描零命中,目前不影響任何已知檔案。要解的話:`parseLine` 比對前先剝離
+  前導空白,另存成一個欄位,serialize 時把它接回行首還原。
+- **`loadCutplan`/`saveCutplan` 不驗證 fileId 來源**(⚠️ Minor,同上次
+  reviewer 發現)。兩個函式對任何 `fileId` 都會透過 `DriveApp.getFileById`
+  讀寫,不限於 `listEpisodes()` 掃出來的 cutplan 檔案。因為
+  `appsscript.json` 是 `access: MYSELF`,威脅模型侷限在 MM 自己的瀏覽器
+  console(要主動打開開發者工具手動呼叫 `google.script.run.saveCutplan(其他
+  fileId, ...)`),而且 `findIllegalEdit_` 的逐行結構比對幾乎必定會擋下
+  非 cutplan 格式的內容(行數/block 格式對不上就丟錯)。列為防禦縱深待辦,
+  不是可被第三人利用的漏洞。要解的話:`saveCutplan` 收到 `fileId` 後,先跟
+  `listEpisodes()` 的結果集合比對,不在清單裡直接拒絕。
