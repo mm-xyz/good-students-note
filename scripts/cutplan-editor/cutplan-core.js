@@ -41,14 +41,26 @@
  *
  * ## 反白範圍的合法性(邊界 f)
  *
- * classifySelection(bodyRaw, start, end) 只回三種結果,不留未定義行為:
- *   - 'add'    — [start,end) 不與任何既有 struck 片段相交 → 可以整段包 `~~`
- *   - 'remove' — [start,end) 恰好等於某一個既有 struck 片段的邊界 → 可以拆
- *                掉那一段的 `~~`
- *   - 'invalid'— 其他所有情況(空選取、越界、與 struck 片段部分交疊、橫跨
- *                struck 與 plain 邊界、橫跨兩段以上 struck)一律拒絕,
- *                toggleStrike/applyStrike 對此丟錯,不會靜默猜測使用者想
- *                做什麼、也不會產生巢狀 `~~~~` 這種無法回頭解析的輸出。
+ * classifySelection(bodyRaw, start, end) 回四種結果,不留未定義行為:
+ *   - 'add'    — [start,end) 是非空範圍,且不與任何既有 struck 片段相交 →
+ *                整段包 `~~`。
+ *   - 'remove' — [start,end) 是非空範圍,且跟至少一個既有 struck 片段有交集
+ *                (完全包含它、被它完全包含、部分重疊、或橫跨多個 struck
+ *                片段皆算)→ **每一個有交集的 struck 片段整段拆掉 `~~`**,
+ *                即使選取只蓋到該片段的一部分;選取範圍內原本就是 plain
+ *                的文字不受影響。這是 2026-08-11 MM 實測回報的兩個 bug
+ *                (「`~~1~~ 23 ~~4~~` 沒辦法批次取消」「現在也沒辦法取消」)
+ *                的修正——舊版只有「選取恰好等於單一 struck 片段邊界」才
+ *                判定可取消,手機長按拖曳選取幾乎不可能精準對齊那個邊界,
+ *                於是幾乎所有真實的「取消刪除線」操作都落回 'invalid'。
+ *   - 'empty'  — start === end(合法索引但沒有反白任何文字)。跟 'invalid'
+ *                分開列一種狀態,是因為呼叫端(UI)要用它來顯示「請先反白
+ *                文字」這種可見提示,而不是跟「索引根本不合法」用同一種
+ *                靜默失敗處理。
+ *   - 'invalid'— 索引不合法(非整數、負數、end < start、超出 clean 文字
+ *                長度)。toggleStrike/applyStrike 對 'empty' 與 'invalid'
+ *                都會丟錯(訊息不同),不會靜默猜測使用者想做什麼、也不會
+ *                產生巢狀 `~~~~` 這種無法回頭解析的輸出。
  */
 
 // `- [x] B0018 [1:59–2:10] 其餘內容...` — 對齊 scripts/audio/render_cut.py 的 LINE_RE。

@@ -228,35 +228,104 @@ test('isEditableLine: block 行(B/G)標記為可編輯', () => {
 });
 
 // ── (f) 邊界:刪除線交疊/巢狀行為明確定義 ────────────────────────────────
+//
+// 2026-08-11 MM 實測回報兩個 bug(都在「取消刪除線」路徑):
+//   1. 「`~~1~~ 23 ~~4~~` 不能批次取消」
+//   2. 「現在也沒辦法取消標記」
+// 根因:舊版 classifySelection 只有「選取恰好等於單一 struck 片段邊界」才
+// 判定 'remove',其餘部分重疊/橫跨多段一律 'invalid' → toggleStrike 丟錯,
+// 手機長按拖曳幾乎不可能精準對齊那個邊界。新語意:選取範圍內只要「碰到」
+// 任何既有刪除線(完全包含/被包含/部分重疊/橫跨多段皆算),就整段整段拆掉
+// 那些被碰到的刪除線;選取範圍內完全沒有既有刪除線才是 'add';空選取是
+// 獨立的 'empty' 狀態(不是 'invalid'),UI 要能用它顯示可見提示。
 
-test('classifySelection: 選取完全落在既有刪除線內但邊界不完全對齊 → invalid', () => {
+test('classifySelection: 選取完全落在既有刪除線內 → remove,整段刪除線一起取消', () => {
   const doc = parseCutplan(FIXTURE_LF);
   const idx = lineIndexOf(FIXTURE_LF, '- [x] B0004');
-  // 既有刪除線 clean[10,19);選 [12,17) 部分交疊、邊界不對齊
+  // 既有刪除線 clean[9,18);選 [12,17) 完全落在裡面、邊界不對齊
   const mode = classifySelection(doc.lines[idx].bodyRaw, 12, 17);
-  assert.equal(mode, 'invalid');
-  assert.throws(() => applyStrike(doc, idx, 12, 17));
+  assert.equal(mode, 'remove');
+  const restored = applyStrike(doc, idx, 12, 17);
+  assert.equal(
+    serializeCutplan(restored).split('\n')[idx],
+    '- [x] B0004 [0:12–0:20] [Bob] 我們可以先講重點,然後再講細節好了, ← 二剪:順序調整',
+  );
 });
 
-test('classifySelection: 選取橫跨「已刪除線」與「未刪除線」邊界 → invalid', () => {
+test('classifySelection: 選取橫跨「已刪除線」與「未刪除線」邊界 → remove,整段一起取消', () => {
   const doc = parseCutplan(FIXTURE_LF);
   const idx = lineIndexOf(FIXTURE_LF, '- [x] B0004');
-  // clean[10,19) 是既有刪除線,選 [8,12) 一半在外一半在內
+  // clean[9,18) 是既有刪除線,選 [8,12) 一半在外(plain)一半在內(struck)
   const mode = classifySelection(doc.lines[idx].bodyRaw, 8, 12);
-  assert.equal(mode, 'invalid');
+  assert.equal(mode, 'remove');
+  const restored = applyStrike(doc, idx, 8, 12);
+  assert.equal(
+    serializeCutplan(restored).split('\n')[idx],
+    '- [x] B0004 [0:12–0:20] [Bob] 我們可以先講重點,然後再講細節好了, ← 二剪:順序調整',
+  );
 });
 
-test('classifySelection: 空選取(start===end) → invalid', () => {
+test('applyStrike: 選取範圍比既有刪除線更寬(左右都多包 plain 文字) → remove,plain 部分不受影響', () => {
+  const doc = parseCutplan(FIXTURE_LF);
+  const idx = lineIndexOf(FIXTURE_LF, '- [x] B0004');
+  // 既有刪除線 clean[9,18);選 [5,18) 左邊多包 5 個字的 plain 文字
+  const mode = classifySelection(doc.lines[idx].bodyRaw, 5, 18);
+  assert.equal(mode, 'remove');
+  const restored = applyStrike(doc, idx, 5, 18);
+  assert.equal(
+    serializeCutplan(restored).split('\n')[idx],
+    '- [x] B0004 [0:12–0:20] [Bob] 我們可以先講重點,然後再講細節好了, ← 二剪:順序調整',
+  );
+});
+
+test('classifySelection: 空選取(start===end) → empty,跟 invalid 分開(UI 要能顯示可見提示)', () => {
   const doc = parseCutplan(FIXTURE_LF);
   const idx = lineIndexOf(FIXTURE_LF, '- [ ] B0002');
-  assert.equal(classifySelection(doc.lines[idx].bodyRaw, 3, 3), 'invalid');
+  assert.equal(classifySelection(doc.lines[idx].bodyRaw, 3, 3), 'empty');
 });
 
-test('classifySelection: 超出文字長度 → invalid', () => {
+test('applyStrike: 空選取要丟錯(不是靜默忽略),錯誤訊息要能分辨「沒選取」', () => {
+  const doc = parseCutplan(FIXTURE_LF);
+  const idx = lineIndexOf(FIXTURE_LF, '- [ ] B0002');
+  assert.throws(() => applyStrike(doc, idx, 3, 3), /空|選取/);
+});
+
+test('classifySelection: 選取含 block 內文以外的位置(超出文字長度)→ invalid', () => {
   const doc = parseCutplan(FIXTURE_LF);
   const idx = lineIndexOf(FIXTURE_LF, '- [ ] B0002');
   const { clean } = splitStrikes(doc.lines[idx].bodyRaw);
   assert.equal(classifySelection(doc.lines[idx].bodyRaw, 0, clean.length + 5), 'invalid');
+  assert.throws(() => applyStrike(doc, idx, 0, clean.length + 5));
+});
+
+test('classifySelection/applyStrike: 跨段但只蓋到頭尾兩段的一部分 → 兩段都整段取消', () => {
+  const twoWide = '- [x] B0098 [0:00–0:09] [Alice] ~~abc~~mid~~def~~\n';
+  const doc = parseCutplan(twoWide);
+  const { clean } = splitStrikes(doc.lines[0].bodyRaw);
+  assert.equal(clean, 'abcmiddef');
+  // struck1 = clean[0,3)"abc",plain = clean[3,6)"mid",struck2 = clean[6,9)"def"
+  // 選 [1,7):只蓋到 struck1 的尾巴("bc")、全部 plain、struck2 的頭("de")
+  const mode = classifySelection(doc.lines[0].bodyRaw, 1, 7);
+  assert.equal(mode, 'remove');
+  const restored = applyStrike(doc, 0, 1, 7);
+  assert.equal(
+    serializeCutplan(restored),
+    '- [x] B0098 [0:00–0:09] [Alice] abcmiddef\n',
+  );
+});
+
+test('MM 原話重現:`~~1~~ 23 ~~4~~` 全選 → 一次變成 `1 23 4`(批次取消)', () => {
+  const mmExample = '- [x] B0097 [0:00–0:07] [Alice] ~~1~~ 23 ~~4~~\n';
+  const doc = parseCutplan(mmExample);
+  const { clean } = splitStrikes(doc.lines[0].bodyRaw);
+  assert.equal(clean, '1 23 4');
+  const mode = classifySelection(doc.lines[0].bodyRaw, 0, clean.length);
+  assert.equal(mode, 'remove');
+  const restored = applyStrike(doc, 0, 0, clean.length);
+  assert.equal(
+    serializeCutplan(restored),
+    '- [x] B0097 [0:00–0:07] [Alice] 1 23 4\n',
+  );
 });
 
 test('splitStrikes: 未閉合的 ~~ 當字面文字,不產生刪除線 span', () => {
@@ -300,11 +369,16 @@ test('splitStrikes: 兩段既有刪除線分別可各自還原,互不影響', ()
   );
 });
 
-test('classifySelection: 選取橫跨兩段既有刪除線(中間夾未刪除線)→ invalid', () => {
+test('classifySelection/applyStrike: 選取橫跨兩段既有刪除線(中間夾未刪除線)→ remove,兩段都取消、中間 plain 不變', () => {
   const twoStrikes =
     '- [x] B0099 [0:00–0:05] [Alice] ~~甲~~乙~~丙~~丁\n';
   const doc = parseCutplan(twoStrikes);
   // clean = "甲乙丙丁",甲=[0,1) 丙=[2,3);選 [0,3) 橫跨兩段刪除線與中間的乙
   const mode = classifySelection(doc.lines[0].bodyRaw, 0, 3);
-  assert.equal(mode, 'invalid');
+  assert.equal(mode, 'remove');
+  const restored = applyStrike(doc, 0, 0, 3);
+  assert.equal(
+    serializeCutplan(restored),
+    '- [x] B0099 [0:00–0:05] [Alice] 甲乙丙丁\n',
+  );
 });
