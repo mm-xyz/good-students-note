@@ -22,6 +22,7 @@ scripts/audio/render_cut.py — 依人審後的 cutplan.md 全自動出片(ffmpe
 import argparse
 import datetime as dt
 import json
+import math
 import re
 import subprocess
 import sys
@@ -35,7 +36,10 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 # 中場 just fun、片尾 to many mind);v2 的三個檔其實是同一首複製三份的佔位。
 # 檔名尾巴標了建議取用區間(`M開_00：00-00：10`),cutplan 的 start=/end= 照它設。
 MATERIAL_DIR = PROJECT_ROOT / "shared-material" / "水星貓的生活實驗室_v1"
-LINE_RE = re.compile(r"^- \[( |x|X)\] ([BGS]\d{3,5}) \[([^\]]+)\] (.*)$")
+# 兩碼前綴 = 分軌 block(MR/SR/KN…);單碼 B/G = 混音線;單碼 S = 補錄插入。
+# Sarah 的軌前綴不能只用「S」——會跟 insert_prepare 產的 S0001 撞號。
+LINE_RE = re.compile(r"^- \[( |x|X)\] ([A-Z]{1,2}\d{3,5}) \[([^\]]+)\] (.*)$")
+INSERT_ID_RE = re.compile(r"^S\d{3,5}$")
 CHAPTER_RE = re.compile(r"^## (.+)$")
 AUDIO_EXTS = (".mp3", ".m4a", ".wav", ".aac", ".flac", ".ogg")
 
@@ -244,7 +248,7 @@ def parse_program(path: Path) -> list[dict]:
         body = re.sub(r"^\[[^\]]{1,20}\]\s*", "", body).strip()  # speaker 前綴
         program.append({"kind": "block", "id": bid, "keep": mark.lower() == "x",
                         "raw": body, "clip": clip_mode,
-                        "insert": cur_insert if bid.startswith("S") else None})
+                        "insert": cur_insert if INSERT_ID_RE.match(bid) else None})
     return program
 
 
@@ -381,7 +385,7 @@ def validate_program(blocks: list[dict], program: list[dict],
     # 自己的時間軸上,文字比對的對象也是補錄自己的 SRT(不是正片來源 SRT)
     ins_by_id = {b["id"]: b for i in (inserts or []) for b in i["blocks"]}
     md_ids = {it["id"] for it in program
-              if it["kind"] == "block" and not it["id"].startswith("S")}
+              if it["kind"] == "block" and not INSERT_ID_RE.match(it["id"])}
     missing = {i for i in json_by_id if i not in md_ids}
     extra = {i for i in md_ids if i not in json_by_id and i not in gap_by_id}
     if missing or extra:
@@ -391,7 +395,7 @@ def validate_program(blocks: list[dict], program: list[dict],
     for it in program:
         if it["kind"] != "block":
             continue
-        if it["id"].startswith("S"):
+        if INSERT_ID_RE.match(it["id"]):
             b = ins_by_id.get(it["id"])
             if not b:
                 sys.exit(f"[render] FAIL: {it['id']} 不在 cutplan.json 的 inserts 裡"
@@ -420,7 +424,8 @@ def validate_program(blocks: list[dict], program: list[dict],
             sys.exit(f"[render] FAIL: {it['id']} cutplan.md 文字與 cutplan.json 不符"
                      f"(被改過?)— cutplan 只准翻勾選/加刪除線/加理由/加章節,"
                      f"文字不可動")
-        if it["keep"] and jt and jt not in flat:
+        if (it["keep"] and jt and b.get("kind", "speech") == "speech"
+                and jt not in flat):
             sys.exit(f"[render] FAIL: {it['id']} 文字不存在於來源 SRT(cutplan.json "
                      f"被竄改?)— 重跑 cutplan.py prepare 再提案")
         it["spans"] = spans
@@ -728,6 +733,8 @@ def run_ffmpeg(src: Path, segments: list[dict], musics: list[dict], out: Path,
 def main():
     ap = argparse.ArgumentParser(description="cutplan → ffmpeg 全自動出片")
     ap.add_argument("--session", required=True)
+    ap.add_argument("--plan", default="cutplan.md",
+                    help="人審節目單檔名(分軌線用 cutplan.pertrack.md)")
     ap.add_argument("--out", default="final_cut.mp3",
                 help="輸出檔名;副檔名決定編碼(.mp3/.m4a/.wav)")
     ap.add_argument("--snap-window", type=float, default=0.4)
@@ -784,6 +791,21 @@ def main():
                          "最小單位,過長=那段只能整段留或整段剪,失去粒度;"
                          "重切正常的 block 中位數約 1s,所以超長幾乎都是"
                          "「重切沒跑到那一段」的殘留(2026-08-10 MM 指出)")
+    ap.add_argument("--duck-db", type=float, default=-27.0,
+                    help="分軌:沒有 block 覆蓋的軌的常態衰減(dB)。整集固定,"
+                         "不隨事件開關 —— 零星關一軌會改變延遲串音的相位組合,"
+                         "產生音色與底噪抽動(D5)")
+    ap.add_argument("--silent-db", type=float, default=-60.0,
+                    help="分軌:明確不要的事件(未勾選 block/刪除線)降到多少 dB")
+    ap.add_argument("--gate-fade", type=float, default=0.015,
+                    help="分軌:軌內增益切換的等功率過渡秒數(D6:10–20ms,"
+                         "**不做** 40ms 時間 crossfade —— 那是全域剪除才用的)")
+    ap.add_argument("--mask-lookahead", type=float, default=0.05)
+    ap.add_argument("--mask-hangover", type=float, default=0.15)
+    ap.add_argument("--pan", default="",
+                    help="分軌:等功率 pan 位置,如 Mars=-0.2,KIN=0.2"
+                         "(預設全置中 —— 把三個人拉開是節目聲音的重大改動,"
+                         "不該由 render 預設替 MM 決定)")
     ap.add_argument("--dry-run", action="store_true", help="只印剪輯範圍,不跑 ffmpeg")
     ap.add_argument("--dump-ranges", type=Path,
                     help="把保留區間(原始時間軸,毫秒精度)寫成 JSON — "
@@ -798,7 +820,14 @@ def main():
         sys.exit("[render] FAIL: .cutplan_pending.json 還在 — 剪輯提案未完成,"
                  "先讓對話 agent 提案 + MM 人審 cutplan.md")
     cp = json.loads((sdir / "cutplan.json").read_text(encoding="utf-8"))
-    program = parse_program(sdir / "cutplan.md")
+    plan_path = sdir / args.plan
+    if not plan_path.exists():
+        sys.exit(f"[render] FAIL: 找不到節目單 {plan_path}")
+    program = parse_program(plan_path)
+    # 分軌模式 = cutplan.json 有 tracks 區,而且節目單用的是逐軌 block(兩碼前綴)
+    tk_prefix = {t["prefix"] for t in cp.get("tracks", [])}
+    pertrack = bool(tk_prefix) and any(
+        it["kind"] == "block" and it["id"][:2] in tk_prefix for it in program)
 
     # ── ⚙ config 區:cutplan 是參數真相源,覆蓋 CLI/預設 ──
     applied = {}
@@ -820,7 +849,9 @@ def main():
     spk_srt = sdir / "transcript.speakers.srt"
     srt_src = spk_srt if spk_srt.exists() else pick_transcript(sdir)
     srt_text = "".join(c["text"] for c in parse_srt(srt_src))
-    validate_program(cp["blocks"], program, srt_text, cp.get("gaps"),
+    v_blocks = ([b for t in cp["tracks"] for b in t["blocks"]] if pertrack
+                else cp["blocks"])
+    validate_program(v_blocks, program, srt_text, cp.get("gaps"),
                      cp.get("inserts"))
 
     # ── 把關:過長 block(2026-08-10 MM 指出,ADR 0011)──
@@ -828,11 +859,11 @@ def main():
     # 整段剪,人審失去粒度;而正常重切後的 block 中位數約 1s。過長 block 幾乎
     # 都是「重切沒跑到那一段」的殘留(EP16 開頭 7:33 有 21 個,含兩個正好 30.0s
     # 的舊上限指紋),不是內容真的講了那麼久沒停。
-    long_blocks = [b for b in cp["blocks"]
+    long_blocks = [b for b in v_blocks
                    if args.max_block > 0 and b["end"] - b["start"] > args.max_block]
     if long_blocks:
         worst = sorted(long_blocks, key=lambda b: b["start"] - b["end"])[:5]
-        print(f"[render] ⚠ {len(long_blocks)}/{len(cp['blocks'])} 個 block 超過 "
+        print(f"[render] ⚠ {len(long_blocks)}/{len(v_blocks)} 個 block 超過 "
               f"{args.max_block}s — 人審在這些段落沒有勾選粒度,"
               f"通常是重切沒跑到(--max-block 可調):")
         for b in worst:
@@ -857,6 +888,74 @@ def main():
         silences = json.loads(pj.read_text(encoding="utf-8")).get("silences", [])
     else:
         print("[render] ⚠ prosody.json 不存在,剪點不 snap 靜音、停頓不收緊")
+
+    # ── 分軌:atomic cells → 全域保留區間 → 合成一份「範圍即 block」的節目單 ──
+    ptr = tracks_plan = kept_cells = None
+    words_guard = words
+    if pertrack:
+        import pertrack_render as ptr
+        from pertrack_cells import (ConflictError, KEEP, apply_mask,
+                                    build_cells, resolve_time,
+                                    retained_ranges)
+        tracks_plan, mcuts, gaps_plan = ptr.plan_from_program(program, cp, words)
+        try:
+            cells = build_cells(tracks_plan, mcuts, gaps_plan)
+        except ConflictError as e:
+            sys.exit(str(e))
+        cells = apply_mask(cells, hold=args.max_pause,
+                           lookahead=args.mask_lookahead,
+                           hangover=args.mask_hangover)
+        kept_cells, dropped = resolve_time(cells, args.max_pause,
+                                           args.pause_keep)
+        ranges0 = retained_ranges(kept_cells)
+        kept_secs = sum(b - a for a, b in ranges0)
+        n_keep = sum(1 for t in tracks_plan for b in t.blocks if b["keep"])
+        n_sil = sum(1 for t in tracks_plan for b in t.blocks if not b["keep"])
+        n_strike = sum(len(b["strikes"]) for t in tracks_plan for b in t.blocks)
+        print(f"[render] 分軌:{len(tracks_plan)} 軌 / 勾選 {n_keep}、"
+              f"靜音 {n_sil}、刪除線 {n_strike} 處 → atomic cell "
+              f"{len(kept_cells)} 個、保留 {fmt_mmss(kept_secs)}"
+              f"(移除 {len(dropped)} 段共 {sum(b - a for a, b in dropped):.1f}s)")
+        # word_guard 只保護「仍保留的講者」的字(D6)
+        keep_spans = [(b["start"], b["end"]) for t in tracks_plan
+                      for b in t.blocks if b["keep"] and b["kind"] == "speech"]
+        words_guard = [w for w in (words or [])
+                       if any(x <= (w["start"] + w["end"]) / 2 < y
+                              for x, y in keep_spans)] or words
+        # 非 block 項目照文件順序取錨點 = 它後面第一個逐軌 block 的來源時間
+        anchors, pend = [], []
+        for it in program:
+            if it["kind"] == "block" and it["id"][:2] in tk_prefix:
+                anchors += [(it["block"]["start"], q) for q in pend]
+                pend = []
+            elif it["kind"] == "block" and it["id"].startswith("G"):
+                continue                       # G 列已在 cell 模型裡消化掉
+            else:
+                pend.append(it)
+        anchors += [(math.inf, q) for q in pend]
+        rs = [list(r) for r in ranges0]
+        synth, ri, k = [], 0, 0
+
+        def _mk(a, b):
+            nonlocal k
+            k += 1
+            return {"kind": "block", "id": f"P{k:04d}", "keep": True,
+                    "raw": "", "clip": False, "insert": None, "spans": [],
+                    "pertrack": True,
+                    "block": {"id": f"P{k:04d}", "start": a, "end": b,
+                              "text": "", "kind": "range"}}
+        for t_, q in anchors:
+            while ri < len(rs) and rs[ri][1] <= t_ + 1e-6:
+                synth.append(_mk(*rs[ri]))
+                ri += 1
+            if ri < len(rs) and rs[ri][0] < t_ - 1e-6 < rs[ri][1]:
+                synth.append(_mk(rs[ri][0], t_))
+                rs[ri][0] = t_
+            synth.append(q)
+        while ri < len(rs):
+            synth.append(_mk(*rs[ri]))
+            ri += 1
+        program = synth
 
     # ── program → units(播放順序=文件順序;doc 連續且 src 時間連續的 kept
     #    blocks 併成一個 speech unit;🎬 集錦行自成 clip units)──
@@ -928,6 +1027,7 @@ def main():
             b = it["block"]
             last = units[-1] if units else None
             joinable = (last and last["kind"] == "speech"
+                        and not it.get("pertrack")
                         and not last.get("raw") and not it.get("gap")
                         and last["clip"] == it["clip"]
                         and 0 <= b["start"] - last["end"] < 2.0)
@@ -939,9 +1039,10 @@ def main():
                 if (args.clip_gap > 0 and last and last["kind"] == "speech"
                         and last["clip"] and it["clip"]):
                     units.append({"kind": "silence", "dur": args.clip_gap})
-                units.append({"kind": "speech", "start": b["start"], "end": b["end"],
-                              "items": [it], "clip": it["clip"],
-                              "raw": it.get("gap", False)})
+                units.append({"kind": "speech", "start": b["start"],
+                              "end": b["end"], "items": [it],
+                              "clip": it["clip"], "raw": it.get("gap", False),
+                              "pertrack": it.get("pertrack", False)})
 
     # ── 🎵 music unit → overlay 疊接:中段換成獨奏長度的 silence gap,
     #    音樂本體記進 musics,render 時 adelay+amix 疊上語音軌 ──
@@ -1011,7 +1112,7 @@ def main():
             if it.get("spans"):
                 removals += strike_removals(it["block"], it["spans"], words)
                 n_strike += len(it["spans"])
-        if args.max_pause > 0 and silences:
+        if args.max_pause > 0 and silences and not u.get("pertrack"):
             pr = pause_removals(ranges, silences, args.max_pause,
                                 args.pause_keep, words)
             n_pause += len(pr)
@@ -1019,9 +1120,9 @@ def main():
         if removals:
             ranges = subtract(ranges, removals)
         ranges = refine_boundaries(ranges, sdir / "audio16k.wav")
-        if words:
-            ranges = word_guard(ranges, words)
-        if manual_cuts:
+        if words_guard:
+            ranges = word_guard(ranges, words_guard)
+        if manual_cuts and not u.get("pertrack"):
             # ✂ 手動剪除擺在 word_guard 之後:人審點名的區間說了算,不受
             # 「whisper 說這裡有字」的保護攔阻(那正是它要救的失效情境)
             before = sum(b - a for a, b in ranges)
@@ -1061,7 +1162,7 @@ def main():
 
     if args.dump_ranges:
         args.dump_ranges.write_text(json.dumps(
-            [[round(s["a"], 3), round(s["b"], 3)]
+            [[round(s.get("src_a", s["a"]), 3), round(s.get("src_b", s["b"]), 3)]
              for s in segments if s["kind"] == "speech"],
             ensure_ascii=False), encoding="utf-8")
 
@@ -1106,6 +1207,41 @@ def main():
     src = next(p for p in sorted(sdir.glob("source.*"))
                if p.suffix.lower() not in (".srt", ".md", ".json", ".txt"))
 
+    if pertrack:
+        from pertrack_cells import track_envelopes
+        import wave as _wave
+        sp = [s for s in segments if s["kind"] == "speech"]
+        bus_ranges = [[s["a"], s["b"]] for s in sp]
+        with _wave.open(str(sdir / tracks_plan[0].file), "rb") as _f:
+            bus_sr = _f.getframerate()
+        envs = track_envelopes(kept_cells, bus_ranges, args.duck_db,
+                               args.silent_db)
+        static = ptr.measure_static_gains(sdir, tracks_plan, kept_cells)
+        if static:
+            print("[render] 分軌 static gain(各軌自己 KEEP 區間的 LUFS 拉齊):"
+                  + " ".join(f"{n}{v:+.1f}dB" for n, v in static.items()))
+        pan = {kv.split("=")[0]: float(kv.split("=")[1])
+               for kv in args.pan.split(",") if "=" in kv}
+        bus = sdir / ".pertrack_bus.wav"
+        print(f"[render] 混 speech bus:{len(bus_ranges)} 段 × "
+              f"{len(tracks_plan)} 軌 @ {bus_sr}Hz …")
+        info = ptr.mix_ranges([(t.name, sdir / t.file) for t in tracks_plan],
+                              bus_ranges, envs, bus, sr=bus_sr,
+                              gate_fade=args.gate_fade, static_db=static,
+                              pan=pan, duck_default_db=args.duck_db)
+        print(f"[render] speech bus {info['frames'] / bus_sr:.1f}s"
+              f"、peak {20 * math.log10(max(info['peak'], 1e-9)):.1f}dBFS"
+              f"、削頂 {info['clipped']} 樣本")
+        if info["clipped"]:
+            print("[render] ⚠ speech bus 有削頂 — 調 --duck-db 或各軌 static gain")
+        off = 0
+        for s in sp:
+            n_s = int(round(s["b"] * bus_sr)) - int(round(s["a"] * bus_sr))
+            s["src_a"], s["src_b"] = s["a"], s["b"]
+            s["a"], s["b"] = off / bus_sr, (off + n_s) / bus_sr
+            off += n_s
+        src = bus
+
     # ➕ 補錄的電平對齊要等 src 就緒才量得了(正片響度是比較基準)
     for si, s in enumerate(segments):
         if s["kind"] != "insert":
@@ -1142,7 +1278,8 @@ def main():
                                        args.loudnorm or None, args.crossfade,
                                        args.dynaudnorm or None, args.tempo)
 
-    cut_map = [{"src_start": round(s["a"], 3), "src_end": round(s["b"], 3),
+    cut_map = [{"src_start": round(s.get("src_a", s["a"]), 3),
+                "src_end": round(s.get("src_b", s["b"]), 3),
                 "dst_start": round(d, 3)}
                for s, d in zip(segments, dst_starts) if s["kind"] == "speech"]
     music_map = [{"file": m["path"].name, "dst_start": round(m["at"], 3),

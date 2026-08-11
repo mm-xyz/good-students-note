@@ -21,6 +21,8 @@ D3 非詞彙出聲:CFAR 式自適應門檻
 
 from __future__ import annotations
 
+import difflib
+import re
 import sys
 from pathlib import Path
 
@@ -134,6 +136,42 @@ def owner_runs(lv_db, hop: float, t0: float, t1: float, margin: float = 3.0,
     return [(round(a, 6), round(b, 6), o) for a, b, o in runs if b - a > 1e-9]
 
 
+def annotate_canonical(words: list[dict], block_text: str) -> list[dict]:
+    """給每個 word 掛上它在 **canonical block 文字** 裡對應的字(`ctext`)。
+
+    D1 說正式文字是 cutplan.json 的既有 block 文字,不是 words.json 重建的字。
+    兩者會不一樣 —— EP16 的 B0085,SRT 是人工校過的「只要」,words.json 還是
+    whisper 原本的「隻要」。拿 words 重建 phrase 文字,render 的防幻覺驗證
+    (「文字須逐字存在於來源 SRT」)就會直接 FAIL。
+
+    用 difflib 把「words 字元流」對齊到「canonical 字元流」,取單調遞增的
+    切點,所以所有 ctext 接起來**一定**等於 canonical 文字(去空白後),
+    多出來的字尾由最後一個 word 吸收,不會被丟掉。
+    """
+    flat = re.sub(r"\s+", "", block_text)
+    chars = [re.sub(r"\s+", "", w["word"]) for w in words]
+    wflat = "".join(chars)
+    pos = [0] * (len(wflat) + 1)
+    sm = difflib.SequenceMatcher(None, wflat, flat, autojunk=False)
+    for tag, i1, i2, j1, j2 in sm.get_opcodes():
+        for k in range(i1, i2):
+            if tag == "equal":
+                pos[k] = j1 + (k - i1)
+            else:
+                span = max(1, i2 - i1)
+                pos[k] = j1 + int(round((j2 - j1) * (k - i1) / span))
+    pos[len(wflat)] = len(flat)
+    out, at = [], 0
+    for w, c in zip(words, chars):
+        lo = pos[at] if at else 0
+        at += len(c)
+        hi = pos[at] if at < len(wflat) else len(flat)
+        out.append({**w, "ctext": flat[lo:hi]})
+    if out:
+        out[-1]["ctext"] = flat[pos[max(0, len(wflat) - len(chars[-1]))]:]
+    return out
+
+
 def split_phrase(words: list[dict], ref_text: str, runs, snap: float = 0.25):
     """canonical phrase 依 owner 換手點切開,切點只落在 canonical word boundary。
 
@@ -178,7 +216,9 @@ def split_phrase(words: list[dict], ref_text: str, runs, snap: float = 0.25):
             reason = "歸屬不確定（三軌差距 <3dB）"
         elif dropped and len(cuts) < len(runs) - 1:
             reason = "換手點附近 250ms 內沒有字界，未切開"
-        out.append({"start": a, "end": b, "text": join_words(ws, ref_text),
+        text = ("".join(x["ctext"] for x in ws) if "ctext" in ws[0]
+                else join_words(ws, ref_text))
+        out.append({"start": a, "end": b, "text": text,
                     "owner": o, "uncertain": bool(reason), "reason": reason,
                     "words": ws})
     return out
@@ -211,3 +251,19 @@ def find_events(hits, hop: float, gap_close: float = 0.08,
             merged.append(list(r))
     return [(round(a * hop, 6), round(b * hop, 6)) for a, b in merged
             if (b - a) * hop >= min_dur - 1e-9]
+
+
+def drop_self_adjacent(events, own_spans, guard: float = 0.25):
+    """丟掉緊貼「自己台詞」的出聲事件。
+
+    D3 講的是「壓在別人話底下、人審剪不掉的附和」。緊貼自己下一句開頭
+    (EP16 5:10 的 MR0109 距離自己開講只有 0.01 秒)的能量是自己的字頭、
+    吸氣、椅子聲 —— 這種列預設不勾 ＝ 靜音,留著等於把自己的字頭削掉。
+    """
+    out = []
+    for e in events:
+        a, b = e["start"], e["end"]
+        if any(a < y + guard and b > x - guard for x, y in own_spans):
+            continue
+        out.append(e)
+    return out

@@ -24,7 +24,8 @@ except ImportError:                                    # pragma: no cover
 
 from pertrack_attrib import (  # noqa: E402
     calibrate_bleed, predict_bleed_db, owner_runs, split_phrase,
-    cfar_percentile, find_events, integrate,
+    cfar_percentile, find_events, integrate, drop_self_adjacent,
+    annotate_canonical,
 )
 
 HOP = 0.01
@@ -146,6 +147,14 @@ class TestSplitPhrase(unittest.TestCase):
         out = split_phrase(self.WORDS, "今天很好", [(0.0, 1.0, 1)], snap=0.25)
         self.assertEqual(out[0]["text"], "今天很好")
 
+    def test_split_uses_the_canonical_slice_when_words_disagree(self):
+        ws = annotate_canonical(
+            [w(0.0, 0.2, "今"), w(0.2, 0.45, "天"), w(0.52, 0.75, "隻"),
+             w(0.75, 1.0, "好")], "今天只好")
+        out = split_phrase(ws, "今天只好", [(0.0, 0.5, 0), (0.5, 1.0, 1)],
+                           snap=0.25)
+        self.assertEqual([p["text"] for p in out], ["今天", "只好"])
+
 
 @unittest.skipIf(np is None, "需要 numpy")
 class TestCfarAndEvents(unittest.TestCase):
@@ -171,6 +180,59 @@ class TestCfarAndEvents(unittest.TestCase):
         ev = find_events(hits, HOP, gap_close=0.08, min_dur=0.12)
         self.assertEqual(len(ev), 1)
         self.assertAlmostEqual(ev[0][0], 0.48, places=6)
+
+
+class TestAnnotateCanonical(unittest.TestCase):
+    """D1:正式文字＝canonical block 文字,不是 words.json 重建的字。
+
+    EP16 實踩:B0085 的 SRT 是人工校過的「只要」,words.json 還是 whisper 原本的
+    「隻要」。用 words 重建 phrase 文字 → render 的防幻覺驗證直接 FAIL
+    (KN0213「過但是只要交」不存在於來源 SRT)。
+    """
+
+    def test_words_are_mapped_onto_the_canonical_characters(self):
+        ws = [w(0, 1, "無論"), w(1, 2, "隻要"), w(2, 3, "交")]
+        out = annotate_canonical(ws, "無論只要交")
+        self.assertEqual([x["ctext"] for x in out], ["無論", "只要", "交"])
+
+    def test_concatenation_always_reproduces_the_canonical_text(self):
+        ws = [w(0, 1, "今天"), w(1, 2, "天氣"), w(2, 3, "好")]
+        out = annotate_canonical(ws, "今天 天氣 很好")
+        self.assertEqual("".join(x["ctext"] for x in out), "今天天氣很好")
+
+    def test_extra_canonical_tail_is_absorbed_not_dropped(self):
+        ws = [w(0, 1, "今天")]
+        out = annotate_canonical(ws, "今天很好啊")
+        self.assertEqual(out[0]["ctext"], "今天很好啊")
+
+    def test_original_word_field_is_left_alone(self):
+        ws = [w(0, 1, "隻要")]
+        out = annotate_canonical(ws, "只要")
+        self.assertEqual(out[0]["word"], "隻要")
+        self.assertEqual(out[0]["ctext"], "只要")
+
+
+@unittest.skipIf(np is None, "需要 numpy")
+class TestSelfAdjacentGuard(unittest.TestCase):
+    """緊貼自己台詞的出聲不是「壓在別人話底下的附和」,是自己的字頭/換氣。
+
+    預設不勾 = 靜音,所以留著會把自己的字頭削掉 —— EP16 實測 5:10 的 MR0109
+    就落在自己下一句 310.84 開講前 0.01 秒。
+    """
+
+    OWN = [(310.84, 311.88), (320.0, 321.0)]
+
+    def test_event_abutting_own_speech_is_dropped(self):
+        ev = [{"start": 310.67, "end": 310.83}]
+        self.assertEqual(drop_self_adjacent(ev, self.OWN, guard=0.25), [])
+
+    def test_event_far_from_own_speech_survives(self):
+        ev = [{"start": 314.0, "end": 314.6}]
+        self.assertEqual(len(drop_self_adjacent(ev, self.OWN, guard=0.25)), 1)
+
+    def test_guard_applies_on_both_sides(self):
+        ev = [{"start": 312.0, "end": 312.2}]        # 自己 311.88 剛講完
+        self.assertEqual(drop_self_adjacent(ev, self.OWN, guard=0.25), [])
 
 
 if __name__ == "__main__":
