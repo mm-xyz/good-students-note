@@ -90,29 +90,126 @@ def build_transcript(sdir: Path) -> str:
     return "\n".join(lines)
 
 
+def plan_sequence(sdir: Path) -> list[tuple[str, str]]:
+    """cutplan 的保留內容依播出順序 → [(講者, 文字), ...],**不帶時間**。
+
+    只有講者歸屬是 cutplan 獨有的知識(逐軌歸屬/diarize);時間交給成品逐字稿。
+    """
+    seq: list[tuple[str, str]] = []
+    clip = False
+    for raw in (sdir / "cutplan.md").read_text(encoding="utf-8").splitlines():
+        s = raw.strip()
+        if TEASER_RE.match(s):
+            clip = True
+            continue
+        if (MUSIC_RE.match(s) or CONFIG_RE.match(s) or CUT_RE.match(s)
+                or INSERT_RE.match(s)):
+            clip = False
+            continue
+        if s.startswith("## "):
+            clip = False
+            continue
+        m = LINE_RE.match(s)
+        if not m or clip:
+            continue
+        body = m.group(5).rsplit(" ← ", 1)[0].replace("~~", "")
+        seq.append((m.group(4) or "?", body))
+    return seq
+
+
+_PUNCT_RE = re.compile(r"[^\w]+", re.UNICODE)
+
+
+def attach_speakers(cues: list[dict], seq: list[tuple[str, str]]) -> list[dict]:
+    """成品逐字稿的 cue ＋ cutplan 的講者序列 → 每個 cue 掛上講者。
+
+    2026-08-12 MM:「應該是要拿最新的定稿再去轉逐字稿一次吧」。從 cutplan 的
+    原始時間軸經 cut_map ＋ tempo 回推成品時間,是一條會漂的推導鏈 —— 補錄
+    根本不在那條時間軸上(實測 luna 把它標在 21:10,真實位置 21:51,差 41 秒)。
+    改成:**時間以成品逐字稿為準**(那是聽眾真正會聽到的東西),cutplan 只
+    提供它獨有的知識——誰在講。
+
+    對齊法:把 cutplan 文字接成一條字流(每個字記得它屬於誰),用一個只往前走
+    的指標,在字流裡找每個 cue 開頭幾個字的位置,取該段字的多數講者。ASR 與
+    cutplan 的用字會有出入,所以找不到就沿用前一位,不硬猜。
+    """
+    stream, owner = [], []
+    for spk, text in seq:
+        t = _PUNCT_RE.sub("", text)
+        stream.append(t)
+        owner += [spk] * len(t)
+    flat = "".join(stream)
+    out, p, last = [], 0, seq[0][0] if seq else "?"
+    for c in cues:
+        t = _PUNCT_RE.sub("", c.get("text", ""))
+        spk = last
+        if t:
+            k = min(6, len(t))
+            q = flat.find(t[:k], p, p + 600)
+            if q < 0:                              # 放寬:整份找一次最近的
+                q = flat.find(t[:k], p)
+            if q >= 0:
+                span = owner[q:q + max(1, len(t))]
+                if span:
+                    spk = max(set(span), key=span.count)
+                p = q + max(1, int(len(t) * 0.9))
+        out.append({**c, "speaker": spk})
+        last = spk
+    return out
+
+
+def build_transcript_from_final(sdir: Path, final_srt: Path) -> str:
+    """成品逐字稿(真實成品時間)＋ cutplan 的講者 → 文案用逐字稿。"""
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from srt_utils import parse_srt
+    cues = attach_speakers(parse_srt(final_srt), plan_sequence(sdir))
+    lines: list[str] = []
+    prev = None
+    for c in cues:
+        body = c["text"].strip()
+        if not body:
+            continue
+        if c["speaker"] == prev:
+            lines[-1] += body
+        else:
+            lines.append(f"({hms(c['start'])}) {c['speaker']}:{body}")
+            prev = c["speaker"]
+    return "\n".join(lines)
+
+
 def main():
     ap = argparse.ArgumentParser(description="組裝集數文案 prompt")
     ap.add_argument("--session", required=True)
     ap.add_argument("--ep", required=True, help="集數(填進模板 {{集數}})")
     ap.add_argument("--template", type=Path, default=DEFAULT_TEMPLATE)
+    ap.add_argument("--final-srt", type=Path,
+                    help="**定稿成品**的逐字稿(對 final mp3 重轉)。給了就以它的"
+                         "時間為準,cutplan 只提供講者 —— 不再從原始時間軸經 "
+                         "cut_map/tempo 回推(那條鏈會漂,補錄更是不在上面)")
     args = ap.parse_args()
 
     sdir = Path(args.session).resolve()
-    for need in ("cutplan.md", "cutplan.json", "cut_map.json", "copy_material.md"):
+    need_all = ("cutplan.md", "cutplan.json", "cut_map.json", "copy_material.md")
+    for need in (need_all[:2] + need_all[3:] if args.final_srt else need_all):
         if not (sdir / need).exists():
             sys.exit(f"[copy-prompt] FAIL: 缺 {need}"
                      + ("(先跑 render_cut.py)" if need == "cut_map.json" else
                         "(先寫該集素材)" if need == "copy_material.md" else ""))
+    if args.final_srt and not args.final_srt.exists():
+        sys.exit(f"[copy-prompt] FAIL: 找不到成品逐字稿 {args.final_srt}")
     tpl = args.template.read_text(encoding="utf-8")
     out = (tpl.split("---", 1)[1].lstrip("\n")
            .replace("{{集數}}", args.ep)
            .replace("{{素材}}", (sdir / "copy_material.md").read_text(encoding="utf-8"))
-           .replace("{{逐字稿}}", build_transcript(sdir)))
+           .replace("{{逐字稿}}",
+                    build_transcript_from_final(sdir, args.final_srt)
+                    if args.final_srt else build_transcript(sdir)))
+    src = ("**定稿成品重轉的逐字稿**(時間即成品時間,講者取自 cutplan)"
+           if args.final_srt else "cutplan 保留段(時間經 cut_map 換算)")
     dst = sdir / "copy_prompt.md"
     dst.write_text(
         f"# EP{args.ep} 集數文案 — 組裝完成的完整 prompt(貼給 agy/codex 即用)\n"
-        "\n> 由 shared-material 模板+copy_material+cutplan 保留段組裝;"
-        "逐字稿時間=final-cut 時間軸(經 cut_map 換算);"
+        f"\n> 由 shared-material 模板+copy_material+{src} 組裝;"
         "跑的時機=MM 驗收 final_cut 之後。\n\n" + out, encoding="utf-8")
     print(f"[copy-prompt] ✅ {dst}({dst.stat().st_size:,} bytes)")
 

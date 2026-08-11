@@ -20,7 +20,9 @@ AUDIO_DIR = Path(__file__).resolve().parent.parent / "audio"
 REPO_ROOT = AUDIO_DIR.parent.parent
 sys.path.insert(0, str(AUDIO_DIR))
 
-from copy_prompt_build import build_transcript, hms  # noqa: E402
+from copy_prompt_build import (build_transcript, hms,  # noqa: E402
+                               attach_speakers, plan_sequence,
+                               build_transcript_from_final)
 
 CUTPLAN_MD = """# Cutplan — test
 
@@ -195,6 +197,50 @@ class TestMainE2E(unittest.TestCase):
             proc = self._run(sdir, tpl)
         self.assertNotEqual(proc.returncode, 0)
         self.assertIn("缺 copy_material.md", proc.stderr + proc.stdout)
+
+
+
+class TestFinalCutTranscript(unittest.TestCase):
+    """時間以**定稿成品重轉的逐字稿**為準,cutplan 只提供講者(2026-08-12 MM)。
+
+    原本從原始時間軸經 cut_map + tempo 回推成品時間,是一條會漂的推導鏈;
+    補錄根本不在那條時間軸上(實測文案把它標在 21:10,真實位置 21:51)。
+    """
+
+    def setUp(self):
+        self._td = tempfile.TemporaryDirectory()
+        self.sdir = make_session(self._td.name)
+        self.addCleanup(self._td.cleanup)
+
+    def test_plan_sequence_is_speakers_without_time(self):
+        self.assertEqual(plan_sequence(self.sdir),
+                         [("Sarah", "哈囉嗯大家"), ("Sarah", "歡迎收聽"),
+                          ("Mars", "我是Mars"), ("Sarah", "掰掰")])
+
+    def test_speaker_carried_over_by_text_alignment(self):
+        cues = [{"start": 5.0, "end": 6.0, "text": "哈囉嗯大家歡迎收聽"},
+                {"start": 6.0, "end": 7.0, "text": "我是Mars"},
+                {"start": 9.0, "end": 9.5, "text": "掰掰"}]
+        got = [(c["start"], c["speaker"]) for c in
+               attach_speakers(cues, plan_sequence(self.sdir))]
+        self.assertEqual(got, [(5.0, "Sarah"), (6.0, "Mars"), (9.0, "Sarah")])
+
+    def test_timestamps_come_from_the_final_srt_not_cut_map(self):
+        """cut_map 說 B0005「掰掰」對不到任何 range(舊法無時間戳);
+        成品逐字稿說它在 00:00:09 —— 以成品為準。"""
+        srt = Path(self._td.name) / "final.srt"
+        srt.write_text("\n".join([
+            "1", "00:00:05,000 --> 00:00:06,000", "哈囉嗯大家歡迎收聽", "",
+            "2", "00:00:06,000 --> 00:00:07,000", "我是Mars", "",
+            "3", "00:00:09,000 --> 00:00:09,500", "掰掰", "",
+        ]), encoding="utf-8")
+        out = build_transcript_from_final(self.sdir, srt)
+        self.assertEqual(out.splitlines(), [
+            "(00:00:05) Sarah:哈囉嗯大家歡迎收聽",
+            "(00:00:06) Mars:我是Mars",
+            "(00:00:09) Sarah:掰掰",
+        ])
+        self.assertNotIn("(00:00:10)", out, "不該再出現 cut_map 推導出來的時間")
 
 
 if __name__ == "__main__":
