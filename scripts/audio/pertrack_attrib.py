@@ -108,6 +108,14 @@ def owner_runs(lv_db, hop: float, t0: float, t1: float, margin: float = 3.0,
       沒有人真的在出聲,Sarah 只因底噪高 4.7dB 就搶走,KIN 的麥在詞中間被
       關掉 0.5 秒,聽到的是 KIN 透過 Sarah 的麥傳來的聲音(距離感全變)。
       floor_db=None 就不套這道閘(保留舊行為給不知道噪聲底的呼叫端)。
+    · **穩定時長隨 block 長度縮放**(2026-08-11 MM 實聽 EP18 0:49「遠方的
+      KIN 的嗯」):源 53.10–53.20 只有 0.10 秒,而 stable=0.2 秒 —— 0.1 秒的
+      窗**在數學上永遠湊不到 0.2 秒**,一律退回混音 diarize 的標籤。那句
+      「嗯」KIN 領先 15dB 證據清楚,卻因此開了 Mars 的麥、duck 掉 KIN 自己的
+      麥,聽到的是穿過別人麥克風的 KIN。全片 <0.2s 的列有 51% 中這個。
+      附和(「嗯」「對啊」)正好全是短列,也正好是 diarize 最容易認錯的。
+      縮放的是**時長**不是**證據**:margin 3dB 與噪聲底閘照舊,差距不夠仍是
+      不確定。
     · 從頭到尾都湊不到 → owner=None ＝ 歸屬不確定,交人審,不硬選
     """
     lv = np.asarray(lv_db, dtype=float)
@@ -115,6 +123,9 @@ def owner_runs(lv_db, hop: float, t0: float, t1: float, margin: float = 3.0,
     i1 = min(lv.shape[1], int(round(t1 / hop)))
     if i1 <= i0:
         return [(t0, t1, None)]
+    span = (i1 - i0) * hop
+    stable = min(stable, max(2 * hop, 0.6 * span))
+    switch = min(switch, max(2 * hop, 0.6 * span))
     runs: list[tuple[float, float, int | None]] = []
     owner: int | None = None
     run_start = i0

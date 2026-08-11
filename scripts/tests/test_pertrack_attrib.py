@@ -104,6 +104,29 @@ class TestOwnerRuns(unittest.TestCase):
                         const([0.0, -20.0], 0.50)])
         self.assertEqual(owner_runs(lv, HOP, 0.0, 1.0), [(0.0, 1.0, 0)])
 
+    def test_block_shorter_than_stable_can_still_be_attributed(self):
+        """比 `stable` 還短的 block 不該在數學上注定「歸屬不確定」。
+
+        2026-08-11 MM 實聽 EP18 成品 0:49「有個遠方的 KIN 的嗯」。查:源
+        53.10–53.20 只有 **0.10 秒**,而取得所有權要「領先 ≥3dB 持續 ≥0.2 秒」
+        —— 0.1 秒的窗永遠湊不到 0.2 秒,於是退回混音 diarize 的標籤(Mars),
+        開了 Mars 的麥、duck 掉 KIN 自己的麥,聽到的是 KIN 透過 Mars 的麥
+        傳來的聲音。實測那 0.1 秒 KIN 領先 15dB,證據其實非常清楚。
+
+        全片 218 個 <0.2s 的列有 51% 是這樣 —— 而「嗯」「對啊」這種附和正好
+        全是短列,也正好是 diarize 在混音軌上最容易認錯的。
+        """
+        lv = const([-50.0, -35.0], 0.10)                # KIN(1) 全程領先 15dB
+        runs = owner_runs(lv, HOP, 0.0, 0.10)
+        self.assertEqual([o for _a, _b, o in runs], [1],
+                         "0.1s 的 block 領先 15dB 仍被判不確定 —— "
+                         "穩定時長門檻必須隨 block 長度縮放")
+
+    def test_short_block_with_thin_margin_is_still_uncertain(self):
+        """縮放穩定門檻**不等於**放寬證據標準:差距不夠仍然是不確定。"""
+        lv = const([-38.0, -36.0], 0.10)
+        self.assertEqual(owner_runs(lv, HOP, 0.0, 0.10), [(0.0, 0.10, None)])
+
     def test_thin_margin_is_left_uncertain_not_hard_picked(self):
         lv = const([0.0, -2.0])
         self.assertEqual(owner_runs(lv, HOP, 0.0, 1.0), [(0.0, 1.0, None)])
