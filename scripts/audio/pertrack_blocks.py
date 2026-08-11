@@ -42,6 +42,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from srt_utils import parse_srt, fmt_mmss, split_words_to_phrases  # noqa: E402
 
+ARTIFACT_MIN_RUN = 4     # 同一個字連續重複幾次算 whisper 重複迴圈
 ENV_RATE = 1000          # 能量包絡取樣率:33 分鐘只有 2M 點,夠準又夠快
 STEP = 0.2               # 掃描步長(秒);附和聲常只有 0.3–0.8s
 TRACK_PREFIX = {"Mars": "M", "Sarah": "S", "KIN": "K"}
@@ -56,6 +57,28 @@ def envelope(path: Path) -> list[float]:
     a = array.array("f")
     a.frombytes(raw)
     return [abs(x) for x in a]
+
+
+def is_artifact(text: str) -> bool:
+    """whisper 重複迴圈/亂碼 artifact 偵測。
+
+    2026-08-11 實踩:Mars 軌 309-314s 的 words.json 是「嘗」×40 + U+FFFD。
+    原本埋在一個長 cue 裡看不見,block 細切後被攤成一整排垃圾 block。
+    混音線早有同款守門(render_cut 丟棄 >3s 的異常長 word,EP16「反而」×N)。
+    """
+    t = text.strip()
+    if not t:
+        return True
+    if "\ufffd" in t:                       # 解碼失敗的替代字元
+        return True
+    run = best = 1
+    for a, b in zip(t, t[1:]):
+        run = run + 1 if a == b else 1
+        best = max(best, run)
+    if best >= ARTIFACT_MIN_RUN:
+        return True
+    # 整句只由 1-2 種字元組成且夠長(「嘗嘗嘗」「反而反而反而」型)
+    return len(t) >= 6 and len(set(t)) <= 2
 
 
 def rms_db(env: list[float], a: float, b: float) -> float:
@@ -179,6 +202,7 @@ def main() -> int:
     #      附和偵測 → 串音校準的 excess(見下一段);小聲但真的有出聲照樣抓得到
     #    先前把兩者都換成 excess,結果 KIN 附和時他的軌通過檢定,連帶把 Mars
     #    串音轉出來的文字也算成 KIN 的話(K0054-K0057)。分開用就對了。 ──
+    n_art = 0
     for i, t in enumerate(tracks):
         kept = []
         for c in t["cues"]:
@@ -187,12 +211,19 @@ def main() -> int:
             lv.sort(reverse=True)
             if lv[0][1] != i:
                 continue                      # 這段主要不在他那,串音而已
+            if is_artifact(c["text"]):
+                n_art += 1
+                continue
             kept.append({"start": round(c["start"], 3), "end": round(c["end"], 3),
                          "text": c["text"].strip(), "kind": "speech",
                          "excess_db": round(lv[0][0] - lv[1][0], 1)})
         t["kept"] = kept
         print(f"[pertrack] {t['speaker']:6s} {len(t['cues'])} 句 → 自己的 "
               f"{len(kept)} 句(判為串音 {len(t['cues']) - len(kept)})")
+
+    if n_art:
+        print(f"[pertrack] ⚠ 丟棄 {n_art} 個 whisper 重複迴圈/亂碼 block"
+              f"(如 Mars 軌 5:09-5:14 的「嘗」×40)")
 
     # ── 無文字的出聲段=附和/雜音:掃全軌,扣掉已被文字 block 覆蓋的部分 ──
     # 只收「別人正在講話時」的出聲——那才是壓在別人話底下、人審剪不掉的附和。
