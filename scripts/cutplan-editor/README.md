@@ -94,9 +94,33 @@ node --test "scripts/cutplan-editor/tests/**/*.test.js"
    ```bash
    cd scripts/cutplan-editor
    clasp login
-   clasp create --title "Cutplan 編輯器" --type webapp
-   clasp push
+   clasp create --title "cutplan editor"      # 不要加 --type,見下方實測坑
+   git checkout -- appsscript.json            # create 會蓋掉 manifest,務必還原
+   clasp push --force
+   clasp deploy -d "v1"                       # 回傳 deployment id
    ```
+   網址 = `https://script.google.com/macros/s/<deployment id>/exec`。
+   之後更新:`clasp push --force && clasp deploy -i <deployment id> -d "vN"`
+   ——同一個 deployment id 重部署,網址不變。
+
+   **2026-08-11 clasp 3.3.0 實測踩到的三個坑**(照上面的指令就避開了):
+   1. **`--type webapp` 已不存在**。clasp 3.x 的 `--type` 只收
+      `docs`/`forms`/`sheets`/`slides`/`standalone`(見 clasp 安裝目錄的
+      `build/src/commands/create-script.js` 裡的 `DRIVE_FILE_MIMETYPES`),
+      給 `webapp` 會報 `Invalid container file type`。`--help` 的說明文字
+      還寫著「web app, or API」是 clasp 自己沒更新的文案。**這不影響功能**:
+      web app 從來就不是專案類型而是部署類型,由 `appsscript.json` 的
+      `webapp` 區塊決定,所以 standalone(預設)就是對的。
+   2. **`clasp create` 會覆蓋本地的 `appsscript.json`**——它從新建的空專案
+      拉一份預設 manifest 回來(`Cloned one file.. └─ appsscript.json`),
+      `webapp` 區塊整個消失、`timeZone` 變成 `America/New_York`。**沒還原就
+      `clasp push`,線上專案會沒有 web app 設定。** create 完務必先還原再 push。
+   3. **需要先開 Apps Script API**。第一次跑 `clasp create` 會報
+      `User has not enabled the Apps Script API`,去
+      [script.google.com/home/usersettings](https://script.google.com/home/usersettings)
+      把「Google Apps Script API」切成 On,等一兩分鐘生效。這是帳號層級的
+      獨立開關,跟 `clasp login` 的 OAuth 授權是兩回事。
+
    **手動貼上**(不用 clasp):在 Apps Script 編輯器裡建立對應檔名的檔案
    (`Code.gs`、`Index.html`、`cutplan-core.js`、`cutplan-core-inline.html`、
    `appsscript.json` 用專案設定裡的「顯示 appsscript.json」開啟編輯),逐一
