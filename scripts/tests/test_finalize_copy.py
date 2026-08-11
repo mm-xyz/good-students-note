@@ -73,7 +73,7 @@ class TestEngineIsolation(unittest.TestCase):
     def test_missing_engine_binary_is_reported_not_raised(self):
         with tempfile.TemporaryDirectory() as td:
             import finalize_copy
-            finalize_copy.ENGINES["_nope"] = ["definitely-not-a-real-binary"]
+            finalize_copy.ENGINES["_nope"] = (["definitely-not-a-real-binary"], "stdin")
             try:
                 ok, msg = step_engine("_nope", "prompt", Path(td), 5)
             finally:
@@ -86,8 +86,8 @@ class TestEngineIsolation(unittest.TestCase):
         讓人以為跑完了。"""
         with tempfile.TemporaryDirectory() as td:
             import finalize_copy
-            finalize_copy.ENGINES["_echo"] = [sys.executable, "-c",
-                                              "print('好的')"]
+            finalize_copy.ENGINES["_echo"] = ([sys.executable, "-c",
+                                               "print('好的')"], "stdin")
             try:
                 ok, msg = step_engine("_echo", "prompt", Path(td), 10)
             finally:
@@ -99,8 +99,8 @@ class TestEngineIsolation(unittest.TestCase):
     def test_good_output_is_written_with_engine_header(self):
         with tempfile.TemporaryDirectory() as td:
             import finalize_copy
-            finalize_copy.ENGINES["_ok"] = [
-                sys.executable, "-c", "print('標題參考:' + '文案內容' * 100)"]
+            finalize_copy.ENGINES["_ok"] = ([
+                sys.executable, "-c", "print('標題參考:' + '文案內容' * 100)"], "stdin")
             try:
                 ok, msg = step_engine("_ok", "prompt", Path(td), 10)
             finally:
@@ -110,6 +110,23 @@ class TestEngineIsolation(unittest.TestCase):
                 encoding="utf-8")
         self.assertTrue(body.startswith("> engine: _ok · "))
         self.assertIn("標題參考:", body)
+
+    def test_arg_mode_passes_prompt_as_argument_not_stdin(self):
+        """agy --print 只吃引數 —— 餵 stdin 它會印 help 就跑掉(2026-08-12 實踩,
+        1/2 引擎失敗)。arg 模式要把 prompt 接在指令後面。"""
+        with tempfile.TemporaryDirectory() as td:
+            import finalize_copy
+            finalize_copy.ENGINES["_arg"] = ([
+                sys.executable, "-c",
+                "import sys; print('收到:' + sys.argv[1] * 50)"], "arg")
+            try:
+                ok, msg = step_engine("_arg", "PROMPT", Path(td), 10)
+            finally:
+                finalize_copy.ENGINES.pop("_arg")
+            self.assertTrue(ok, msg)
+            body = (Path(td) / "_meta" / "copy_draft__arg.md").read_text(
+                encoding="utf-8")
+        self.assertIn("收到:PROMPT", body)
 
 
 if __name__ == "__main__":

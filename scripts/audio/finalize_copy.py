@@ -43,10 +43,13 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 AUDIO = Path(__file__).resolve().parent
 VER_RE = re.compile(r"^v(\d+)_\d{8}")
 
+# name: (指令, prompt 怎麼給)
+#   stdin — 從標準輸入吃(codex exec 的 `-`)
+#   arg   — 當成最後一個引數(agy --print 只吃引數;給 stdin 它會印 help 就跑掉)
+# 兩者都走各自的 OAuth 登入額度(CLAUDE.md Auth 雙軌表),不打 API key。
 ENGINES = {
-    # name: (指令樣板, 說明)  prompt 由 stdin 餵,避免 38KB 塞進 argv
-    "agy": ["agy", "-p"],
-    "codex": ["codex", "exec", "--skip-git-repo-check", "-"],
+    "agy": (["agy", "--print", "--print-timeout", "20m"], "arg"),
+    "codex": (["codex", "exec", "--skip-git-repo-check", "-"], "stdin"),
 }
 
 
@@ -122,11 +125,15 @@ def step_prompt(sdir: Path, ep: str, final_srt: Path, template: Path | None) -> 
 
 
 def step_engine(name: str, prompt: str, sdir: Path, timeout: int) -> tuple[bool, str]:
-    cmd = ENGINES[name]
+    cmd, how = ENGINES[name]
+    if isinstance(how, str) and how == "arg":
+        cmd, stdin = cmd + [prompt], None
+    else:
+        stdin = prompt
     dst = sdir / "_meta" / f"copy_draft_{name}.md"
     t0 = time.time()
     try:
-        r = subprocess.run([str(c) for c in cmd], input=prompt, text=True,
+        r = subprocess.run([str(c) for c in cmd], input=stdin, text=True,
                            capture_output=True, cwd=PROJECT_ROOT, timeout=timeout)
     except FileNotFoundError:
         return False, f"{name}:找不到指令 `{cmd[0]}`(沒裝或不在 PATH)"
