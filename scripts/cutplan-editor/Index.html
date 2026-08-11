@@ -408,7 +408,10 @@
     }
     var line = state.doc.lines[picked.lineIndex];
     var mode = Core.classifySelection(line.bodyRaw, picked.start, picked.end);
-    if (mode === 'invalid') {
+    // 'empty'(合法索引但沒反白任何文字)理論上 resolveSelection 已經濾掉了
+    // (collapsed selection 直接回 null),這裡跟 'invalid' 一起當「沒有可用
+    // 選取」處理,純防禦——不靜默假裝沒事,只是沒有東西可顯示按鈕。
+    if (mode === 'invalid' || mode === 'empty') {
       hideStrikeBar();
       return;
     }
@@ -423,7 +426,14 @@
   }
 
   els.strikeBtn.addEventListener('click', function () {
-    if (!state.selection) return;
+    // 手機上常見:手指點按鈕的當下,系統先把文字選取收掉(collapse)才觸發
+    // click,state.selection 因此變成 null——這正是 MM 回報「沒辦法取消
+    // 標記」的另一個成因(不是判定邏輯錯,是選取在按鈕點下去那一刻已經沒了)。
+    // 這裡不再靜默 return,給使用者看得到的提示,不要讓按鈕像沒反應一樣。
+    if (!state.selection) {
+      setStatus('沒有偵測到反白的文字,請重新選取要加/去刪除線的範圍', 'error');
+      return;
+    }
     var { lineIndex, start, end } = state.selection;
     try {
       state.doc = Core.applyStrike(state.doc, lineIndex, start, end);
