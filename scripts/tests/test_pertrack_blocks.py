@@ -1,0 +1,205 @@
+#!/usr/bin/env python3
+"""test_pertrack_blocks.py — 逐軌 cutplan 產生器(D1 文字來源、粒度、文件結構)。
+
+鎖的是不碰音檔就能驗的部分:
+  · canonical phrase 粒度 0.4–1.2s
+  · 軌前綴兩碼,不可與 B/G/S(補錄)/I 撞號
+  · cutplan.md 的 ⚙/✂/🎵/➕＋S 列/章節/G 列**原樣搬過來**並落在正確時間位置
+  · 產出的 cutplan.pertrack.md 能被 render_cut.parse_program 直接吃
+  · 非詞彙出聲列預設不勾、低信心收折疊區、折疊區標題不可長得像章節
+
+跑法:
+    python3 scripts/tests/test_pertrack_blocks.py
+"""
+from __future__ import annotations
+
+import sys
+import unittest
+from pathlib import Path
+
+AUDIO_DIR = Path(__file__).resolve().parent.parent / "audio"
+sys.path.insert(0, str(AUDIO_DIR))
+
+from pertrack_blocks import (  # noqa: E402
+    derive_prefixes, enforce_phrase_len, carry_over_program, build_md,
+    pick_visible,
+)
+from render_cut import parse_program  # noqa: E402
+
+
+def ph(a, b, text="字"):
+    return {"start": a, "end": b, "text": text, "owner": 0,
+            "uncertain": False, "reason": "",
+            "words": [{"start": a, "end": b, "word": text}]}
+
+
+class TestPrefixes(unittest.TestCase):
+    def test_two_letter_prefixes_do_not_collide_with_reserved_ids(self):
+        p = derive_prefixes(["Mars", "Sarah", "KIN"])
+        self.assertEqual(list(p.values()), ["MR", "SR", "KN"])
+        for v in p.values():
+            self.assertEqual(len(v), 2)
+
+    def test_sarah_must_not_become_bare_S(self):
+        """單碼 S 會跟補錄 block(insert_prepare 的 S0001)撞號。"""
+        self.assertNotEqual(derive_prefixes(["Sarah"])["Sarah"], "S")
+
+    def test_duplicate_derivations_get_disambiguated(self):
+        p = derive_prefixes(["Mars", "Marco"])
+        self.assertEqual(len(set(p.values())), 2)
+
+    def test_non_ascii_names_fall_back_to_track_index(self):
+        p = derive_prefixes(["語嫣", "小明"])
+        self.assertEqual(list(p.values()), ["T1", "T2"])
+
+
+class TestPhraseLength(unittest.TestCase):
+    def test_short_phrase_is_merged_into_its_neighbour(self):
+        out = enforce_phrase_len([ph(0.0, 0.2, "啊"), ph(0.2, 0.8, "今天很好")],
+                                 lo=0.4, hi=1.2)
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0]["text"], "啊今天很好")
+
+    def test_merge_is_skipped_when_it_would_break_the_upper_bound(self):
+        out = enforce_phrase_len([ph(0.0, 0.2, "啊"), ph(0.2, 1.4, "很長的一句")],
+                                 lo=0.4, hi=1.2)
+        self.assertEqual(len(out), 2)
+
+    def test_owners_are_never_merged_across(self):
+        a, b = ph(0.0, 0.2, "啊"), ph(0.2, 0.8, "今天")
+        b["owner"] = 1
+        self.assertEqual(len(enforce_phrase_len([a, b], lo=0.4, hi=1.2)), 2)
+
+
+CUTPLAN_MD = """# Cutplan — demo
+
+> 說明行
+
+## ⚙ tempo=1.06 max-pause=0.9
+## ✂ 100.0-101.0 手動剪除
+- [ ] G0001 [0:00–0:02] ⬜ 空白 2.5s
+## 🎵 opening start=0 end=10 lead=3
+- [x] B0001 [0:02–0:05] [Sarah] 嗨
+- [ ] B0002 [0:05–0:06] [Mars] 贅句
+## 第一章
+- [x] B0003 [0:06–0:07] [KIN] 我是King
+## ➕ raw/補錄.WAV gain=auto  Sarah 補錄
+- [x] S0001 [0:00–0:02] [Sarah] 補錄句
+## 🎵 ending end=20 lead=3
+"""
+
+ID_TIME = {"G0001": 0.0, "B0001": 2.5, "B0002": 5.0, "B0003": 6.0}
+
+
+class TestCarryOverProgram(unittest.TestCase):
+    def setUp(self):
+        self.groups = carry_over_program(CUTPLAN_MD.splitlines(), ID_TIME)
+
+    def test_b_rows_are_dropped_and_everything_else_survives(self):
+        text = "\n".join(l for g in self.groups for l in g["lines"])
+        self.assertNotIn("B0001", text)
+        self.assertNotIn("B0003", text)
+        for keep in ("## ⚙ tempo=1.06", "## ✂ 100.0-101.0", "G0001",
+                     "## 🎵 opening", "## 第一章", "## ➕ raw/補錄.WAV",
+                     "S0001", "## 🎵 ending"):
+            self.assertIn(keep, text)
+
+    def test_insert_header_and_its_s_rows_stay_one_group(self):
+        g = next(x for x in self.groups if x["lines"][0].startswith("## ➕"))
+        self.assertEqual(len(g["lines"]), 2)
+        self.assertIn("S0001", g["lines"][1])
+
+    def test_structural_lines_anchor_to_the_next_timed_row(self):
+        def anchor(frag):
+            return next(x["anchor"] for x in self.groups
+                        if frag in x["lines"][0])
+        self.assertEqual(anchor("🎵 opening"), 2.5)     # 下一個是 B0001
+        self.assertEqual(anchor("第一章"), 6.0)          # 下一個是 B0003
+        self.assertEqual(anchor("⚙ tempo"), 0.0)        # 下一個是 G0001
+
+    def test_trailing_structure_sorts_to_the_end(self):
+        g = next(x for x in self.groups if "ending" in x["lines"][0])
+        self.assertEqual(g["anchor"], float("inf"))
+
+
+class TestBuildMd(unittest.TestCase):
+    def _md(self, rows, low=()):
+        return build_md("demo", carry_over_program(CUTPLAN_MD.splitlines(),
+                                                   ID_TIME), rows, list(low))
+
+    ROWS = [{"id": "SR0001", "start": 2.5, "end": 3.0, "speaker": "Sarah",
+             "text": "嗨", "kind": "speech", "keep": True, "reason": ""},
+            {"id": "KN0001", "start": 6.0, "end": 6.6, "speaker": "KIN",
+             "text": "我是King", "kind": "speech", "keep": True, "reason": ""},
+            {"id": "MR0001", "start": 6.2, "end": 6.6, "speaker": "Mars",
+             "text": "（非詞彙出聲／待辨 0.4s）", "kind": "voicing",
+             "keep": False, "reason": "excess +12.0dB"}]
+
+    def test_rows_land_in_time_order_between_the_carried_structure(self):
+        lines = self._md(self.ROWS).splitlines()
+        pos = {k: i for i, l in enumerate(lines)
+               for k in ("🎵 opening", "SR0001", "第一章", "KN0001",
+                         "➕ raw", "🎵 ending") if k in l}
+        self.assertLess(pos["🎵 opening"], pos["SR0001"])
+        self.assertLess(pos["SR0001"], pos["第一章"])
+        self.assertLess(pos["第一章"], pos["KN0001"])
+        self.assertLess(pos["KN0001"], pos["➕ raw"])
+        self.assertLess(pos["➕ raw"], pos["🎵 ending"])
+
+    def test_voicing_rows_are_unchecked_and_speech_rows_are_checked(self):
+        lines = self._md(self.ROWS).splitlines()
+        self.assertTrue(any(l.startswith("- [x] SR0001") for l in lines))
+        self.assertTrue(any(l.startswith("- [ ] MR0001") for l in lines))
+
+    def test_low_confidence_rows_go_to_a_fold_that_is_not_a_chapter(self):
+        low = [{"id": "MR0002", "start": 9.0, "end": 9.4, "speaker": "Mars",
+                "text": "（非詞彙出聲／待辨 0.4s）", "kind": "voicing",
+                "keep": False, "reason": "excess +3.1dB"}]
+        md = self._md(self.ROWS, low)
+        self.assertIn("<details>", md)
+        self.assertIn("MR0002", md)
+        for line in md.splitlines():
+            if line.startswith("## "):
+                self.assertNotIn("低信心", line)
+
+    def test_generated_md_is_parseable_by_render_cut(self):
+        import tempfile
+        low = [{"id": "MR0002", "start": 9.0, "end": 9.4, "speaker": "Mars",
+                "text": "（非詞彙出聲／待辨 0.4s）", "kind": "voicing",
+                "keep": False, "reason": ""}]
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "cutplan.pertrack.md"
+            p.write_text(self._md(self.ROWS, low), encoding="utf-8")
+            prog = parse_program(p)
+        kinds = [it["kind"] for it in prog]
+        self.assertEqual(kinds.count("config"), 1)
+        self.assertEqual(kinds.count("cut"), 1)
+        self.assertEqual(kinds.count("music"), 2)
+        self.assertEqual(kinds.count("insert"), 1)
+        self.assertEqual(kinds.count("chapter"), 1)
+        ids = [it["id"] for it in prog if it["kind"] == "block"]
+        self.assertEqual(ids, ["G0001", "SR0001", "KN0001", "MR0001",
+                               "S0001", "MR0002"])
+        s = next(it for it in prog if it.get("id") == "S0001")
+        self.assertEqual(s["insert"], "raw/補錄.WAV")
+        self.assertIsNone(next(it for it in prog
+                               if it.get("id") == "SR0001")["insert"])
+
+
+class TestVisibleBudget(unittest.TestCase):
+    def test_visible_candidates_are_capped_at_two_per_minute(self):
+        ev = [{"score": float(i)} for i in range(100)]
+        vis, low = pick_visible(ev, duration=60.0, per_min=2.0, high_db=6.0)
+        self.assertEqual(len(vis), 2)
+        self.assertEqual(len(low), 98)
+        self.assertEqual([e["score"] for e in vis], [99.0, 98.0])
+
+    def test_low_confidence_events_never_become_visible(self):
+        ev = [{"score": 1.0}, {"score": 2.0}]
+        vis, low = pick_visible(ev, duration=600.0, per_min=2.0, high_db=6.0)
+        self.assertEqual(vis, [])
+        self.assertEqual(len(low), 2)
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=1)

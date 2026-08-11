@@ -26,7 +26,8 @@ REPO_ROOT = AUDIO_DIR.parent.parent
 sys.path.insert(0, str(AUDIO_DIR))
 
 from srt_utils import parse_srt  # noqa: E402
-from migrate_marks import parse_blocks, map_spans  # noqa: E402
+from migrate_marks import (parse_blocks, map_spans,  # noqa: E402
+                           migrate_per_speaker)
 
 
 def run_script(name: str, *args: str) -> subprocess.CompletedProcess:
@@ -258,6 +259,111 @@ class TestCheckboxMigration(unittest.TestCase):
         proc, out = self._migrate()
         self.assertEqual(proc.returncode, 0, proc.stderr or proc.stdout)
         self.assertNotIn("- [ ]", out)
+
+
+def _rows(md: str) -> dict[str, str]:
+    import re as _re
+    out = {}
+    for l in md.splitlines():
+        m = _re.match(r"^- \[[ xX]\] ([A-Z]{1,2}\d{3,5}) ", l)
+        if m:
+            out[m.group(1)] = l
+    return out
+
+
+class TestPerSpeakerMigration(unittest.TestCase):
+    """把混音 cutplan 的人審資產搬到逐軌 cutplan —— 必須**逐講者**對齊。
+
+    整份文件攤成一條字元流會出事:同一句話在混音版只出現一次,在逐軌版
+    只出現在那個人的軌上;但別人的軌上也有大量長得很像的鄰句。全域 difflib
+    很容易把 Sarah 的刪除線搬到 Mars 的列上 —— 那正是 D4 明文禁止的
+    「把同一段串音文字的刪除線複製到其他軌」。
+    """
+
+    OLD = ("# Cutplan\n"
+           "- [x] B0001 [0:00–0:01] [Sarah] 我覺得~~那個~~很好\n"
+           "- [ ] B0002 [0:01–0:02] [Mars] 這句不要\n"
+           "- [x] B0003 [0:02–0:03] [Mars] 我覺得那個很好\n")
+    NEW = ("# Cutplan（分軌）\n"
+           "- [x] SR0001 [0:00–0:00] [Sarah] 我覺得\n"
+           "- [x] SR0002 [0:00–0:01] [Sarah] 那個很好\n"
+           "- [x] MR0001 [0:01–0:02] [Mars] 這句不要\n"
+           "- [x] MR0002 [0:02–0:03] [Mars] 我覺得那個很好\n"
+           "- [ ] MR0003 [0:02–0:03] [Mars] （非詞彙出聲／待辨 0.4s）\n")
+
+    def _run(self, **kw):
+        with tempfile.TemporaryDirectory() as td:
+            old = Path(td) / "old.md"
+            new = Path(td) / "cutplan.pertrack.md"
+            old.write_text(self.OLD, encoding="utf-8")
+            new.write_text(self.NEW, encoding="utf-8")
+            stats = migrate_per_speaker(old, new, **kw)
+            return new.read_text(encoding="utf-8"), stats
+
+    def test_strike_lands_on_the_right_speaker_only(self):
+        out, _ = self._run(with_checkboxes=True)
+        lines = _rows(out)
+        self.assertIn("~~那個~~", lines["SR0002"])
+        self.assertNotIn("~~", lines["MR0002"])
+
+    def test_unchecked_block_migrates_to_that_speakers_rows(self):
+        out, _ = self._run(with_checkboxes=True)
+        lines = _rows(out)
+        self.assertTrue(lines["MR0001"].startswith("- [ ]"))
+        self.assertTrue(lines["MR0002"].startswith("- [x]"))
+
+    def test_voicing_rows_are_never_touched(self):
+        out, _ = self._run(with_checkboxes=True)
+        self.assertIn("- [ ] MR0003", out)
+
+    def test_checkboxes_are_left_alone_without_the_flag(self):
+        out, _ = self._run(with_checkboxes=False)
+        self.assertTrue(any(l.startswith("- [x] MR0001")
+                            for l in out.splitlines()))
+        self.assertIn("~~那個~~", out)
+
+    def test_whitespace_differences_do_not_drop_marks(self):
+        """逐軌列的文字是 canonical 去空白後的切片,舊版保留空白;對齊要照樣過。"""
+        old = ("# x\n- [x] B0001 [0:00–0:01] [Mars] 臨時 ~~任務~~ 很多\n")
+        new = ("# x\n- [x] MR0001 [0:00–0:01] [Mars] 臨時任務很多\n")
+        with tempfile.TemporaryDirectory() as td:
+            o, n = Path(td) / "o.md", Path(td) / "n.md"
+            o.write_text(old, encoding="utf-8")
+            n.write_text(new, encoding="utf-8")
+            st = migrate_per_speaker(o, n, with_checkboxes=True)
+            out = n.read_text(encoding="utf-8")
+        self.assertEqual(st["dropped"], 0)
+        self.assertIn("臨時~~任務~~很多", out)
+
+    def test_strike_follows_a_word_that_changed_track(self):
+        """波形歸屬跟 diarize 不一致時,刪除線要跟著那個字走,不是被丟掉。
+
+        EP16 實測:154 處刪除線裡有 31 處落在被重新歸屬的口頭禪(嗯/然後/哦)
+        —— 那些字在混音版掛在 A 身上、逐軌版掛到 B 的軌上。只做逐講者對齊
+        就會整批遺失人審成果,所以對不上的殘留要再做一次全域比對。
+        """
+        old = ("# x\n- [x] B0001 [0:00–0:01] [Mars] 我覺得很好~~嗯~~\n"
+               "- [x] B0002 [0:01–0:02] [Sarah] 那我們繼續\n")
+        new = ("# x\n- [x] MR0001 [0:00–0:01] [Mars] 我覺得很好\n"
+               "- [x] SR0001 [0:01–0:01] [Sarah] 嗯\n"
+               "- [x] SR0002 [0:01–0:02] [Sarah] 那我們繼續\n")
+        with tempfile.TemporaryDirectory() as td:
+            o, n = Path(td) / "o.md", Path(td) / "n.md"
+            o.write_text(old, encoding="utf-8")
+            n.write_text(new, encoding="utf-8")
+            st = migrate_per_speaker(o, n, with_checkboxes=True)
+            rows = _rows(n.read_text(encoding="utf-8"))
+        self.assertEqual(st["dropped"], 0)
+        self.assertEqual(st["rehomed"], 1)
+        self.assertIn("~~嗯~~", rows["SR0001"])
+        self.assertNotIn("~~", rows["MR0001"])
+
+    def test_stats_report_what_moved_and_what_was_dropped(self):
+        _out, st = self._run(with_checkboxes=True)
+        self.assertEqual(st["strikes_in"], 1)
+        self.assertEqual(st["strikes_out"], 1)
+        self.assertEqual(st["unchecked"], 1)
+        self.assertEqual(st["dropped"], 0)
 
 
 if __name__ == "__main__":

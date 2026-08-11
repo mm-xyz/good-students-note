@@ -14,6 +14,7 @@ feedback:podcast-cutplan-drive-copy 用 diff 對回來)。
 """
 
 import argparse
+import bisect
 import difflib
 import re
 import sys
@@ -23,8 +24,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from srt_utils import rel
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+# 兩碼前綴 = 分軌 block(MR/SR/KN…);單碼 B/G/S/I = 混音線/補錄
 BLOCK_RE = re.compile(
-    r"^(?P<prefix>- \[(?P<mark>[ xX])\] (?P<bid>[BGSMKI]\d{3,5}) "
+    r"^(?P<prefix>- \[(?P<mark>[ xX])\] (?P<bid>[A-Z]{1,2}\d{3,5}) "
     r"\[[^\]]+\] \[(?P<spk>[^\]]+)\] )(?P<body>.*)$")
 MARK_RE = re.compile(r"~~(.+?)~~")
 
@@ -91,6 +93,159 @@ def map_spans(spans, old_stream, new_stream):
     return mapped, n_drop
 
 
+# ── 逐講者遷移(混音 cutplan → 逐軌 cutplan)────────────────────────────
+VOICING_RE = re.compile(r"^（非詞彙出聲")
+
+
+def _regroup(blocks, spans, cuts):
+    """依講者分組,把全域字元流座標換算成「該講者自己的字元流」座標。
+
+    **為什麼一定要分組**:同一句話在混音版只出現一次,逐軌版只出現在那個人的
+    軌上,但別人的軌上有一堆長得很像的鄰句。整份攤成一條流做 difflib,
+    Sarah 的刪除線很容易被搬到 Mars 的列上 —— D4 明文禁止把同一段串音文字的
+    刪除線複製到其他軌。
+    """
+    groups: dict[str, dict] = {}
+    starts = [b["start"] for b in blocks]
+    for b in blocks:
+        g = groups.setdefault(b["speaker"], {"stream": [], "blocks": [],
+                                             "spans": [], "cuts": [], "len": 0})
+        b["local"] = g["len"]
+        g["blocks"].append(b)
+        g["stream"].append(b["text"])
+        g["len"] += len(b["text"])
+
+    def owner(pos):
+        i = bisect.bisect_right(starts, pos) - 1
+        return blocks[i] if 0 <= i < len(blocks) else None
+
+    for kind, src in (("spans", spans), ("cuts", cuts)):
+        for a, z in src:
+            b = owner(a)
+            if b is None:
+                continue
+            off = b["local"] - b["start"]
+            groups[b["speaker"]][kind].append((a + off, z + off))
+    for g in groups.values():
+        g["stream"] = "".join(g["stream"])
+    return groups
+
+
+def _global_spans(blocks, spans, speaker):
+    """把某講者的「該講者字元流」座標換回全域字元流座標。"""
+    out = []
+    for a, z in spans:
+        for b in blocks:
+            if b["speaker"] != speaker:
+                continue
+            lo, hi = b["local"], b["local"] + len(b["text"])
+            if lo <= a and z <= hi:
+                out.append((b["start"] + (a - lo), b["start"] + (z - lo)))
+                break
+    return out
+
+
+def _map_each(spans, old_stream: str, new_stream: str):
+    """跟 map_spans 同一套判準,但**逐 span** 回報結果(對不上的要能再救一次)。"""
+    sm = difflib.SequenceMatcher(None, old_stream, new_stream, autojunk=False)
+    matches = sm.get_matching_blocks()
+    out = []
+    for s_, e in spans:
+        parts, covered = [], 0
+        for m in matches:
+            lo, hi = max(s_, m.a), min(e, m.a + m.size)
+            if lo < hi:
+                parts.append((m.b + (lo - m.a), m.b + (hi - m.a)))
+                covered += hi - lo
+        out.append(parts if (covered == e - s_ and parts) else None)
+    return out
+
+
+def migrate_per_speaker(old_path: Path, new_path: Path,
+                        with_checkboxes: bool = False,
+                        cut_threshold: float = 0.6) -> dict:
+    """混音 cutplan.md 的 ~~刪除線~~ ＋ 未勾選,逐講者搬到逐軌 cutplan。
+
+    逐軌列的 `（非詞彙出聲…）` 不是逐字稿內容,不參與對齊也不被改動。
+    """
+    old_lines = Path(old_path).read_text(encoding="utf-8").splitlines()
+    new_lines = Path(new_path).read_text(encoding="utf-8").splitlines()
+    ob, _os, ospans, ocuts = parse_blocks(old_lines)
+    nb, _ns, nspans, _nc = parse_blocks(new_lines)
+    if nspans:
+        raise SystemExit(f"{new_path} 已有 {len(nspans)} 處刪除線,不重複遷移")
+    nb = [b for b in nb if not VOICING_RE.match(b["text"])]
+    og = _regroup(ob, ospans, ocuts)
+    ng = _regroup(nb, [], [])
+
+    goff, at = [], 0
+    for b in nb:
+        goff.append((at, at + len(b["text"]), b))
+        at += len(b["text"])
+    gstream_new = "".join(b["text"] for b in nb)
+
+    def align(key):
+        """逐講者對齊 → 對不上的殘留再做一次全域比對(那個字換軌了,跟著走)。"""
+        per, leftover, owner = {}, [], []
+        for spk, o in og.items():
+            n = ng.get(spk)
+            if n is None or not o[key]:
+                leftover += _global_spans(ob, o[key], spk)
+                owner += [spk] * len(o[key])
+                continue
+            res = _map_each(o[key], o["stream"], n["stream"])
+            per[spk] = [x for r in res if r for x in r]
+            miss = [o[key][i] for i, r in enumerate(res) if r is None]
+            leftover += _global_spans(ob, miss, spk)
+        n_re = n_drop = 0
+        for parts in (_map_each(leftover, _os, gstream_new) if leftover else []):
+            if parts is None:
+                n_drop += 1
+                continue
+            n_re += 1
+            for a, z in parts:
+                for lo, hi, b in goff:
+                    if a >= lo and z <= hi:
+                        per.setdefault(b["speaker"], []).append(
+                            (b["local"] + (a - lo), b["local"] + (z - lo)))
+                        break
+        return per, n_re, n_drop
+
+    marks, re_s, drop_s = align("spans")
+    cuts_by, re_c, drop_c = (align("cuts") if with_checkboxes else ({}, 0, 0))
+    st = {"strikes_in": len(ospans), "strikes_out": 0, "dropped": drop_s,
+          "rehomed": re_s, "cuts_in": len(ocuts), "unchecked": 0,
+          "cut_dropped": drop_c, "cut_rehomed": re_c, "speakers": {}}
+
+    for spk, n in ng.items():
+        mapped = marks.get(spk, [])
+        cuts = cuts_by.get(spk, [])
+        for b in n["blocks"]:
+            b_end = b["local"] + len(b["text"])
+            local = sorted((max(x, b["local"]) - b["local"],
+                            min(y, b_end) - b["local"])
+                           for x, y in mapped if x < b_end and y > b["local"])
+            text = b["text"]
+            for x, y in reversed(local):
+                if x >= y:
+                    continue
+                text = text[:y] + "~~" + text[y:]
+                text = text[:x] + "~~" + text[x:]
+                st["strikes_out"] += 1
+            new_lines[b["line"]] = b["prefix"] + text + b["suffix"]
+            covered = sum(min(y, b_end) - max(x, b["local"]) for x, y in cuts
+                          if x < b_end and y > b["local"])
+            if (covered / max(1, len(b["text"])) >= cut_threshold
+                    and b["mark"] != " "):
+                new_lines[b["line"]] = new_lines[b["line"]].replace(
+                    "- [x] ", "- [ ] ", 1)
+                st["unchecked"] += 1
+        o = og.get(spk, {"spans": [], "cuts": []})
+        st["speakers"][spk] = {"spans": len(o["spans"]), "cuts": len(o["cuts"])}
+    Path(new_path).write_text("\n".join(new_lines) + "\n", encoding="utf-8")
+    return st
+
+
 def main():
     ap = argparse.ArgumentParser(description="cutplan ~~刪除線~~ 跨版遷移")
     ap.add_argument("--session", required=True)
@@ -98,13 +253,31 @@ def main():
     ap.add_argument("--with-checkboxes", action="store_true",
                     help="連人審的勾選一起搬(未勾選=剪掉)。migrate_marks 原本只搬"
                          "刪除線,重切後 34 個剪除決定會整批消失(2026-08-11 MM 指出)")
+    ap.add_argument("--to", default="cutplan.md",
+                    help="遷移目標節目單(分軌線用 cutplan.pertrack.md)")
+    ap.add_argument("--per-speaker", action="store_true",
+                    help="逐講者對齊(搬到逐軌 cutplan 必用;整份攤平會把"
+                         "刪除線搬到別人的軌上)")
     ap.add_argument("--cut-threshold", type=float, default=0.6,
                     help="新 block 有多少比例的字被舊剪除區間覆蓋才取消勾選"
                          "(預設 0.6;重切後邊界會挪,不能要求 100%% 覆蓋)")
     args = ap.parse_args()
 
     session_dir = Path(args.session).resolve()
-    new_path = session_dir / "cutplan.md"
+    new_path = session_dir / args.to
+    if args.per_speaker:
+        st = migrate_per_speaker(Path(args.old), new_path,
+                                 args.with_checkboxes, args.cut_threshold)
+        print(f"[migrate-marks] 逐講者遷移 → {rel(new_path, PROJECT_ROOT)}")
+        print(f"    刪除線 {st['strikes_in']} 處 → 落到新 block "
+              f"{st['strikes_out']} 段(其中 {st['rehomed']} 處是那個字被重新"
+              f"歸屬到別人的軌、跟著搬過去;對不上丟棄 {st['dropped']} 處)")
+        print(f"    剪除決定 {st['cuts_in']} 個 → 取消勾選 {st['unchecked']} 個"
+              f"(換軌跟著搬 {st['cut_rehomed']} 處,對不上丟棄 "
+              f"{st['cut_dropped']} 處)")
+        for spk, v in st["speakers"].items():
+            print(f"      {spk:6s} 刪除線 {v['spans']}、剪除 block {v['cuts']}")
+        return
     old_lines = Path(args.old).read_text(encoding="utf-8").splitlines()
     new_lines = new_path.read_text(encoding="utf-8").splitlines()
 

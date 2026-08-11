@@ -1,305 +1,399 @@
 #!/usr/bin/env python3
 """
-scripts/audio/pertrack_blocks.py — 逐軌逐字稿 → 逐軌 cutplan blocks（分軌剪輯）
+scripts/audio/pertrack_blocks.py — canonical 逐字稿 ＋ 三軌波形 → 逐軌 cutplan
 
-    python3 scripts/audio/pertrack_blocks.py --session sessions/<slug> \
-        [--bc-excess 10.0] [--backchannel-min 0.3] [--out-md cutplan.pertrack.md]
+    python3 scripts/audio/pertrack_blocks.py --session sessions/<slug>
 
-2026-08-11 MM 拍板改成分軌出片(方案 B:完整逐軌模型)。動機:EP16 04:47 有一串
-KIN 的「嗯 嗯 嗯」壓在 Mars 講話底下,混音逐字稿看不到、人審剪不掉。
+2026-08-11 改版(D1–D3)。**逐軌 ASR 不再產生正式 block。**
 
-**為什麼不能只靠逐軌轉錄**:麥克風串音 17–23dB,whisper 對三軌都會把同一段話
-轉出來(EP16 實測:Mars 軌只有 -58 LUFS 的串音,照樣轉出完整句子)。
+實證(EP16):Mars 直錄軌在 295–323 秒陷入「嘗」重複迴圈,而 Sarah／KIN 軌的
+**串音** ASR 反而轉出了 Mars 的原句。逐軌 ASR 在單一麥克風上(訊噪比差、
+缺少其他人語境)比混音更容易崩,所以:
 
-**為什麼不能用「誰最大聲」判定**:兩人同時出聲時,小聲的那個會被當成串音丟掉——
-而附和聲正是這種情況(EP16 313-322s:Mars 比 KIN 大 11.8dB,純支配判定把 KIN 的
-「嗯嗯」全判給 Mars)。改用**串音校準**:先從「某人獨講」的乾淨片段量出每一對
-軌的串音增益 g[i][j],再問「這一軌的能量有沒有超出純串音能解釋的量」。
-EP16 實測 Mars→KIN 串音 -16.4dB,校準後在該區間抓到 5 段 KIN 自己的出聲
-(超出預測 15-34dB),正是 MM 聽到的那串附和。
-
-**為什麼附和不會有逐字稿**:whisper 不轉「嗯」這種非詞彙音(EP16 KIN 軌那區間
-轉出來的全是 Mars 的串音內容)。所以附和只能靠 VAD 能量抓,抓到後以無文字的
-`(附和/雜音 N.Ns)` 列呈現,**預設不勾**=該軌該區間靜音;要保留就勾回來。
+    正式文字   = 混音 transcript(cutplan.json 的 block 文字)依 words.json
+                 細切成 0.4–1.2 秒的 canonical phrase
+    逐軌波形   = 只決定「這句歸哪一軌」與「各軌何時靜音」
+    逐軌 ASR   = 降級成「重疊語句的救援證據」,只在歸屬不確定時附一條平行列
 
 輸出:
     cutplan.json 的 `tracks`: [{speaker, prefix, file, blocks:[...]}]
-    cutplan.pertrack.md: 依時間排序、換講者就下一個 `## 軌 <Speaker>` 標頭
-
-兩層剪輯模型(render 端實作):
-    時間軸層 — 某區間三軌全部沒勾 → 整段移除(時間消失,三軌一起)
-    軌  層 — 有人勾有人沒勾 → 時間保留,沒勾的那一軌在該區間靜音
+    cutplan.pertrack.md:**完整節目單** —— cutplan.md 的 ⚙/✂/🎵/➕＋S 列/
+        🎬/章節/G 列原樣搬過來,B 列換成逐軌列,依時間排序。
+        render_cut.py --plan cutplan.pertrack.md 直接吃這一份。
 """
 
+from __future__ import annotations
+
 import argparse
-import array
 import json
 import math
+import re
 import subprocess
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from srt_utils import parse_srt, fmt_mmss, split_words_to_phrases  # noqa: E402
+from srt_utils import fmt_mmss, parse_srt, split_words_to_phrases  # noqa: E402
 
-ARTIFACT_MIN_RUN = 4     # 同一個字連續重複幾次算 whisper 重複迴圈
-ENV_RATE = 1000          # 能量包絡取樣率:33 分鐘只有 2M 點,夠準又夠快
-STEP = 0.2               # 掃描步長(秒);附和聲常只有 0.3–0.8s
-TRACK_PREFIX = {"Mars": "M", "Sarah": "S", "KIN": "K"}
+HOP = 0.01                # 基底 frame 網格(10ms),D2/D3 都在上面積分
+SR = 8000                 # 能量分析取樣率(語音能量夠用,記憶體省)
+ATTR_WIN = 0.10           # D2 積分窗 ~100ms
+SCAN_WIN = 0.02           # D3 掃描窗 20ms
+ROW_RE = re.compile(r"^- \[( |x|X)\] ([A-Z]{1,2}\d{3,5}) ")
+INSERT_ID_RE = re.compile(r"^S\d{3,5}$")
+VOWELS = set("AEIOU")
 
 
-def envelope(path: Path) -> list[float]:
-    """整軌解成 1kHz 單聲道振幅包絡(abs 值),供逐窗能量比較。"""
+# ── 前綴 ────────────────────────────────────────────────────────────────
+def derive_prefixes(names: list[str]) -> dict[str, str]:
+    """講者名 → 兩碼前綴(Mars→MR、Sarah→SR、KIN→KN)。
+
+    **一定要兩碼**:單碼 S 會跟 insert_prepare.py 產的補錄 block(S0001)撞號,
+    單碼 B/G 是混音線的 block/gap。非 ASCII 名字退回 T1/T2/T3。
+    """
+    out: dict[str, str] = {}
+    used: set[str] = set()
+    for i, n in enumerate(names, 1):
+        s = "".join(c for c in n.upper() if c.isascii() and c.isalpha())
+        cand = ""
+        if len(s) >= 2:
+            tail = next((c for c in s[1:] if c not in VOWELS), s[1])
+            cand = s[0] + tail
+        if not cand or cand in used:
+            cand = f"T{i}"
+        k = 1
+        while cand in used:
+            cand, k = f"T{i}{k}", k + 1
+        used.add(cand)
+        out[n] = cand
+    return out
+
+
+# ── 粒度 ────────────────────────────────────────────────────────────────
+def enforce_phrase_len(parts: list[dict], lo: float = 0.4,
+                       hi: float = 1.2) -> list[dict]:
+    """把 <lo 秒的碎片併進相鄰 phrase(併完不得超過 hi 秒;跨 owner 不併)。"""
+    out: list[dict] = []
+    for p in parts:
+        prev = out[-1] if out else None
+        if (prev and p["end"] - p["start"] < lo
+                and prev["owner"] == p["owner"]
+                and p["end"] - prev["start"] <= hi + 1e-9):
+            prev["end"] = p["end"]
+            prev["text"] += p["text"]
+            prev["words"] = prev["words"] + p["words"]
+            prev["uncertain"] = prev["uncertain"] or p["uncertain"]
+            prev["reason"] = prev["reason"] or p["reason"]
+            continue
+        out.append(dict(p))
+    # 開頭那個碎片沒有前鄰可併 → 往後併
+    if len(out) > 1 and out[0]["end"] - out[0]["start"] < lo \
+            and out[0]["owner"] == out[1]["owner"] \
+            and out[1]["end"] - out[0]["start"] <= hi + 1e-9:
+        out[1]["start"] = out[0]["start"]
+        out[1]["text"] = out[0]["text"] + out[1]["text"]
+        out[1]["words"] = out[0]["words"] + out[1]["words"]
+        out.pop(0)
+    return out
+
+
+# ── 文件結構搬運 ─────────────────────────────────────────────────────────
+def carry_over_program(md_lines: list[str], id_time: dict[str, float]):
+    """cutplan.md 的非 B 列結構抽出來,附錨點時間(＝文件中它後面第一個計時列)。
+
+    ➕ 補錄標頭與它底下的 S 列黏成同一組 —— S 列必須排在所屬 ➕ 標頭底下,
+    拆開 render 會 FAIL。
+    """
+    items: list[dict] = []
+    cur_insert: dict | None = None
+    for raw in md_lines:
+        s = raw.strip()
+        m = ROW_RE.match(s)
+        if m:
+            bid = m.group(2)
+            if INSERT_ID_RE.match(bid):
+                if cur_insert is not None:
+                    cur_insert["lines"].append(s)
+                continue
+            cur_insert = None
+            t = id_time.get(bid)
+            if bid.startswith("G"):
+                items.append({"lines": [s], "anchor": t, "kind": "gap",
+                              "time": t})
+            else:
+                items.append({"kind": "btime", "time": t, "lines": []})
+            continue
+        if s.startswith("## "):
+            cur_insert = {"lines": [s], "anchor": None, "kind": "struct",
+                          "time": None}
+            items.append(cur_insert)
+            if not s.startswith("## ➕"):
+                cur_insert = None
+            continue
+    nxt = math.inf
+    for it in reversed(items):
+        if it["time"] is not None:
+            nxt = it["time"]
+        elif it["kind"] == "struct":
+            it["anchor"] = nxt
+    out = [it for it in items if it["kind"] != "btime"]
+    for i, it in enumerate(out):
+        it["seq"] = i
+    return out
+
+
+def _row_line(r: dict) -> str:
+    mark = "x" if r["keep"] else " "
+    tail = f" ← {r['reason']}" if r.get("reason") else ""
+    return (f"- [{mark}] {r['id']} [{fmt_mmss(r['start'])}–{fmt_mmss(r['end'])}]"
+            f" [{r['speaker']}] {r['text']}{tail}")
+
+
+PREAMBLE = """> **分軌剪輯**。文字來源＝混音 canonical 逐字稿(逐軌 ASR 只當救援證據,
+> 不產生正式文字 —— 單軌訊噪比差,whisper 更容易陷入重複迴圈)。
+> 波形只決定「這句歸哪一軌」與「各軌何時靜音」。
+>
+> **兩層模型**:某區間三軌全部沒勾 → 整段移除(時間消失,三軌一起);
+> 有人勾有人沒勾 → 時間保留、沒勾的那一軌在該區間靜音。
+> 沒有任何 block 覆蓋的軌 ＝ 預設關著(常態衰減),不必特別標。
+> `（非詞彙出聲／待辨 N.Ns）`＝該軌有出聲但沒有文字(嗯聲/呼吸/碰桌都可能),
+> **預設不勾＝該軌該區間靜音**;要留就勾回來。
+> `~~刪除線~~`＝**該講者軌**的字級靜音,不會影響其他軌。
+> 同一軌兩個重疊 block 勾選矛盾 → render 直接 FAIL,不猜。
+>
+> 出片:`python3 scripts/audio/render_cut.py --session sessions/<slug> \\
+> --plan cutplan.pertrack.md --out final_cut_pertrack.mp3`
+"""
+
+
+def build_md(session_name: str, groups: list[dict], rows: list[dict],
+             low_rows: list[dict] | None = None) -> str:
+    """節目單(搬過來的結構)＋逐軌列,依時間排序;低信心候選收進折疊區。
+
+    折疊區**不能**用 `## 標題` —— parse_program 會把它當成 podcast 章節。
+    """
+    ent = [((g["anchor"], 0, g["seq"]), g["lines"]) for g in groups]
+    ent += [((r["start"], 1, r["id"]), [_row_line(r)]) for r in rows]
+    lines = [f"# Cutplan（分軌）— {session_name}", "", PREAMBLE]
+    for _k, ls in sorted(ent, key=lambda x: (x[0][0], x[0][1], str(x[0][2]))):
+        lines += ls
+    if low_rows:
+        lines += ["", "<details>",
+                  f"<summary>低信心非詞彙出聲候選 {len(low_rows)} 筆"
+                  f"（預設不勾＝已靜音；要撈回來才展開）</summary>", ""]
+        lines += [_row_line(r) for r in sorted(low_rows,
+                                               key=lambda r: r["start"])]
+        lines += ["", "</details>"]
+    return "\n".join(lines) + "\n"
+
+
+def pick_visible(events: list[dict], duration: float, per_min: float = 2.0,
+                 high_db: float = 6.0):
+    """可見候選 ≤每分鐘 per_min 列,且只收高信心(超出門檻 ≥high_db);其餘折疊。"""
+    ranked = sorted(events, key=lambda e: -e["score"])
+    budget = int(duration / 60.0 * per_min)
+    vis = [e for e in ranked if e["score"] >= high_db][:budget]
+    keep = {id(e) for e in vis}
+    return vis, [e for e in ranked if id(e) not in keep]
+
+
+# ── 音訊 ────────────────────────────────────────────────────────────────
+def track_power(path: Path, hop: float = HOP, sr: int = SR):
+    """整軌 → frame 功率序列(線性)。80Hz high-pass 先砍掉桌面撞擊與空調隆隆。"""
+    import numpy as np
     raw = subprocess.run(
-        ["ffmpeg", "-v", "error", "-i", str(path), "-ac", "1",
-         "-ar", str(ENV_RATE), "-f", "f32le", "-"],
+        ["ffmpeg", "-v", "error", "-i", str(path), "-ac", "1", "-ar", str(sr),
+         "-af", "highpass=f=80", "-f", "f32le", "-"],
         capture_output=True, check=True).stdout
-    a = array.array("f")
-    a.frombytes(raw)
-    return [abs(x) for x in a]
-
-
-def is_artifact(text: str) -> bool:
-    """whisper 重複迴圈/亂碼 artifact 偵測。
-
-    2026-08-11 實踩:Mars 軌 309-314s 的 words.json 是「嘗」×40 + U+FFFD。
-    原本埋在一個長 cue 裡看不見,block 細切後被攤成一整排垃圾 block。
-    混音線早有同款守門(render_cut 丟棄 >3s 的異常長 word,EP16「反而」×N)。
-    """
-    t = text.strip()
-    if not t:
-        return True
-    if "\ufffd" in t:                       # 解碼失敗的替代字元
-        return True
-    run = best = 1
-    for a, b in zip(t, t[1:]):
-        run = run + 1 if a == b else 1
-        best = max(best, run)
-    if best >= ARTIFACT_MIN_RUN:
-        return True
-    # 整句只由 1-2 種字元組成且夠長(「嘗嘗嘗」「反而反而反而」型)
-    return len(t) >= 6 and len(set(t)) <= 2
-
-
-def rms_db(env: list[float], a: float, b: float) -> float:
-    i, j = int(a * ENV_RATE), int(b * ENV_RATE)
-    seg = env[max(0, i):max(i + 1, j)]
-    if not seg:
-        return -120.0
-    m = math.sqrt(sum(x * x for x in seg) / len(seg))
-    return 20 * math.log10(m) if m > 1e-9 else -120.0
-
-
-def calibrate_bleed(tracks: list[dict], dur: float,
-                    dominance: float = 12.0) -> dict:
-    """量每一對軌的串音增益 g[i][j] ≈「j 講話時,i 軌會收到多少」(dB,負值)。
-
-    取樣窗只挑「j 明顯獨大(領先第二名 ≥dominance dB)」的時刻——那種時刻 i 軌
-    收到的幾乎純粹是串音。再取這些差值的**第 30 百分位**當估計值:i 自己也在
-    出聲的窗會把差值往上拉,取低分位數才抓得到「i 安靜時」的真實串音底線。
-    """
-    n = len(tracks)
-    samples = {(i, j): [] for i in range(n) for j in range(n) if i != j}
-    t = 0.0
-    while t + STEP <= dur:
-        lv = [rms_db(tk["env"], t, t + STEP) for tk in tracks]
-        order = sorted(range(n), key=lambda k: lv[k], reverse=True)
-        j, second = order[0], order[1]
-        if lv[j] > -60 and lv[j] - lv[second] >= dominance:
-            for i in range(n):
-                if i != j:
-                    samples[(i, j)].append(lv[i] - lv[j])
-        t += STEP
-    g = {}
-    for (i, j), xs in samples.items():
-        if len(xs) < 20:
-            g[(i, j)] = -12.0     # 樣本太少 → 保守估一個偏大的串音,寧可少抓
-        else:
-            xs.sort()
-            g[(i, j)] = xs[int(len(xs) * 0.30)]
-    return g
-
-
-def excess_db(tracks: list[dict], g: dict, i: int, a: float, b: float) -> float:
-    """track i 在 [a,b] 的能量,超出「純串音能解釋的量」多少 dB。"""
-    mine = rms_db(tracks[i]["env"], a, b)
-    pred = max((rms_db(tracks[j]["env"], a, b) + g[(i, j)]
-                for j in range(len(tracks)) if j != i), default=-120.0)
-    return mine - pred
+    x = np.frombuffer(raw, dtype="<f4").astype(np.float64)
+    step = int(round(sr * hop))
+    n = (len(x) // step) * step
+    return (x[:n] ** 2).reshape(-1, step).mean(axis=1)
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="逐軌逐字稿 → 逐軌 cutplan blocks")
+    import numpy as np
+    from pertrack_attrib import (annotate_canonical, calibrate_bleed,
+                                 cfar_percentile, db, drop_self_adjacent,
+                                 find_events, integrate, owner_runs,
+                                 predict_bleed_db, split_phrase)
+
+    ap = argparse.ArgumentParser(description="canonical 逐字稿＋三軌波形 → 逐軌 cutplan")
     ap.add_argument("--session", required=True)
-    ap.add_argument("--max-secs", type=float, default=1.2,
-                    help="block 長度上限(秒,0=不強制切)。2026-08-11 MM 定粒度:"
-                         "「每秒一個 block 可以被勾選,block 內字級精簡發揮作用」。"
-                         "超過就在最大字間空隙再對切,切點永遠落在字與字之間。"
-                         "細切還有第二個好處:口頭禪更常自成一個 block,"
-                         "「整句就是它」那條自動劃線規則(70%% 精確度)涵蓋率跟著上升")
-    ap.add_argument("--bc-excess", type=float, default=10.0,
-                    help="附和列的門檻要更嚴(預設 10.0dB)——6dB 會把呼吸/椅子/"
-                         "環境音全抓進來(EP16 實測 1840 段,cutplan 沒法看)")
-    ap.add_argument("--bc-floor", type=float, default=-45.0,
-                    help="附和列的絕對音量下限(dB),濾掉呼吸與細碎雜音")
-    ap.add_argument("--backchannel-min", type=float, default=0.3,
-                    help="無文字的出聲段要多長才成一列(秒,預設 0.3)")
+    ap.add_argument("--plan", default="cutplan.md", help="搬結構用的來源節目單")
     ap.add_argument("--out-md", default="cutplan.pertrack.md")
+    ap.add_argument("--margin", type=float, default=3.0,
+                    help="歸屬所需的領先幅度(dB);不足就標歸屬不確定,不硬選")
+    ap.add_argument("--stable", type=float, default=0.2)
+    ap.add_argument("--switch", type=float, default=0.18)
+    ap.add_argument("--snap", type=float, default=0.25,
+                    help="換手點找 canonical 字界的搜尋半徑(秒);找不到就不切")
+    ap.add_argument("--phrase-min", type=float, default=0.4)
+    ap.add_argument("--phrase-max", type=float, default=1.2)
+    ap.add_argument("--cfar-pct", type=float, default=99.5)
+    ap.add_argument("--floor-margin", type=float, default=6.0)
+    ap.add_argument("--gap-close", type=float, default=0.08)
+    ap.add_argument("--voicing-min", type=float, default=0.12)
+    ap.add_argument("--voicing-guard", type=float, default=0.25,
+                    help="出聲事件距離自己台詞多近就丟掉(秒)。預設不勾＝靜音,"
+                         "緊貼自己字頭的事件留著會把字頭削掉")
+    ap.add_argument("--visible-per-min", type=float, default=2.0)
+    ap.add_argument("--high-conf", type=float, default=6.0)
     args = ap.parse_args()
 
     sdir = Path(args.session)
-    pt = sdir / "pertrack"
-    if not pt.is_dir():
-        print(f"[pertrack] ✗ 找不到 {pt} — 先對每一軌跑 transcribe_local.py",
-              file=sys.stderr)
-        return 2
-    srts = sorted(pt.glob("*.srt"))
-    if not srts:
-        print(f"[pertrack] ✗ {pt} 裡沒有逐軌 SRT", file=sys.stderr)
-        return 2
-
-    tracks = []
-    for s in srts:
-        speaker = s.stem.split("_", 1)[1] if "_" in s.stem else s.stem
-        wav = sdir / "tracks" / f"{s.stem}.WAV"
-        if not wav.exists():
-            print(f"[pertrack] ✗ 對不到音軌:{wav}", file=sys.stderr)
-            return 2
-        tracks.append({"speaker": speaker, "srt": s, "wav": wav,
-                       "prefix": TRACK_PREFIX.get(speaker, speaker[:1].upper())})
-
-    print(f"[pertrack] 解 {len(tracks)} 軌能量包絡({ENV_RATE}Hz)…")
-    for t in tracks:
-        t["env"] = envelope(t["wav"])
-        cues = parse_srt(t["srt"])
-        wj = t["srt"].with_suffix(".words.json")
-        if args.max_secs > 0 and wj.exists():
-            words = json.loads(wj.read_text(encoding="utf-8"))
-            fine = []
-            for c in cues:
-                # 用**字的中點**歸屬,不是「時間有交集」——後者會讓相鄰 cue
-                # 共用邊界字,切出來的 block 互相重疊(SOL 評審實測抓到 957 組)。
-                # 同軌重疊 block 會讓 render 的 atomic cell 出現矛盾勾選狀態。
-                ws = [w for w in words
-                      if c["start"] - 1e-6 <= (w["start"] + w["end"]) / 2 < c["end"] + 1e-6]
-                parts = split_words_to_phrases(ws, c["text"], max_secs=args.max_secs)
-                fine.extend(parts if parts else [c])
-            print(f"    {t['speaker']:6s} {len(cues)} cues → 細切 {len(fine)}"
-                  f"(上限 {args.max_secs}s)")
-            cues = fine
-        else:
-            print(f"    {t['speaker']:6s} {len(cues)} cues")
-        t["cues"] = cues
-    dur = min(len(t["env"]) for t in tracks) / ENV_RATE
-
-    g = calibrate_bleed(tracks, dur)
-    print("[pertrack] 串音校準(收到方 ← 講話方):")
-    for i, ti in enumerate(tracks):
-        row = "  ".join(f"{tracks[j]['speaker']}:{g[(i, j)]:+.1f}dB"
-                        for j in range(len(tracks)) if j != i)
-        print(f"    {ti['speaker']:6s} ← {row}")
-
-    # ── 有文字的 block:**波形支配**判定(2026-08-11 MM:「用波形看這段聲音
-    #    主要在誰那,就用誰的為主」)。文字歸屬與附和偵測是兩件事,要用兩個判準:
-    #      文字歸屬 → 支配(誰大聲就是誰的話);串音轉出來的重複句自然被排除
-    #      附和偵測 → 串音校準的 excess(見下一段);小聲但真的有出聲照樣抓得到
-    #    先前把兩者都換成 excess,結果 KIN 附和時他的軌通過檢定,連帶把 Mars
-    #    串音轉出來的文字也算成 KIN 的話(K0054-K0057)。分開用就對了。 ──
-    n_art = 0
-    for i, t in enumerate(tracks):
-        kept = []
-        for c in t["cues"]:
-            lv = [(rms_db(o["env"], c["start"], c["end"]), j)
-                  for j, o in enumerate(tracks)]
-            lv.sort(reverse=True)
-            if lv[0][1] != i:
-                continue                      # 這段主要不在他那,串音而已
-            if is_artifact(c["text"]):
-                n_art += 1
-                continue
-            kept.append({"start": round(c["start"], 3), "end": round(c["end"], 3),
-                         "text": c["text"].strip(), "kind": "speech",
-                         "excess_db": round(lv[0][0] - lv[1][0], 1)})
-        t["kept"] = kept
-        print(f"[pertrack] {t['speaker']:6s} {len(t['cues'])} 句 → 自己的 "
-              f"{len(kept)} 句(判為串音 {len(t['cues']) - len(kept)})")
-
-    if n_art:
-        print(f"[pertrack] ⚠ 丟棄 {n_art} 個 whisper 重複迴圈/亂碼 block"
-              f"(如 Mars 軌 5:09-5:14 的「嘗」×40)")
-
-    # ── 無文字的出聲段=附和/雜音:掃全軌,扣掉已被文字 block 覆蓋的部分 ──
-    # 只收「別人正在講話時」的出聲——那才是壓在別人話底下、人審剪不掉的附和。
-    # 沒人講話時的獨立出聲要嘛是他自己的話(whisper 漏轉)、要嘛是雜音,不在本
-    # 功能範圍;全都列出來只會把 cutplan 洗版(EP16 實測 1840 段)。
-    others_speech = {}
-    for i, t in enumerate(tracks):
-        spans = [(b["start"], b["end"]) for j, o in enumerate(tracks) if j != i
-                 for b in o["kept"] if b["kind"] == "speech"]
-        others_speech[i] = sorted(spans)
-
-    for i, t in enumerate(tracks):
-        covered = [(b["start"], b["end"]) for b in t["kept"]]
-        runs, cur = [], None
-        x = 0.0
-        while x + STEP <= dur:
-            hit = (excess_db(tracks, g, i, x, x + STEP) >= args.bc_excess
-                   and rms_db(t["env"], x, x + STEP) >= args.bc_floor
-                   and any(a <= x < b for a, b in others_speech[i]))
-            if hit and not any(a <= x < b for a, b in covered):
-                cur = [x, x + STEP] if cur is None else [cur[0], x + STEP]
-            else:
-                if cur and cur[1] - cur[0] >= args.backchannel_min:
-                    runs.append(cur)
-                cur = None
-            x += STEP
-        if cur and cur[1] - cur[0] >= args.backchannel_min:
-            runs.append(cur)
-        for a, b in runs:
-            t["kept"].append({"start": round(a, 3), "end": round(b, 3),
-                              "text": f"（附和/雜音 {b - a:.1f}s）",
-                              "kind": "backchannel", "excess_db": None})
-        t["kept"].sort(key=lambda z: z["start"])
-        print(f"[pertrack] {t['speaker']:6s} 另有 {len(runs)} 段無文字出聲"
-              f"（附和/雜音，預設不勾＝靜音）")
-
-    for t in tracks:
-        for i2, b in enumerate(t["kept"], 1):
-            b["id"] = f"{t['prefix']}{i2:04d}"
-
     cj = sdir / "cutplan.json"
     cp = json.loads(cj.read_text(encoding="utf-8"))
-    cp["tracks"] = [{"speaker": t["speaker"], "prefix": t["prefix"],
-                     "file": f"tracks/{t['wav'].name}",
-                     "blocks": [{k: b[k] for k in
-                                 ("id", "start", "end", "text", "kind")}
-                                for b in t["kept"]]} for t in tracks]
+    words = json.loads((sdir / "words.json").read_text(encoding="utf-8"))
+    wavs = sorted(p for p in (sdir / "tracks").glob("*")
+                  if p.suffix.lower() in (".wav", ".flac"))
+    if not wavs:
+        print(f"[pertrack] ✗ {sdir/'tracks'} 沒有分軌音檔", file=sys.stderr)
+        return 2
+    names = [p.stem.split("_", 1)[1] if "_" in p.stem else p.stem for p in wavs]
+    pfx = derive_prefixes(names)
+    print(f"[pertrack] {len(wavs)} 軌:"
+          + "、".join(f"{n}({pfx[n]})" for n in names))
+
+    print(f"[pertrack] 解能量包絡（{SR}Hz → {HOP*1000:.0f}ms frame）…")
+    pw = [track_power(p) for p in wavs]
+    nf = min(len(x) for x in pw)
+    P = np.vstack([x[:nf] for x in pw])
+    L_attr = db(np.vstack([integrate(P[i], int(ATTR_WIN / HOP))
+                           for i in range(len(P))]))
+    L_scan = db(np.vstack([integrate(P[i], max(1, int(SCAN_WIN / HOP)))
+                           for i in range(len(P))]))
+    dur = nf * HOP
+
+    g = calibrate_bleed(L_attr)
+    print("[pertrack] 串音校準(收到方 ← 講話方):")
+    for i, n in enumerate(names):
+        print(f"    {n:6s} ← " + "  ".join(
+            f"{names[j]}:{g[i][j]:+.1f}dB" for j in range(len(names)) if j != i))
+
+    # ── D1/D2:canonical phrase → 逐軌歸屬 ──────────────────────────────
+    idx = {n: i for i, n in enumerate(names)}
+    per_track: dict[str, list[dict]] = {n: [] for n in names}
+    n_split = n_unc = n_phr = 0
+    for b in cp["blocks"]:
+        ws = [w for w in words
+              if b["start"] - 1e-6 <= (w["start"] + w["end"]) / 2 < b["end"] + 1e-6]
+        if not ws:
+            continue
+        # 文字一律取 canonical block 的字(words.json 可能還是校稿前的版本)
+        ws = annotate_canonical(ws, b["text"])
+        for cue in split_words_to_phrases(ws, b["text"], max_secs=args.phrase_max):
+            cw = [w for w in ws
+                  if cue["start"] - 1e-6 <= (w["start"] + w["end"]) / 2
+                  < cue["end"] + 1e-6]
+            if not cw:
+                continue
+            runs = owner_runs(L_attr, HOP, cue["start"], cue["end"],
+                              args.margin, args.stable, args.switch)
+            parts = enforce_phrase_len(
+                split_phrase(cw, b["text"], runs, args.snap),
+                args.phrase_min, args.phrase_max)
+            n_phr += 1
+            n_split += max(0, len(parts) - 1)
+            for p in parts:
+                owner = p["owner"]
+                reason = p["reason"]
+                if owner is None:
+                    # 不硬選:退回 diarize 的講者標籤並標記,交人審
+                    owner = idx.get(b.get("speaker", ""), None)
+                    n_unc += 1
+                    reason = (reason or "歸屬不確定") + \
+                        f"（暫掛 diarize 判的 {b.get('speaker','?')}）"
+                if owner is None:
+                    owner = int(np.argmax(L_attr[:, int(p["start"] / HOP)]))
+                per_track[names[owner]].append(
+                    {"start": round(p["start"], 3), "end": round(p["end"], 3),
+                     "text": p["text"].strip(), "kind": "speech", "keep": True,
+                     "speaker": names[owner], "reason": reason, "src": b["id"]})
+    print(f"[pertrack] canonical phrase {n_phr} 句 → 換手切開 {n_split} 處、"
+          f"歸屬不確定 {n_unc} 處")
+
+    # ── D3:非詞彙出聲(CFAR 自適應門檻)──────────────────────────────────
+    cov = np.zeros((len(names), nf), dtype=bool)
+    for n, rows in per_track.items():
+        for r in rows:
+            cov[idx[n], int(r["start"] / HOP):int(r["end"] / HOP) + 1] = True
+    anyone = cov.any(axis=0)
+    quiet = ~anyone & (L_attr.max(axis=0) < np.percentile(L_attr.max(axis=0), 20))
+    noise = [float(cfar_percentile(L_scan[i][quiet], args.cfar_pct,
+                                   default=float(np.percentile(L_scan[i], 1))))
+             for i in range(len(names))]
+    pred = predict_bleed_db(L_scan, g, noise)
+    resid = L_scan - pred
+
+    order = np.argsort(-L_attr, axis=0)
+    ai = np.arange(nf)
+    lead = L_attr[order[0], ai] - L_attr[order[1], ai]
+    events: list[dict] = []
+    for i, n in enumerate(names):
+        neg = (lead >= 12.0) & (order[0] != i) & ~cov[i]
+        thr = cfar_percentile(resid[i][neg], args.cfar_pct, default=10.0)
+        floor = noise[i] + args.floor_margin
+        others = cov[[j for j in range(len(names)) if j != i]].any(axis=0)
+        hits = (resid[i] >= thr) & (L_scan[i] >= floor) & others & ~cov[i]
+        dur_thr = cfar_percentile(
+            [b - a for a, b in find_events(hits & neg, HOP, 0.0, 0.0)],
+            args.cfar_pct, default=0.0) or 0.0
+        min_dur = max(args.voicing_min, dur_thr)
+        own = [(r["start"], r["end"]) for r in per_track[n]
+               if r["kind"] == "speech"]
+        raw_ev = [{"track": n, "start": round(a, 3), "end": round(b, 3),
+                   "score": float(np.median(
+                       resid[i][int(a / HOP):max(int(a / HOP) + 1,
+                                                 int(b / HOP))]) - thr),
+                   "thr": float(thr)}
+                  for a, b in find_events(hits, HOP, args.gap_close, min_dur)]
+        kept_ev = drop_self_adjacent(raw_ev, own, args.voicing_guard)
+        events += kept_ev
+        print(f"[pertrack] {n:6s} CFAR 門檻 excess ≥{thr:+.1f}dB、"
+              f"絕對下限 {floor:.1f}dB、最短 {min_dur*1000:.0f}ms → "
+              f"{len(kept_ev)} 段(貼著自己台詞丟棄 "
+              f"{len(raw_ev) - len(kept_ev)} 段)")
+
+    vis, low = pick_visible(events, dur, args.visible_per_min, args.high_conf)
+    for e in events:
+        e_row = {"start": e["start"], "end": e["end"],
+                 "text": f"（非詞彙出聲／待辨 {e['end'] - e['start']:.1f}s）",
+                 "kind": "voicing", "keep": False, "speaker": e["track"],
+                 "reason": f"超出串音預測 {e['score'] + e['thr']:+.1f}dB"
+                           f"（門檻 {e['thr']:+.1f}dB）", "src": ""}
+        e["row"] = e_row
+        per_track[e["track"]].append(e_row)
+
+    # ── 編號 ＋ 落檔 ──────────────────────────────────────────────────
+    rows_all: list[dict] = []
+    tracks_json = []
+    for i, n in enumerate(names):
+        rows = sorted(per_track[n], key=lambda r: (r["start"], r["end"]))
+        for k, r in enumerate(rows, 1):
+            r["id"] = f"{pfx[n]}{k:04d}"
+        rows_all += rows
+        tracks_json.append({
+            "speaker": n, "prefix": pfx[n], "file": f"tracks/{wavs[i].name}",
+            "blocks": [{k: r[k] for k in ("id", "start", "end", "text", "kind",
+                                          "src")} for r in rows]})
+    cp["tracks"] = tracks_json
     cj.write_text(json.dumps(cp, ensure_ascii=False), encoding="utf-8")
 
-    rows = sorted(((b, t) for t in tracks for b in t["kept"]),
-                  key=lambda x: (x[0]["start"], x[0]["id"]))
-    lines = [f"# Cutplan（分軌）— {sdir.name}", "",
-             "> 三軌各自轉錄 → **串音校準**判定每句是誰講的（不是比誰大聲——"
-             "兩人同時出聲時小聲的那個會被誤判成串音）。",
-             "> `（附和/雜音）`列＝該軌有出聲但沒有逐字稿（whisper 不轉「嗯」"
-             "這種非詞彙音），**預設不勾＝該軌該區間靜音**，要保留就勾回來。",
-             "> **兩層剪輯**：某區間三軌全部沒勾＝整段移除（時間消失）；"
-             "有人勾有人沒勾＝時間保留、沒勾的那軌靜音。",
-             "> 改勾選＝剪輯；`~~刪除線~~`＝字級精剪。", ""]
-    cur = None
-    for b, t in rows:
-        if t["speaker"] != cur:
-            lines.append(f"## 軌 {t['speaker']}")
-            cur = t["speaker"]
-        mark = " " if b["kind"] == "backchannel" else "x"
-        lines.append(f"- [{mark}] {b['id']} [{fmt_mmss(b['start'])}–"
-                     f"{fmt_mmss(b['end'])}] [{t['speaker']}] {b['text']}")
+    low_ids = {id(e["row"]) for e in low}
+    id_time = {b["id"]: b["start"] for b in cp["blocks"]}
+    id_time.update({gp["id"]: gp["start"] for gp in cp.get("gaps", [])})
+    src_md = (sdir / args.plan).read_text(encoding="utf-8").splitlines()
+    groups = carry_over_program(src_md, id_time)
+    md = build_md(sdir.name, groups,
+                  [r for r in rows_all if id(r) not in low_ids],
+                  [r for r in rows_all if id(r) in low_ids])
     out = sdir / args.out_md
-    out.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    out.write_text(md, encoding="utf-8")
 
-    n_sp = sum(1 for t in tracks for b in t["kept"] if b["kind"] == "speech")
-    n_bc = sum(1 for t in tracks for b in t["kept"] if b["kind"] == "backchannel")
-    print(f"[pertrack] ✓ {n_sp} 句語音 ＋ {n_bc} 段附和/雜音 → {out.name}")
+    n_sp = sum(1 for r in rows_all if r["kind"] == "speech")
+    print(f"[pertrack] ✓ {n_sp} 句語音 ＋ 非詞彙出聲 {len(vis)} 可見／"
+          f"{len(low)} 折疊（{len(vis)/max(dur/60,1):.1f} 列/分）→ {out.name}")
     return 0
 
 

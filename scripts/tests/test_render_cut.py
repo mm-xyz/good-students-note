@@ -28,7 +28,49 @@ sys.path.insert(0, str(AUDIO_DIR))
 from render_cut import (parse_program, parse_strikes, strike_removals,  # noqa: E402
                         pause_removals, word_guard, subtract, merge_ranges,
                         snap_boundaries, validate_program, bgm_envelope,
-                        env_to_expr, resolve_music, extend_unit_edges)
+                        env_to_expr, resolve_music, extend_unit_edges,
+                        enforce_monotonic)
+
+
+class TestEnforceMonotonic(unittest.TestCase):
+    """剪點微調(snap/谷底/word_guard)是逐 unit 各自做的,前一段的尾巴與後一段的
+    頭可能被推到互相重疊 —— 那段來源音訊就會**播兩次**。
+
+    2026-08-11 實測:混音線 v7 有 1 處 0.48s 重複,分軌線因為剪點密集放大到
+    44 處共 15.6s(12:16 那句「任務」在成品裡念了兩次,本地 whisper 重轉抓到)。
+    """
+
+    def _seg(self, a, b, clip=False):
+        return {"kind": "speech", "a": a, "b": b, "clip": clip}
+
+    def test_overlapping_neighbours_are_clamped(self):
+        segs = [self._seg(0.0, 10.0), self._seg(9.0, 20.0)]
+        out = enforce_monotonic(segs)
+        self.assertEqual([(s["a"], s["b"]) for s in out],
+                         [(0.0, 10.0), (10.0, 20.0)])
+
+    def test_non_overlapping_neighbours_are_untouched(self):
+        segs = [self._seg(0.0, 10.0), self._seg(12.0, 20.0)]
+        self.assertEqual([(s["a"], s["b"]) for s in enforce_monotonic(segs)],
+                         [(0.0, 10.0), (12.0, 20.0)])
+
+    def test_a_swallowed_segment_is_dropped(self):
+        segs = [self._seg(0.0, 10.0), self._seg(9.9, 10.02), self._seg(11.0, 12.0)]
+        out = enforce_monotonic(segs, min_frag=0.12)
+        self.assertEqual([(s["a"], s["b"]) for s in out],
+                         [(0.0, 10.0), (11.0, 12.0)])
+
+    def test_clip_segments_may_legitimately_go_backwards(self):
+        segs = [self._seg(100.0, 110.0, clip=True),
+                self._seg(20.0, 30.0, clip=True)]
+        self.assertEqual([(s["a"], s["b"]) for s in enforce_monotonic(segs)],
+                         [(100.0, 110.0), (20.0, 30.0)])
+
+    def test_music_and_silence_units_do_not_break_the_chain(self):
+        segs = [self._seg(0.0, 10.0), {"kind": "silence", "dur": 2.0},
+                self._seg(9.0, 20.0)]
+        out = enforce_monotonic(segs)
+        self.assertEqual(out[2]["a"], 10.0)
 
 
 def w(start, end, word):
