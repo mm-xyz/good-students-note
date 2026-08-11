@@ -158,7 +158,10 @@ def next_out_name(sdir: Path, given: str | None) -> str:
     return f"final_cut_v{n}.mp3"
 
 
-VER_RE = re.compile(r"^v(\d+)_\d{8}-\d{4}")
+# 版本目錄:`v3_20260810-1830`,但**人手取的名字常常沒有 -HHMM**
+# (EP16 的 `v09_20260811-對照組`、`v10_20260811-你的定稿`)。時間碼設成選用,
+# 否則那些目錄不被計數,下一版的號碼會往回跳到它們前面(2026-08-12 實踩)。
+VER_RE = re.compile(r"^v(\d+)_\d{8}")
 
 
 def drive_cutplan(ddir: Path) -> Path:

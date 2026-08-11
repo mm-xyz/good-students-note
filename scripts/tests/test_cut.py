@@ -212,6 +212,22 @@ class TestVersionName(unittest.TestCase):
             n = version_name(s, d, False, dt.datetime(2026, 8, 11, 18, 30))
             self.assertEqual(n, "v10_20260811-1830")
 
+    def test_counts_hand_labelled_version_dirs(self):
+        """人手取名的版本目錄也要算進最大號(2026-08-12 EP16 實踩)。
+
+        EP16 有 `v09_20260811-對照組` 與 `v10_20260811-你的定稿` —— 手取的
+        名字沒有 `-HHMM`,舊的 VER_RE 認不得,於是下一版算成 **v8**,排序上
+        跑到 v09/v10 前面,正是 next_out_name docstring 要避免的錯亂。
+        """
+        import datetime as dt
+        with tempfile.TemporaryDirectory() as td:
+            s = Path(td) / "s"
+            (s / "v07_20260811-0010_初剪").mkdir(parents=True)
+            (s / "v09_20260811-對照組").mkdir()
+            (s / "v10_20260811-你的定稿").mkdir()
+            n = version_name(s, None, False, dt.datetime(2026, 8, 12, 0, 5))
+            self.assertEqual(n, "v11_20260812-0005")
+
     def test_ai_suffix_and_empty_dirs(self):
         import datetime as dt
         with tempfile.TemporaryDirectory() as td:
