@@ -1,0 +1,460 @@
+<!--
+  scripts/cutplan-editor/Index.html — Cutplan 編輯器前端(#674)。
+
+  手機優先:集數下拉 → block 清單。每個 block 只能做兩件事——勾選切換、
+  反白內文加/去刪除線。id、時間碼、speaker、逐字稿文字全部唯讀渲染
+  (不是 <input>,是純文字 <span>,連 contenteditable 都沒開)。
+
+  存檔一律經過 CutplanCore.serializeCutplan() 重組全文字串送後端,前端不自己
+  拼字串(規格要求)。CutplanCore 來自 cutplan-core-inline.html
+  (= cutplan-core.js 逐字包一層 <script>,見 tests/inline-sync.test.js)。
+-->
+<style>
+  :root {
+    color-scheme: light dark;
+    --fg: #1a1a1a;
+    --bg: #ffffff;
+    --muted: #6b6b6b;
+    --border: #d9d9d9;
+    --accent: #0a6b4d;
+    --danger: #a3321f;
+    --card-bg: #fafafa;
+    --strike-bg: #ffe8b3;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --fg: #eaeaea;
+      --bg: #121212;
+      --muted: #9a9a9a;
+      --border: #3a3a3a;
+      --accent: #4fd1a5;
+      --danger: #ff6b52;
+      --card-bg: #1c1c1c;
+      --strike-bg: #4a3a12;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang TC",
+      "Noto Sans TC", sans-serif;
+    background: var(--bg);
+    color: var(--fg);
+    padding-bottom: 88px; /* 留給底部固定的儲存列 */
+  }
+  header {
+    position: sticky;
+    top: 0;
+    z-index: 5;
+    background: var(--bg);
+    border-bottom: 1px solid var(--border);
+    padding: 10px 12px;
+  }
+  header h1 {
+    font-size: 15px;
+    margin: 0 0 8px;
+    color: var(--muted);
+    font-weight: 600;
+  }
+  select {
+    width: 100%;
+    font-size: 16px;
+    padding: 8px;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    background: var(--card-bg);
+    color: var(--fg);
+  }
+  #status {
+    padding: 8px 12px;
+    font-size: 13px;
+    color: var(--muted);
+    min-height: 18px;
+  }
+  #status.error { color: var(--danger); }
+  #status.ok { color: var(--accent); }
+  #blockList { padding: 8px 12px; }
+  .chapter-divider {
+    margin: 18px 0 8px;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--accent);
+    border-top: 1px dashed var(--border);
+    padding-top: 10px;
+  }
+  .block-card {
+    display: flex;
+    gap: 10px;
+    padding: 10px;
+    margin-bottom: 8px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--card-bg);
+  }
+  .block-card input[type="checkbox"] {
+    width: 22px;
+    height: 22px;
+    margin-top: 2px;
+    flex: none;
+  }
+  .block-main { flex: 1; min-width: 0; }
+  .block-meta {
+    font-size: 11px;
+    color: var(--muted);
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    margin-bottom: 4px;
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+  }
+  .speaker-tag {
+    font-weight: 600;
+    color: var(--fg);
+  }
+  .block-body {
+    font-size: 16px;
+    line-height: 1.6;
+    -webkit-user-select: text;
+    user-select: text;
+  }
+  .block-body s { background: var(--strike-bg); text-decoration: line-through; }
+  .block-card.unchecked .block-body { opacity: .55; }
+  #strikeBar {
+    position: fixed;
+    left: 50%;
+    bottom: 76px;
+    transform: translateX(-50%);
+    display: none;
+    z-index: 10;
+  }
+  #strikeBar button {
+    font-size: 15px;
+    padding: 10px 18px;
+    border-radius: 999px;
+    border: none;
+    background: var(--accent);
+    color: #04241a;
+    font-weight: 700;
+    box-shadow: 0 2px 10px rgba(0, 0, 0, .3);
+  }
+  footer {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    padding: 10px 12px calc(10px + env(safe-area-inset-bottom));
+    background: var(--bg);
+    border-top: 1px solid var(--border);
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    z-index: 8;
+  }
+  footer .dirty-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--danger);
+    display: none;
+  }
+  footer .dirty-dot.show { display: inline-block; }
+  footer button {
+    flex: 1;
+    font-size: 16px;
+    padding: 12px;
+    border-radius: 10px;
+    border: none;
+    background: var(--accent);
+    color: #04241a;
+    font-weight: 700;
+  }
+  footer button:disabled { opacity: .5; }
+  .empty-hint {
+    color: var(--muted);
+    font-size: 14px;
+    padding: 24px 4px;
+    text-align: center;
+  }
+</style>
+
+<header>
+  <h1>Cutplan 編輯器 — 只能勾選 / 加刪除線,其餘唯讀</h1>
+  <select id="episodeSelect">
+    <option value="">載入集數清單中…</option>
+  </select>
+</header>
+
+<div id="status"></div>
+<div id="blockList"></div>
+
+<div id="strikeBar"><button id="strikeBtn" type="button"></button></div>
+
+<footer>
+  <span class="dirty-dot" id="dirtyDot" title="尚未儲存"></span>
+  <button id="saveBtn" type="button" disabled>儲存</button>
+</footer>
+
+<?!= include('cutplan-core-inline'); ?>
+<script>
+(function () {
+  'use strict';
+  var Core = window.CutplanCore;
+
+  var state = {
+    fileId: null,
+    doc: null,
+    dirty: false,
+    selection: null, // {lineIndex, start, end, mode}
+  };
+
+  var els = {
+    episodeSelect: document.getElementById('episodeSelect'),
+    status: document.getElementById('status'),
+    blockList: document.getElementById('blockList'),
+    strikeBar: document.getElementById('strikeBar'),
+    strikeBtn: document.getElementById('strikeBtn'),
+    saveBtn: document.getElementById('saveBtn'),
+    dirtyDot: document.getElementById('dirtyDot'),
+  };
+
+  function setStatus(msg, kind) {
+    els.status.textContent = msg || '';
+    els.status.className = kind || '';
+  }
+
+  function setDirty(v) {
+    state.dirty = v;
+    els.dirtyDot.classList.toggle('show', v);
+    els.saveBtn.disabled = !v;
+  }
+
+  // ── 集數清單 ──────────────────────────────────────────────────────────
+
+  function loadEpisodeList() {
+    setStatus('載入集數清單…');
+    google.script.run
+      .withSuccessHandler(function (episodes) {
+        els.episodeSelect.innerHTML = '';
+        var placeholder = document.createElement('option');
+        placeholder.value = '';
+        placeholder.textContent = episodes.length
+          ? '選一集…'
+          : '(找不到任何 cutplan.md)';
+        els.episodeSelect.appendChild(placeholder);
+        episodes.forEach(function (ep) {
+          var opt = document.createElement('option');
+          opt.value = ep.fileId;
+          opt.textContent = ep.name + (ep.layout === 'meta' ? '(_meta)' : '');
+          els.episodeSelect.appendChild(opt);
+        });
+        setStatus(episodes.length ? '' : '找不到任何集數的 cutplan.md', episodes.length ? '' : 'error');
+      })
+      .withFailureHandler(function (err) {
+        setStatus('讀取集數清單失敗:' + (err && err.message ? err.message : err), 'error');
+      })
+      .listEpisodes();
+  }
+
+  els.episodeSelect.addEventListener('change', function () {
+    var fileId = els.episodeSelect.value;
+    if (!fileId) return;
+    if (state.dirty && !confirm('目前的編輯還沒儲存,確定要切換集數嗎?')) {
+      els.episodeSelect.value = state.fileId || '';
+      return;
+    }
+    loadCutplan(fileId);
+  });
+
+  function loadCutplan(fileId) {
+    setStatus('載入 cutplan.md…');
+    els.blockList.innerHTML = '';
+    setDirty(false);
+    google.script.run
+      .withSuccessHandler(function (res) {
+        state.fileId = res.fileId;
+        state.doc = Core.parseCutplan(res.content);
+        render();
+        setStatus('已載入:' + res.name, 'ok');
+      })
+      .withFailureHandler(function (err) {
+        setStatus('載入失敗:' + (err && err.message ? err.message : err), 'error');
+      })
+      .loadCutplan(fileId);
+  }
+
+  // ── 渲染 ──────────────────────────────────────────────────────────────
+
+  // 只有這種 `## 標題` 才當「章節分隔線」顯示;⚙/✂/🎵/➕/🎬 這些結構行
+  // 是 render 用的參數,對人審沒有意義,不顯示(仍然完整保留在 doc 裡,
+  // 只是不在畫面上占位置——存檔時原封不動寫回去)。
+  var CHAPTER_DIVIDER_RE = /^## (?!⚙|✂|🎵|➕|🎬)(.+)$/;
+
+  function render() {
+    els.blockList.innerHTML = '';
+    if (!state.doc) return;
+    var shown = 0;
+    state.doc.lines.forEach(function (line, idx) {
+      if (line.editable) {
+        els.blockList.appendChild(renderBlockCard(line, idx));
+        shown++;
+        return;
+      }
+      var m = CHAPTER_DIVIDER_RE.exec(line.raw);
+      if (m) {
+        var div = document.createElement('div');
+        div.className = 'chapter-divider';
+        div.textContent = '▸ ' + m[1].trim();
+        els.blockList.appendChild(div);
+      }
+    });
+    if (!shown) {
+      var hint = document.createElement('div');
+      hint.className = 'empty-hint';
+      hint.textContent = '這份 cutplan.md 沒有可編輯的 block 行。';
+      els.blockList.appendChild(hint);
+    }
+  }
+
+  function renderBlockCard(line, idx) {
+    var card = document.createElement('div');
+    card.className = 'block-card' + (line.mark === ' ' ? ' unchecked' : '');
+    card.dataset.lineIndex = String(idx);
+
+    var checkbox = document.createElement('input');
+    checkbox.type = 'checkbox';
+    checkbox.checked = line.mark !== ' ';
+    checkbox.addEventListener('change', function () {
+      state.doc = Core.toggleCheckbox(state.doc, idx);
+      setDirty(true);
+      render();
+    });
+    card.appendChild(checkbox);
+
+    var main = document.createElement('div');
+    main.className = 'block-main';
+
+    var meta = document.createElement('div');
+    meta.className = 'block-meta';
+    var idSpan = document.createElement('span');
+    idSpan.textContent = line.id;
+    meta.appendChild(idSpan);
+    var tcSpan = document.createElement('span');
+    tcSpan.textContent = '[' + line.timecode + ']';
+    meta.appendChild(tcSpan);
+    if (line.prefix) {
+      var spk = document.createElement('span');
+      spk.className = 'speaker-tag';
+      spk.textContent = line.prefix.trim();
+      meta.appendChild(spk);
+    }
+    main.appendChild(meta);
+
+    var body = document.createElement('div');
+    body.className = 'block-body';
+    body.dataset.lineIndex = String(idx);
+    var pieces = Core.splitStrikes(line.bodyRaw).pieces;
+    pieces.forEach(function (p) {
+      var node = document.createTextNode(p.raw);
+      if (p.kind === 'struck') {
+        var s = document.createElement('s');
+        s.appendChild(node);
+        body.appendChild(s);
+      } else {
+        body.appendChild(node);
+      }
+    });
+    main.appendChild(body);
+    card.appendChild(main);
+    return card;
+  }
+
+  // ── 反白 → 加/去刪除線 ───────────────────────────────────────────────
+
+  // 把目前的 window selection 換算成「某個 .block-body 容器內」的 clean
+  // 字元座標(逐字元累加 textContent 長度;<s> 標籤不影響座標,因為
+  // splitStrikes 的 clean 座標本來就是「畫面上看得到的文字」的座標)。
+  function resolveSelection() {
+    var sel = window.getSelection();
+    if (!sel || sel.rangeCount === 0 || sel.isCollapsed) return null;
+    var range = sel.getRangeAt(0);
+    var container = range.commonAncestorContainer;
+    var bodyEl = (container.nodeType === 1 ? container : container.parentElement);
+    bodyEl = bodyEl ? bodyEl.closest('.block-body') : null;
+    if (!bodyEl) return null;
+
+    function offsetWithin(node, offset) {
+      var walker = document.createTreeWalker(bodyEl, NodeFilter.SHOW_TEXT, null);
+      var acc = 0;
+      var current;
+      while ((current = walker.nextNode())) {
+        if (current === node) return acc + offset;
+        acc += current.textContent.length;
+      }
+      return acc; // 選取終點剛好在容器尾端(元素節點邊界)
+    }
+
+    var start = offsetWithin(range.startContainer, range.startOffset);
+    var end = offsetWithin(range.endContainer, range.endOffset);
+    if (end < start) { var t = start; start = end; end = t; }
+    if (end <= start) return null;
+    return { lineIndex: Number(bodyEl.dataset.lineIndex), start: start, end: end };
+  }
+
+  document.addEventListener('selectionchange', function () {
+    var picked = resolveSelection();
+    if (!picked) {
+      hideStrikeBar();
+      return;
+    }
+    var line = state.doc.lines[picked.lineIndex];
+    var mode = Core.classifySelection(line.bodyRaw, picked.start, picked.end);
+    if (mode === 'invalid') {
+      hideStrikeBar();
+      return;
+    }
+    state.selection = picked;
+    els.strikeBtn.textContent = mode === 'add' ? '加刪除線' : '去刪除線';
+    els.strikeBar.style.display = 'block';
+  });
+
+  function hideStrikeBar() {
+    state.selection = null;
+    els.strikeBar.style.display = 'none';
+  }
+
+  els.strikeBtn.addEventListener('click', function () {
+    if (!state.selection) return;
+    var { lineIndex, start, end } = state.selection;
+    try {
+      state.doc = Core.applyStrike(state.doc, lineIndex, start, end);
+      setDirty(true);
+    } catch (e) {
+      setStatus('刪除線操作失敗:' + e.message, 'error');
+    }
+    window.getSelection().removeAllRanges();
+    hideStrikeBar();
+    render();
+  });
+
+  // ── 儲存 ──────────────────────────────────────────────────────────────
+
+  els.saveBtn.addEventListener('click', function () {
+    if (!state.doc || !state.fileId) return;
+    els.saveBtn.disabled = true;
+    setStatus('儲存中…');
+    var content = Core.serializeCutplan(state.doc);
+    google.script.run
+      .withSuccessHandler(function () {
+        setDirty(false);
+        setStatus('已儲存 ✓', 'ok');
+      })
+      .withFailureHandler(function (err) {
+        els.saveBtn.disabled = false;
+        setStatus('儲存失敗:' + (err && err.message ? err.message : err), 'error');
+      })
+      .saveCutplan(state.fileId, content);
+  });
+
+  loadEpisodeList();
+})();
+</script>
