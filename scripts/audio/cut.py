@@ -4,12 +4,17 @@ scripts/audio/cut.py — 剪一集 podcast 的一行指令(零 LLM,零 token)
 
     python3 scripts/audio/cut.py --session sessions/<slug> [--out X.mp3] [--yes]
 
-做四件事:
-    1. 對照 Drive 副本與 session 的 cutplan.md,**內容不同時列出語意差異**
-       (哪些 block 的勾選翻了、刪除線增減、✂/⚙ 改了什麼)並讓人選用哪一份
+做五件事(2026-08-11 MM:「這種都應該 script 化」——mkdir、複製到 Drive、
+sync cutplan、備份當下的 cutplan,全部由這支做,不要靠人記得):
+    1. 對照 Drive 副本與 session 的 cutplan,**內容不同時列出語意差異**
+       (哪些 block 的勾選翻了、刪除線增減、✂/⚙ 改了什麼),詢問並預設擇新
     2. 用選定的那份跑 --dry-run,把剪輯摘要印出來給人看一眼
     3. render 出片(檔名自動遞增 vN,不覆蓋既有成品)
-    4. 把 cutplan 與成品同步回 Drive,兩邊保持一致
+    4. **local 與 Drive 各建一個版本目錄**`vN_<時戳>/`,裡面放
+       mp3 ＋ **當次 cutplan 快照** ＋ render.txt(含走哪條剪輯路線)
+    5. 把工作版 cutplan 同步回 Drive,兩邊保持一致
+
+分軌線用 `--plan cutplan.pertrack.md`。`--no-push` 只做 local 不碰 Drive。
 
 為什麼要對照:MM 人審 cutplan 的實際介面是 Drive 副本,但 render 的真相源是
 session 那份(ADR 0001)。2026-07-29 EP16 踩過——編輯全在 Drive、render 吃到
@@ -174,17 +179,34 @@ def drive_cutplan(ddir: Path) -> Path:
     return new
 
 
+def _max_ver(d: Path | None) -> int:
+    if not d or not d.is_dir():
+        return 0
+    return max((int(m.group(1)) for p in d.iterdir() if p.is_dir()
+                for m in [VER_RE.match(p.name)] if m), default=0)
+
+
+def version_name(sdir: Path, ddir: Path | None, ai: bool, now: dt.datetime) -> str:
+    """`v3_20260810-1830-AI`;版本號取 **local 與 Drive 兩邊的最大號** +1。
+
+    只看單邊會讓兩邊版本號分叉(local 有 v9、Drive 只有 v1 → 同一次出片在兩邊
+    叫不同名字,之後對不起來)。-AI 只在有 AI 介入時掛。
+    """
+    n = max(_max_ver(sdir), _max_ver(ddir)) + 1
+    return f"v{n}_{now:%Y%m%d-%H%M}" + ("-AI" if ai else "")
+
+
 def next_version_dir(ddir: Path, ai: bool, now: dt.datetime) -> Path:
-    """`v3_20260810-1830-AI/`;版本號接著既有最大號,-AI 只在有 AI 介入時掛。"""
-    n = max((int(m.group(1)) for p in ddir.iterdir() if p.is_dir()
-             for m in [VER_RE.match(p.name)] if m), default=0) + 1
-    return ddir / (f"v{n}_{now:%Y%m%d-%H%M}" + ("-AI" if ai else ""))
+    """(保留給既有呼叫端/測試)Drive 端版本目錄。"""
+    return ddir / version_name(ddir, ddir, ai, now)
 
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="改完 cutplan → 出片 → 同步 Drive")
     ap.add_argument("--session", required=True)
     ap.add_argument("--out", help="輸出檔名(預設自動遞增 final_cut_vN.mp3)")
+    ap.add_argument("--plan", default="cutplan.md",
+                    help="人審節目單(分軌線用 cutplan.pertrack.md)")
     ap.add_argument("--drive", type=Path, help="Drive 集數資料夾(第一次配對後會記住)")
     ap.add_argument("--yes", action="store_true", help="全部用預設,不互動")
     ap.add_argument("--no-push", action="store_true", help="出片後不推回 Drive")
@@ -195,7 +217,7 @@ def main() -> None:
     args, passthru = ap.parse_known_args()
 
     sdir = Path(args.session).resolve()
-    local = sdir / "cutplan.md"
+    local = sdir / args.plan
     if not local.exists():
         sys.exit(f"[cut] FAIL: 找不到 {local}")
     ddir = find_drive_dir(sdir, args.drive)
@@ -231,6 +253,7 @@ def main() -> None:
 
     # ── 2. dry-run ──
     render = [sys.executable, str(Path(__file__).parent / "render_cut.py"),
+              "--plan", args.plan,
               "--session", str(sdir), *passthru]
     print("\n[cut] ── dry-run ──")
     r = subprocess.run(render + ["--dry-run"], capture_output=True, text=True)
@@ -252,19 +275,36 @@ def main() -> None:
     if subprocess.run(render + ["--out", out]).returncode != 0:
         sys.exit("[cut] FAIL: render 失敗")
 
-    # ── 4. 推回 Drive:一版一個資料夾,連當次的 cutplan 一起封存 ──
+    # ── 4. 版本目錄:**local 與 Drive 都要**,一版一個資料夾 ──
+    #
+    # 2026-08-11 MM:「mkdir 這應該直接變成 script 去做,複製到 google drive
+    # 也應該要變成 script,sync cutplan.md 也是,而且當下的 cutplan 也應該備份」。
+    # 原本只有 Drive 端建版本目錄,local 端得人工 mkdir——實測整整一輪都在手動
+    # 做這幾步,還漏過一次(--out 指向不存在的目錄,整趟 render 白跑)。
+    now = dt.datetime.now()
+    ep = EP_RE.search(sdir.name)
+    vname = version_name(sdir, ddir, args.ai, now)
+    stem = (ep.group(1) if ep else "cut") + "_" + vname.split("_")[0]
+    line = "分軌" if args.plan != "cutplan.md" else "混音"
+    note = ("\n".join(summary)
+            + f"\n\n剪輯路線:{line}線(--plan {args.plan})"
+            + f"\n出片檔:{stem}.mp3\nsession:{sdir}\n")
+
+    lvdir = sdir / vname
+    lvdir.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(sdir / out, lvdir / f"{stem}.mp3")
+    shutil.copy2(local, lvdir / Path(args.plan).name)   # 這一版照哪份剪的
+    (lvdir / "render.txt").write_text(note, encoding="utf-8")
+    print(f"[cut] ☑️ local:{vname}/(mp3 + cutplan 快照 + render.txt)")
+
     if ddir and not args.no_push:
-        vdir = next_version_dir(ddir, args.ai, dt.datetime.now())
-        vdir.mkdir(parents=True)
-        ep = EP_RE.search(sdir.name)
-        stem = (ep.group(1) if ep else "cut") + "_" + vdir.name.split("_")[0]
+        vdir = ddir / vname
+        vdir.mkdir(parents=True, exist_ok=True)
         shutil.copy2(sdir / out, vdir / f"{stem}.mp3")
-        shutil.copy2(local, vdir / "cutplan.md")      # 這一版是照哪份剪的
-        (vdir / "render.txt").write_text(
-            "\n".join(summary) + f"\n\n出片檔:{stem}.mp3\nsession:{sdir}\n",
-            encoding="utf-8")
-        shutil.copy2(local, drive)                     # _meta 保持最新工作版
-        print(f"[cut] ☑️ Drive:{vdir.name}/(mp3 + cutplan 快照 + render.txt)")
+        shutil.copy2(local, vdir / Path(args.plan).name)
+        (vdir / "render.txt").write_text(note, encoding="utf-8")
+        shutil.copy2(local, drive)                     # Drive 工作版保持最新
+        print(f"[cut] ☑️ Drive:{vdir.name}/(同上)")
     print(f"[cut] ✅ 完成 → {sdir / out}")
 
 

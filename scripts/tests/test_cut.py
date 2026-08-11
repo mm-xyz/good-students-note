@@ -17,7 +17,7 @@ from pathlib import Path
 import datetime as dt  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "audio"))
-from cut import (drive_cutplan, find_drive_dir, next_out_name,  # noqa: E402
+from cut import (version_name, drive_cutplan, find_drive_dir, next_out_name,  # noqa: E402
                  next_version_dir, semantic_diff)
 
 HEAD = "# Cutplan — test\n\n## ⚙ max-pause=1.5 tempo=1.0\n"
@@ -191,6 +191,34 @@ class TestFindDriveDir(unittest.TestCase):
             sdir.mkdir()
             (sdir / ".drive_dir").write_text("/nope/gone", encoding="utf-8")
             self.assertIsNone(find_drive_dir(sdir, None))
+
+
+
+
+
+class TestVersionName(unittest.TestCase):
+    """版本號取 local 與 Drive 兩邊的最大號 +1（2026-08-11）。
+
+    只看單邊會讓兩邊分叉:EP16 實際發生過 local 有 v09、Drive 只有 v1,
+    同一次出片在兩邊叫不同名字,之後對不起來。
+    """
+
+    def test_takes_the_max_of_both_sides(self):
+        import datetime as dt
+        with tempfile.TemporaryDirectory() as td:
+            s, d = Path(td) / "s", Path(td) / "d"
+            (s / "v9_20260810-1200").mkdir(parents=True)
+            (d / "v1_20260810-1200-AI").mkdir(parents=True)
+            n = version_name(s, d, False, dt.datetime(2026, 8, 11, 18, 30))
+            self.assertEqual(n, "v10_20260811-1830")
+
+    def test_ai_suffix_and_empty_dirs(self):
+        import datetime as dt
+        with tempfile.TemporaryDirectory() as td:
+            s = Path(td) / "s"
+            s.mkdir()
+            n = version_name(s, None, True, dt.datetime(2026, 8, 11, 9, 5))
+            self.assertEqual(n, "v1_20260811-0905-AI")
 
 
 if __name__ == "__main__":
