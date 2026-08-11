@@ -235,53 +235,47 @@ function classifySelection(bodyRaw, cleanStart, cleanEnd) {
     !Number.isInteger(cleanStart) ||
     !Number.isInteger(cleanEnd) ||
     cleanStart < 0 ||
-    cleanEnd <= cleanStart
+    cleanEnd < cleanStart
   ) {
     return 'invalid';
   }
   const { clean, pieces } = splitStrikes(bodyRaw);
   if (cleanEnd > clean.length) return 'invalid';
+  if (cleanEnd === cleanStart) return 'empty';
 
-  const overlapping = pieces.filter(
-    (p) => p.cleanStart < cleanEnd && p.cleanEnd > cleanStart,
+  const touchesStruck = pieces.some(
+    (p) => p.kind === 'struck' && p.cleanStart < cleanEnd && p.cleanEnd > cleanStart,
   );
-  const struckOverlap = overlapping.filter((p) => p.kind === 'struck');
-
-  if (struckOverlap.length === 0) return 'add';
-
-  if (
-    struckOverlap.length === 1 &&
-    overlapping.length === 1 &&
-    struckOverlap[0].cleanStart === cleanStart &&
-    struckOverlap[0].cleanEnd === cleanEnd
-  ) {
-    return 'remove';
-  }
-
-  return 'invalid';
+  return touchesStruck ? 'remove' : 'add';
 }
 
 // ── 刪除線:加 / 去(對 bodyRaw 字串直接操作)────────────────────────────
 
 function toggleStrike(bodyRaw, cleanStart, cleanEnd) {
   const mode = classifySelection(bodyRaw, cleanStart, cleanEnd);
+  if (mode === 'empty') {
+    throw new Error(
+      `cutplan-core: toggleStrike — 選取是空的(游標在 ${cleanStart},沒有反白`
+      + '任何文字),請先選取要加/去刪除線的範圍',
+    );
+  }
   if (mode === 'invalid') {
     throw new Error(
-      `cutplan-core: toggleStrike — 選取範圍 [${cleanStart},${cleanEnd}) 不合法`
-      + '(空選取/越界,或與既有刪除線部分交疊/橫跨邊界——這是明確拒絕而非猜測)',
+      `cutplan-core: toggleStrike — 選取範圍 [${cleanStart},${cleanEnd}) 超出`
+      + '內文長度或索引不合法',
     );
   }
   const { clean, pieces } = splitStrikes(bodyRaw);
   if (mode === 'remove') {
+    // 選取範圍內「有交集」的既有刪除線片段,整段拆掉 ~~ —— 即使選取只蓋到
+    // 該片段的一部分,也整段一起取消(MM 要的「批次取消」語意:
+    // `~~1~~ 23 ~~4~~` 全選 → `1 23 4`)。選取範圍內原本就是 plain 的文字
+    // 原樣通過,不會被新增標記——這個操作只拆既有的 ~~,不會新增。
     return pieces
       .map((p) => {
-        if (
-          p.kind === 'struck' &&
-          p.cleanStart === cleanStart &&
-          p.cleanEnd === cleanEnd
-        ) {
-          return p.raw; // 拆掉這一段的 ~~,還原成字面文字
-        }
+        const touched = p.kind === 'struck'
+          && p.cleanStart < cleanEnd && p.cleanEnd > cleanStart;
+        if (touched) return p.raw; // 拆掉這一段的 ~~,還原成字面文字
         return p.kind === 'struck' ? `~~${p.raw}~~` : p.raw;
       })
       .join('');
