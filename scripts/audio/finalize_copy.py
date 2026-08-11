@@ -47,8 +47,11 @@ VER_RE = re.compile(r"^v(\d+)_\d{8}")
 #   stdin — 從標準輸入吃(codex exec 的 `-`)
 #   arg   — 當成最後一個引數(agy --print 只吃引數;給 stdin 它會印 help 就跑掉)
 # 兩者都走各自的 OAuth 登入額度(CLAUDE.md Auth 雙軌表),不打 API key。
+# ⚠️ agy 的 `--print` **本身就吃 prompt 當值**,其他旗標必須放在它前面 ——
+# 寫成 `agy --print --print-timeout 20m <prompt>` 會把 `--print-timeout`
+# 當成 prompt 吃掉,然後靜默回 0 字(2026-08-12 實踩,查了三輪才發現)。
 ENGINES = {
-    "agy": (["agy", "--print", "--print-timeout", "20m"], "arg"),
+    "agy": (["agy", "--print-timeout", "20m", "--print"], "arg"),
     "codex": (["codex", "exec", "--skip-git-repo-check", "-"], "stdin"),
 }
 
