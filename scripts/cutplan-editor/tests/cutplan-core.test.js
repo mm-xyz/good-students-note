@@ -18,6 +18,13 @@ const {
   toggleStrike,
   applyStrike,
   isEditableLine,
+  createHistory,
+  pushHistory,
+  popHistory,
+  canUndo,
+  peekHistory,
+  applyStrikeWithHistory,
+  undo,
 } = require('../cutplan-core.js');
 
 // ── fixtures ──────────────────────────────────────────────────────────────
@@ -381,4 +388,127 @@ test('classifySelection/applyStrike: 選取橫跨兩段既有刪除線(中間夾
     serializeCutplan(restored),
     '- [x] B0099 [0:00–0:05] [Alice] 甲乙丙丁\n',
   );
+});
+
+// ── undo 堆疊(2026-08-11 MM 新需求:選取穩定後自動套用,原按鈕改復原)──
+//
+// history 是純資料的操作堆疊,不含任何 DOM 參照——每筆記錄
+// { doc(套用前的文件快照), lineIndex, start, end(這次套用的邏輯位置) }。
+// doc 快照用「存舊的、不算新的」而不是「算反向操作」:applyStrike 的
+// remove 分支在新語意下可能一次拆掉好幾段刪除線,反向操作不是單純再呼叫
+// 一次 toggleStrike 就能還原,存快照最簡單也最不會錯(往返一定逐 byte
+// 相同,因為根本是同一個物件)。start/end 給 UI 換算畫面上的按鈕位置用。
+
+test('undo 堆疊: createHistory 初始為空,不能復原,peekHistory 回 null', () => {
+  const history = createHistory();
+  assert.equal(canUndo(history), false);
+  assert.equal(peekHistory(history), null);
+});
+
+test('undo 堆疊: 空堆疊時 undo() 優雅不做事(不丟錯),doc 原樣不變', () => {
+  const doc = parseCutplan(FIXTURE_LF);
+  const history = createHistory();
+  const result = undo(doc, history);
+  assert.equal(result.undone, false);
+  assert.equal(result.doc, doc);
+  assert.equal(canUndo(result.history), false);
+});
+
+test('undo 堆疊: applyStrikeWithHistory 推入一筆,peekHistory 指向剛套用的位置', () => {
+  const doc0 = parseCutplan(FIXTURE_LF);
+  const history0 = createHistory();
+  const idx = lineIndexOf(FIXTURE_LF, '- [ ] B0002');
+  const { doc: doc1, history: history1 } = applyStrikeWithHistory(doc0, history0, idx, 0, 2);
+  assert.equal(canUndo(history1), true);
+  assert.deepEqual(peekHistory(history1), { lineIndex: idx, start: 0, end: 2 });
+  assert.equal(
+    serializeCutplan(doc1).split('\n')[idx],
+    '- [ ] B0002 [0:05–0:08] [Bob] ~~呃這~~個那個其實我覺得很好。',
+  );
+});
+
+test('undo 堆疊: 連續多次套用(跨兩行)後逐步復原,每一步文字都與套用前逐 byte 相同', () => {
+  const doc0 = parseCutplan(FIXTURE_LF);
+  let history = createHistory();
+  const idxB2 = lineIndexOf(FIXTURE_LF, '- [ ] B0002');
+  const idxB1 = lineIndexOf(FIXTURE_LF, '- [x] B0001');
+
+  const step1 = applyStrikeWithHistory(doc0, history, idxB2, 0, 2); // B0002 加刪除線
+  const doc1 = step1.doc;
+  history = step1.history;
+
+  const step2 = applyStrikeWithHistory(doc1, history, idxB1, 0, 2); // B0001 加刪除線
+  const doc2 = step2.doc;
+  history = step2.history;
+
+  // 堆疊頂端指向「最近一次」= B0001 那一步
+  assert.deepEqual(peekHistory(history), { lineIndex: idxB1, start: 0, end: 2 });
+
+  const undo1 = undo(doc2, history);
+  assert.equal(undo1.undone, true);
+  assert.equal(serializeCutplan(undo1.doc), serializeCutplan(doc1), '第一次復原要跟套用 B0001 之前逐 byte 相同');
+  history = undo1.history;
+  // 復原一步後,堆疊頂端跳到「再上一步」= B0002 那一步
+  assert.deepEqual(peekHistory(history), { lineIndex: idxB2, start: 0, end: 2 });
+
+  const undo2 = undo(undo1.doc, history);
+  assert.equal(undo2.undone, true);
+  assert.equal(serializeCutplan(undo2.doc), serializeCutplan(doc0), '第二次復原要跟原始文件逐 byte 相同');
+  assert.equal(serializeCutplan(undo2.doc), FIXTURE_LF);
+  history = undo2.history;
+
+  assert.equal(canUndo(history), false);
+  assert.equal(peekHistory(history), null);
+});
+
+test('undo 堆疊: 復原到底之後再復原要優雅不做事,不丟錯', () => {
+  const doc0 = parseCutplan(FIXTURE_LF);
+  let history = createHistory();
+  const idx = lineIndexOf(FIXTURE_LF, '- [ ] B0002');
+  const step = applyStrikeWithHistory(doc0, history, idx, 0, 2);
+  let doc = step.doc;
+  history = step.history;
+
+  const first = undo(doc, history);
+  assert.equal(first.undone, true);
+  doc = first.doc;
+  history = first.history;
+
+  const second = undo(doc, history); // 堆疊已經空了
+  assert.equal(second.undone, false);
+  assert.equal(second.doc, doc);
+  assert.equal(canUndo(second.history), false);
+});
+
+test('undo 堆疊: 存檔成功後可以重置(清空)堆疊', () => {
+  const doc0 = parseCutplan(FIXTURE_LF);
+  let history = createHistory();
+  const idx = lineIndexOf(FIXTURE_LF, '- [ ] B0002');
+  const step = applyStrikeWithHistory(doc0, history, idx, 0, 2);
+  history = step.history;
+  assert.equal(canUndo(history), true);
+
+  history = createHistory(); // 模擬「存檔成功後清空堆疊」
+  assert.equal(canUndo(history), false);
+  assert.equal(peekHistory(history), null);
+});
+
+test('undo 堆疊: applyStrikeWithHistory 遇到不合法選取一樣丟錯,且不會推入歷史', () => {
+  const doc = parseCutplan(FIXTURE_LF);
+  const history = createHistory();
+  const idx = lineIndexOf(FIXTURE_LF, '- [ ] B0002');
+  assert.throws(() => applyStrikeWithHistory(doc, history, idx, 3, 3)); // 空選取
+  assert.equal(canUndo(history), false, '丟錯的呼叫不該讓外部傳入的 history 被動到');
+});
+
+test('pushHistory/popHistory: 底層原始函式本身也是純函式,不互相汙染', () => {
+  const doc = parseCutplan(FIXTURE_LF);
+  const h0 = createHistory();
+  const h1 = pushHistory(h0, { doc, lineIndex: 0, start: 0, end: 1 });
+  assert.equal(canUndo(h0), false, 'pushHistory 不能動到原本傳入的 history');
+  assert.equal(canUndo(h1), true);
+  const { history: h2, entry } = popHistory(h1);
+  assert.equal(entry.doc, doc);
+  assert.equal(canUndo(h2), false);
+  assert.equal(canUndo(h1), true, 'popHistory 不能動到原本傳入的 history');
 });
