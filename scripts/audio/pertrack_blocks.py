@@ -3,7 +3,7 @@
 scripts/audio/pertrack_blocks.py — 逐軌逐字稿 → 逐軌 cutplan blocks（分軌剪輯）
 
     python3 scripts/audio/pertrack_blocks.py --session sessions/<slug> \
-        [--excess 6.0] [--backchannel-min 0.2] [--out-md cutplan.pertrack.md]
+        [--bc-excess 10.0] [--backchannel-min 0.3] [--out-md cutplan.pertrack.md]
 
 2026-08-11 MM 拍板改成分軌出片(方案 B:完整逐軌模型)。動機:EP16 04:47 有一串
 KIN 的「嗯 嗯 嗯」壓在 Mars 講話底下,混音逐字稿看不到、人審剪不掉。
@@ -108,8 +108,6 @@ def excess_db(tracks: list[dict], g: dict, i: int, a: float, b: float) -> float:
 def main() -> int:
     ap = argparse.ArgumentParser(description="逐軌逐字稿 → 逐軌 cutplan blocks")
     ap.add_argument("--session", required=True)
-    ap.add_argument("--excess", type=float, default=6.0,
-                    help="超出串音預測幾 dB 才算這一軌自己在出聲(預設 6.0)")
     ap.add_argument("--bc-excess", type=float, default=10.0,
                     help="附和列的門檻要更嚴(預設 10.0dB)——6dB 會把呼吸/椅子/"
                          "環境音全抓進來(EP16 實測 1840 段,cutplan 沒法看)")
