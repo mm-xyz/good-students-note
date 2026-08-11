@@ -108,6 +108,29 @@ class TestOwnerRuns(unittest.TestCase):
         lv = const([0.0, -2.0])
         self.assertEqual(owner_runs(lv, HOP, 0.0, 1.0), [(0.0, 1.0, None)])
 
+    def test_nobody_above_the_floor_means_no_handover(self):
+        """三軌都在噪聲底時不換手 —— 2026-08-11 MM 實聽抓到的破口。
+
+        EP16 源 38.5–39.0s(「前陣子」的「前"):Mars −69.4／Sarah −62.9／
+        KIN −67.6dB,三軌都是底噪,沒有人真的在出聲。但 Sarah 只因為底噪高
+        4.7dB 就搶走所有權,KIN 的麥在詞中間被關掉 0.5 秒 —— 聽到的是 KIN
+        的聲音透過 Sarah 的麥傳過來(距離感全變),而且切在「前陣子」中間。
+        """
+        floor = [-55.0, -55.0, -55.0]
+        lv = np.hstack([const([-30.0, -60.0, -60.0], 0.4),      # 0 明確在講
+                        const([-69.4, -62.9, -67.6], 0.3),      # 三軌都在底噪
+                        const([-30.0, -60.0, -60.0], 0.3)])
+        runs = owner_runs(lv, HOP, 0.0, 1.0, floor_db=floor)
+        self.assertEqual([r[2] for r in runs], [0], "底噪區不該換手")
+
+    def test_a_real_speaker_above_the_floor_still_takes_over(self):
+        """門檻只擋底噪,不能擋掉真的換人講話。"""
+        floor = [-55.0, -55.0, -55.0]
+        lv = np.hstack([const([-30.0, -60.0, -60.0], 0.4),
+                        const([-60.0, -30.0, -60.0], 0.6)])
+        runs = owner_runs(lv, HOP, 0.0, 1.0, floor_db=floor)
+        self.assertEqual([r[2] for r in runs], [0, 1])
+
     def test_margin_is_measured_against_the_incumbent_not_second_place(self):
         # 三軌:owner=0;挑戰者 1 只比 0 高 2dB(不足 3dB)雖然比 2 高很多
         lv = np.hstack([const([0.0, -20.0, -40.0], 0.4),

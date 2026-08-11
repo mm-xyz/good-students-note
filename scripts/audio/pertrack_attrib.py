@@ -96,12 +96,18 @@ def predict_bleed_db(lv_db, g_db, noise_db):
 
 
 def owner_runs(lv_db, hop: float, t0: float, t1: float, margin: float = 3.0,
-               stable: float = 0.2, switch: float = 0.18):
-    """支配 ＋ hysteresis → [(start, end, owner|None), ...](owner=軌索引)。
+               stable: float = 0.2, switch: float = 0.18, floor_db=None):
+    """支配 ＋ hysteresis ＋ **噪聲底閘** → [(start, end, owner|None), ...]。
 
     · 還沒有 owner:第一名要領先**第二名** ≥margin 並持續 ≥stable 秒才成立
     · 已經有 owner:挑戰者要領先**現任** ≥margin 並持續 ≥switch 秒才換手
       (跟第二名比會讓「三人中兩人差不多大聲」一直翻面)
+    · **三軌都低於各自 floor_db(沒有人在講話)的區間不換手**(2026-08-11 MM 實聽
+      抓到):三軌都在底噪時,原本只要比現任高 margin 就換手——EP16 源
+      38.5–39.0s「前陣子」的「前」,Mars −69.4／Sarah −62.9／KIN −67.6,
+      沒有人真的在出聲,Sarah 只因底噪高 4.7dB 就搶走,KIN 的麥在詞中間被
+      關掉 0.5 秒,聽到的是 KIN 透過 Sarah 的麥傳來的聲音(距離感全變)。
+      floor_db=None 就不套這道閘(保留舊行為給不知道噪聲底的呼叫端)。
     · 從頭到尾都湊不到 → owner=None ＝ 歸屬不確定,交人審,不硬選
     """
     lv = np.asarray(lv_db, dtype=float)
@@ -123,6 +129,14 @@ def owner_runs(lv_db, hop: float, t0: float, t1: float, margin: float = 3.0,
             continue
         ref = col[owner] if owner is not None else col[int(order[1])]
         need = switch if owner is not None else stable
+        # 噪聲底閘:**三軌都在各自底噪之下 ＝ 沒有人在講話**,這種區間不換手。
+        # 不能只看「挑戰者夠不夠大聲」——講得小聲仍然是在講話(EP16 Sarah 的
+        # 「消息吧」只有 -54.4dB,低於 -48.6 的門檻,那樣擋會讓 44% 的句子
+        # 變成歸屬不確定)。只有大家都沒出聲時才維持現任。
+        if floor_db is not None and all(
+                col[j] < floor_db[j] for j in range(col.shape[0])):
+            cand = None
+            continue
         if col[best] - ref >= margin:
             if cand != best:
                 cand, cand_start = best, f

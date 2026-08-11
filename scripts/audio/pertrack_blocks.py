@@ -271,6 +271,17 @@ def main() -> int:
         print(f"    {n:6s} ← " + "  ".join(
             f"{names[j]}:{g[i][j]:+.1f}dB" for j in range(len(names)) if j != i))
 
+    # 歸屬用的噪聲底閘:CFAR 那份要等 cov(歸屬結果)才算得出來,這裡循環,
+    # 所以先用**不依賴歸屬**的版本——「三軌最大值都很低的 frame ＝ 沒人在講」,
+    # 取那些 frame 每軌的 P99.5 當底噪。擋的是「三軌都在底噪卻硬選一個贏家」
+    # (2026-08-11 MM 實聽:KIN 的麥在「前陣子」中間被關掉 0.5 秒)。
+    q0 = L_attr.max(axis=0) < np.percentile(L_attr.max(axis=0), 20)
+    attr_floor = [float(cfar_percentile(L_attr[i][q0], args.cfar_pct,
+                        default=float(np.percentile(L_attr[i], 1)))) + args.floor_margin
+                  for i in range(len(names))]
+    print("[pertrack] 歸屬噪聲底閘:" + "  ".join(
+        f"{names[i]}≥{attr_floor[i]:.1f}dB" for i in range(len(names))))
+
     # ── D1/D2:canonical phrase → 逐軌歸屬 ──────────────────────────────
     idx = {n: i for i, n in enumerate(names)}
     per_track: dict[str, list[dict]] = {n: [] for n in names}
@@ -289,7 +300,8 @@ def main() -> int:
             if not cw:
                 continue
             runs = owner_runs(L_attr, HOP, cue["start"], cue["end"],
-                              args.margin, args.stable, args.switch)
+                              args.margin, args.stable, args.switch,
+                              floor_db=attr_floor)
             parts = enforce_phrase_len(
                 split_phrase(cw, b["text"], runs, args.snap),
                 args.phrase_min, args.phrase_max)
