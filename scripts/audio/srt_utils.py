@@ -127,10 +127,49 @@ def join_words(ws: list[dict], ref_text: str) -> str:
 PHRASE_PUNCT = "。?!…,、;:?!,;:"
 
 
+def _force_split(g: list[dict], max_secs: float) -> list[list[dict]]:
+    """一組 words 超過 max_secs 就切開,**貪婪填滿**:每段盡量貼近上限。
+
+    2026-08-11 MM 定粒度:「每秒一個 block 可以被勾選」。標點/停頓切法遇到
+    連珠炮講話切不開(EP16 最長一個 27.9s),人審在那 27.9 秒裡沒有勾選粒度。
+
+    先前用遞迴對切會**過切**:1.3s 的 block 被切成兩個 0.65s,全片 block 數
+    衝到目標的三倍(平均 0.34s)。貪婪填滿則讓每段落在 max_secs 附近,
+    再在候選切點裡挑**字間空隙最大**的那個(切在自然的呼吸縫,不是硬切)。
+    有字級時間戳,切點永遠落在字與字之間,不會切在字中間。
+    """
+    if len(g) < 2 or g[-1]["end"] - g[0]["start"] <= max_secs:
+        return [g]
+    out, cur = [], [g[0]]
+    for w in g[1:]:
+        if w["end"] - cur[0]["start"] > max_secs and len(cur) >= 1:
+            # 回看最後幾個字,挑空隙最大的位置當切點(避免切在字黏字處)
+            back = min(3, len(cur))
+            best_k, best_gap = 0, -1.0
+            for k in range(back):
+                i = len(cur) - k
+                prev_end = cur[i - 1]["end"]
+                nxt = cur[i] if i < len(cur) else w
+                gp = nxt["start"] - prev_end
+                if gp > best_gap:
+                    best_gap, best_k = gp, k
+            i = len(cur) - best_k
+            out.append(cur[:i])
+            cur = cur[i:] + [w]
+        else:
+            cur.append(w)
+    if cur:
+        out.append(cur)
+    return [x for x in out if x]
+
+
 def split_words_to_phrases(ws: list[dict], ref_text: str,
-                           gap: float = 0.5) -> list[dict]:
+                           gap: float = 0.5,
+                           max_secs: float = 0.0) -> list[dict]:
     """把一個 cue 的 words 切成 EP15 式短句:字尾帶標點、或與下一字間隔
     ≥ gap 秒就斷句(2026-07-29 MM 拍板,cutplan 粒度以 EP15 為準)。
+    max_secs>0 時,切完仍超過該秒數的短句會在最大字間空隙處再對切
+    (2026-08-11 MM:每秒一個 block)。
     回傳 [{start, end, text}, ...];文字由 words 重建(與 render 字級對齊
     同源,ADR 0005)。ws 為空回傳 []。"""
     if not ws:
@@ -156,5 +195,7 @@ def split_words_to_phrases(ws: list[dict], ref_text: str,
     if len(merged) > 1 and merged[0][-1]["end"] - merged[0][0]["start"] <= 0:
         merged[1][:0] = merged[0]
         merged.pop(0)
+    if max_secs > 0:
+        merged = [x for g in merged for x in _force_split(g, max_secs)]
     return [{"start": g[0]["start"], "end": g[-1]["end"],
              "text": join_words(g, ref_text)} for g in merged]

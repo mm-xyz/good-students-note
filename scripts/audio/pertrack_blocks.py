@@ -40,7 +40,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from srt_utils import parse_srt, fmt_mmss  # noqa: E402
+from srt_utils import parse_srt, fmt_mmss, split_words_to_phrases  # noqa: E402
 
 ENV_RATE = 1000          # 能量包絡取樣率:33 分鐘只有 2M 點,夠準又夠快
 STEP = 0.2               # 掃描步長(秒);附和聲常只有 0.3–0.8s
@@ -108,6 +108,12 @@ def excess_db(tracks: list[dict], g: dict, i: int, a: float, b: float) -> float:
 def main() -> int:
     ap = argparse.ArgumentParser(description="逐軌逐字稿 → 逐軌 cutplan blocks")
     ap.add_argument("--session", required=True)
+    ap.add_argument("--max-secs", type=float, default=1.2,
+                    help="block 長度上限(秒,0=不強制切)。2026-08-11 MM 定粒度:"
+                         "「每秒一個 block 可以被勾選,block 內字級精簡發揮作用」。"
+                         "超過就在最大字間空隙再對切,切點永遠落在字與字之間。"
+                         "細切還有第二個好處:口頭禪更常自成一個 block,"
+                         "「整句就是它」那條自動劃線規則(70%% 精確度)涵蓋率跟著上升")
     ap.add_argument("--bc-excess", type=float, default=10.0,
                     help="附和列的門檻要更嚴(預設 10.0dB)——6dB 會把呼吸/椅子/"
                          "環境音全抓進來(EP16 實測 1840 段,cutplan 沒法看)")
@@ -142,8 +148,22 @@ def main() -> int:
     print(f"[pertrack] 解 {len(tracks)} 軌能量包絡({ENV_RATE}Hz)…")
     for t in tracks:
         t["env"] = envelope(t["wav"])
-        t["cues"] = parse_srt(t["srt"])
-        print(f"    {t['speaker']:6s} {len(t['cues'])} cues")
+        cues = parse_srt(t["srt"])
+        wj = t["srt"].with_suffix(".words.json")
+        if args.max_secs > 0 and wj.exists():
+            words = json.loads(wj.read_text(encoding="utf-8"))
+            fine = []
+            for c in cues:
+                ws = [w for w in words
+                      if w["end"] > c["start"] - 1e-6 and w["start"] < c["end"] + 1e-6]
+                parts = split_words_to_phrases(ws, c["text"], max_secs=args.max_secs)
+                fine.extend(parts if parts else [c])
+            print(f"    {t['speaker']:6s} {len(cues)} cues → 細切 {len(fine)}"
+                  f"(上限 {args.max_secs}s)")
+            cues = fine
+        else:
+            print(f"    {t['speaker']:6s} {len(cues)} cues")
+        t["cues"] = cues
     dur = min(len(t["env"]) for t in tracks) / ENV_RATE
 
     g = calibrate_bleed(tracks, dur)
