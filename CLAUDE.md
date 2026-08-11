@@ -477,6 +477,12 @@ Step 5 只在 `goodedunote` 專案的 hosting 上新增/更新該篇 `<slug>/`,�
   json 文字 ⊂ 來源 SRT),cutplan 只准翻勾選,文字時間碼不可動。
 - **產物**:`speakers.json`、`transcript.speakers.srt`、`prosody.json`、`highlights.md`、
   `cutplan.md/json`、`final_cut.mp3`、`cut_map.json`、`chapters.txt`,全落 `sessions/<slug>/`。
+- **剪輯路線由素材決定(2026-08-11 MM 拍板,ADR 0012)**:**有分軌走分軌線,
+  只有混音軌走混音線**——`render_cut.py` 依 `cutplan.json` 有沒有 `tracks` 區
+  自動分流,不需要旗標也不需要人選。分軌線是**加法不是替換**:EP15 是單軌錄的、
+  來賓遠端連線與舊素材也只有合軌,那些永遠走混音線。兩條線的人審介面同形
+  (`- [x]` 勾選、`~~刪除線~~`),素材換了手感不換。**`render.txt` 要記錄本次
+  走哪條線**(版本目錄名是人取的標籤,不是機器寫的事實)。
 - **session 目錄分類(2026-08-10,ADR 0011)**:podcast 線的 session 分四類子目錄,
   與 Google Drive 用同一套語彙——`raw/`(未進管線的原始素材,如事後補錄)、
   `tracks/`(已對齊的管線分軌,ingest 寫死)、`_meta/`(人看的伴隨檔:highlights/
