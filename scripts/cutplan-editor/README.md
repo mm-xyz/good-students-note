@@ -4,13 +4,14 @@ Lifov 卡 **#674**。讓 MM 用手機/平板/桌機瀏覽器直接編輯 Google 
 podcast `cutplan.md`,只開放兩個動作:
 
 1. **勾選切換** `- [x]` ↔ `- [ ]`
-2. **字級刪除線** — 單一按鈕依選取範圍內有沒有既有 `~~` 決定動作:選取內
-   完全沒有既有刪除線 → 包成 `~~文字~~`;選取內只要碰到既有刪除線(完全
-   包含、部分重疊、橫跨多段皆算)→ 那些被碰到的刪除線整段一起拆掉,不要求
-   選取邊界跟刪除線邊界對齊(2026-08-11 修正:舊版要求選取「恰好」等於
-   刪除線邊界才能取消,手機長按拖曳幾乎不可能精準對齊,MM 實測回報「沒辦法
-   取消」/「`~~1~~ 23 ~~4~~` 不能批次取消」兩個 bug 後改成現在這個語意)。
-   選取為空(只有游標沒反白)不做事,會顯示可見提示,不會靜默失敗。
+2. **字級刪除線** — **反白文字、選取穩定後自動套用**,不用再點按鈕
+   (2026-08-11 MM 追加需求:剪一集要標數百處贅字,少一次點擊就是省一半
+   動作)。依選取範圍內有沒有既有 `~~` 決定動作:完全沒有既有刪除線 →
+   包成 `~~文字~~`;只要碰到既有刪除線(完全包含、部分重疊、橫跨多段皆
+   算)→ 那些被碰到的刪除線整段一起拆掉,不要求選取邊界跟刪除線邊界對齊
+   (這條語意的來歷、跟自動套用的判定策略,見 `docs/adr/0017-cutplan-editor-strike-interaction-model.md`)。
+   套用後會浮動出現一顆「復原」按鈕,貼在剛才那段文字的右上角,支援多步
+   復原。選取為空(只有游標沒反白)不做事,不會靜默假裝套用成功。
 
 其餘一切(block id、時間碼、`[Speaker]`、逐字稿文字、`## ✂`/`## 🎵`/`## ⚙`/
 `## 🎬`/`## 章節`、註解、引言)**唯讀** —— 這不是省事,是護欄:
@@ -29,7 +30,7 @@ scripts/cutplan-editor/
 ├── Index.html                前端 UI(手機優先)
 ├── appsscript.json           Apps Script 專案 manifest
 ├── tests/
-│   ├── cutplan-core.test.js  40 個測試裡的 39 個:round-trip/checkbox/strike/唯讀/邊界
+│   ├── cutplan-core.test.js  52 個測試裡的 51 個:round-trip/checkbox/strike/唯讀/邊界/undo 堆疊
 │   └── inline-sync.test.js   確保 cutplan-core-inline.html 沒有跟 cutplan-core.js 漂移
 └── tools/
     ├── build-inline.js       重新產生 cutplan-core-inline.html
@@ -63,7 +64,7 @@ Apps Script 的 `HtmlService` 只能把專案裡的 **HTML 型別檔案**(副檔
   的伺服端檔案 —— `saveCutplan()` 用它做寫入前的第二道驗證(見下)。
 - `cutplan-core-inline.html` = 同一份原始碼包一層 `<script>`,`Index.html`
   用 `<?!= include('cutplan-core-inline'); ?>` 內嵌,給瀏覽器端做即時互動
-  (checkbox 切換、反白判斷要不要顯示「加/去刪除線」按鈕)。
+  (checkbox 切換、選取穩定後判斷要加還是去刪除線並自動套用、undo 堆疊)。
 
 兩份不會漂移,因為:
 1. `tools/build-inline.js` 是唯一產生 `cutplan-core-inline.html` 的方式
@@ -79,9 +80,9 @@ node --test "scripts/cutplan-editor/tests/**/*.test.js"
 
 ## 唯讀護欄有兩道
 
-1. **前端 UI**:只有 checkbox 跟「加/去刪除線」按鈕兩個互動元件,id/時間碼/
-   speaker/逐字稿文字全部渲染成純文字 `<span>`(不是 `<input>`,沒開
-   `contenteditable`)。
+1. **前端 UI**:只有 checkbox、選取文字(自動套用刪除線)、「復原」按鈕
+   三個互動路徑,id/時間碼/speaker/逐字稿文字全部渲染成純文字 `<span>`
+   (不是 `<input>`,沒開 `contenteditable`)。
 2. **`Code.gs` 的 `saveCutplan()`**:寫回 Drive 前,拿 Drive 上「現在」的
    內容跟前端送來的新內容各自 `parseCutplan()`,逐行比對——只允許
    block 行的 `mark` 改變,或 block 內文「拿掉 `~~` 之後的文字不變」;
@@ -154,10 +155,22 @@ node --test "scripts/cutplan-editor/tests/**/*.test.js"
   (`saveCutplan` 沒有版本檢查)。單人使用場景下風險低,先不做。
 - 不支援新增/刪除 block、新增章節、編輯 G 列說明文字——這些本來就不在
   卡片範圍內(唯讀是設計,不是還沒做完)。
-- 手機觸控偶爾會在點下「加/去刪除線」按鈕的當下,系統先把文字選取收掉
-  (collapse)才觸發 click——`Index.html` 對此有防禦(按鈕點下去發現選取
-  已經沒了會顯示可見提示,不會靜默沒反應),但沒辦法根治觸控本身的時序;
-  真的常常踩到就要點兩次(先反白、再點按鈕)。
+- **選取穩定判定是時間 heuristic,不是精確事件**(2026-08-11,見
+  `docs/adr/0017-cutplan-editor-strike-interaction-model.md`)。放開手指/滑鼠後等 60ms、純鍵盤選取等 450ms 沒
+  再變化才視為穩定——這兩個數字沒有理論上界,是參考 prior art 抓的經驗值。
+  極端情況(例如系統忙到事件延遲超過 60ms)理論上可能誤判成「已放開」而
+  提早套用,但套用是可逆的(浮動出現的「復原」按鈕),不會弄壞資料,只是
+  使用者要多點一次復原。
+- **浮動復原按鈕的位置只在套用當下算一次**,不會跟著後續「跟這個位置無關
+  的其他編輯」(例如勾選別的 block 的 checkbox)動態重算。因為那些操作不會
+  改變已渲染文字的版面高度(checkbox 只切 CSS 透明度,不改變卡片高度),
+  實測不會跑位;但如果未來版面規則改了(例如允許改變卡片高度的操作),
+  要記得回頭檢查這個假設還成不成立。
+- 復原按鈕的位置定位在**文件座標**(絕對定位,跟著頁面內容一起捲動),
+  不是視窗座標;選了這個而不是「捲動就隱藏」,因為剪輯是斷續的,人可能
+  盯著聽一段音檔才回頭決定要不要復原(見 ADR)。代價是如果視窗非常小
+  導致按鈕怎麼夾都會蓋到附近的文字,目前只做水平/垂直邊界 clamp,沒有
+  更精細的避讓演算法。
 - **前導空白的 block 行會被視為唯讀**(⚠️ Minor,2026-08-11 independent
   reviewer 找到)。`cutplan-core.js` 的 `parseLine` 從行首直接匹配
   `BLOCK_LINE_RE`,而 `scripts/audio/render_cut.py` 的 `LINE_RE` 是套用在
