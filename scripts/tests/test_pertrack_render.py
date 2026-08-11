@@ -197,8 +197,8 @@ class TestMixRanges(unittest.TestCase):
     def test_room_tone_bed_is_continuous_and_long_enough(self):
         """D5:從真靜音區取 room-tone 低量鋪底,避免關麥時噪聲地板抽動。
 
-        接縫用等功率 crossfade,不能有 step —— 迴圈式鋪底最常見的失敗就是
-        每繞一圈 click 一次。
+        改成頻譜合成後(ADR 0017)沒有接縫可言,但「不得有 step」這條照舊
+        鎖住 —— overlap-add 的窗若沒對齊,一樣會每 hop 爆一次。
         """
         d = Path(self.td.name)
         noise = d / "n.wav"
@@ -210,7 +210,7 @@ class TestMixRanges(unittest.TestCase):
             f.setframerate(SR)
             f.writeframes((y * 32767).astype("<i2").tobytes())
         bed = build_room_tone([noise], [(0.2, 1.4), (2.0, 3.2)], SR * 5, SR,
-                              seg=0.5, xfade=0.02)
+                              seg=0.5)
         self.assertEqual(len(bed), SR * 5)
         self.assertGreater(float(np.sqrt((bed ** 2).mean())), 1e-4)
         step = float(np.max(np.abs(np.diff(bed))))
@@ -246,6 +246,62 @@ class TestMixRanges(unittest.TestCase):
                          room_tone=np.full(SR, 0.01))
         floor = float(np.sqrt((x[int(0.4 * SR):int(0.6 * SR), 0] ** 2).mean()))
         self.assertGreater(20 * math.log10(floor), -60.0)
+
+    def test_quiet_span_finder_rejects_windows_containing_events(self):
+        """取樣窗**能量低不等於乾淨**(EP18 事故,ADR 0017)。
+
+        EP18 挑出來的 8 段「最安靜」有 7 段含呼吸/衣物/微弱人聲(20ms 短窗
+        峰谷差 15.7–25.7dB)。那些事件被鋪成每 7.84 秒重複一次的循環,整集
+        20 分鐘每一輪都逼人聽一次。挑窗必須同時看**平坦度**。
+        """
+        d = Path(self.td.name)
+        w = d / "spread.wav"
+        rng = np.random.default_rng(5)
+        y = rng.normal(0, 0.02, SR * 6)          # 全域底噪(較吵)
+        y[:SR] = rng.normal(0, 0.002, SR)        # 0–1s:最安靜,但中間有一聲
+        y[int(0.5 * SR):int(0.52 * SR)] *= 10    #        ← 呼吸/人聲事件
+        y[SR * 2:SR * 3] = rng.normal(0, 0.005, SR)   # 2–3s:稍吵但乾淨平坦
+        with wave.open(str(w), "wb") as f:
+            f.setnchannels(1)
+            f.setsampwidth(2)
+            f.setframerate(SR)
+            f.writeframes((np.clip(y, -1, 1) * 32767).astype("<i2").tobytes())
+        spans = find_quiet_spans([w], 6.0, SR, want=1, seg=1.0, probes=24)
+        self.assertTrue(spans, "應該還找得到乾淨窗")
+        a, _b = spans[0]
+        self.assertGreaterEqual(a, 1.9, "含事件的窗即使能量最低也不該被選中")
+
+    def test_room_tone_has_no_audible_events_or_period(self):
+        """鋪底必須是**穩態**的:沒有事件、沒有可聽出的循環(ADR 0017)。
+
+        舊做法是把取樣段交叉淡接後循環,取樣段裡的呼吸/人聲就會變成整集
+        每 N 秒重複一次的鬼影 —— MM 在 EP18 實聽抓到,0:36–0:38 一次。
+        """
+        d = Path(self.td.name)
+        w = d / "evt.wav"
+        rng = np.random.default_rng(7)
+        y = rng.normal(0, 0.004, SR * 3)
+        y[int(0.4 * SR):int(0.5 * SR)] *= 30     # 取樣段裡混進一個事件
+        with wave.open(str(w), "wb") as f:
+            f.setnchannels(1)
+            f.setsampwidth(2)
+            f.setframerate(SR)
+            f.writeframes((np.clip(y, -1, 1) * 32767).astype("<i2").tobytes())
+        bed = build_room_tone([w], [(0.0, 1.0), (1.2, 2.2)], SR * 20, SR,
+                              seg=1.0)
+        k = int(0.02 * SR)
+        m = len(bed) // k * k
+        r = np.sqrt((bed[:m].reshape(-1, k) ** 2).mean(axis=1)) + 1e-12
+        spread = 20 * math.log10(r.max() / np.percentile(r, 10))
+        self.assertLess(spread, 12.0,
+                        f"鋪底自己有 {spread:.1f}dB 起伏 — 事件被鋪進去了")
+        env = 20 * np.log10(r)
+        env = env - env.mean()
+        ac = np.correlate(env, env, "full")[len(env) - 1:]
+        ac = ac / ac[0]
+        lag0 = int(0.25 / 0.02)                  # 略過 250ms 內的自相關主瓣
+        self.assertLess(float(ac[lag0:].max()), 0.5,
+                        "鋪底有可聽出的循環週期 — 會變成每 N 秒重複的鬼影")
 
     def test_quiet_span_finder_avoids_the_loud_part(self):
         d = Path(self.td.name)

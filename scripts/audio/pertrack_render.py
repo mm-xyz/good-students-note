@@ -100,22 +100,47 @@ def _read_mono(path: Path, sr: int, a: float, b: float):
     return np.concatenate([x, np.zeros(max(0, n - len(x)))])[:n]
 
 
+def _spread_db(x, sr: int, win: float = 0.02) -> float:
+    """20ms 短窗 RMS 的「最大 vs 第 10 百分位」差 —— 窗裡有沒有事件的量尺。
+
+    純底噪的起伏很小(<10dB);呼吸、衣物摩擦、遠處人聲會讓峰值高出十幾 dB。
+    """
+    k = max(1, int(win * sr))
+    m = len(x) // k * k
+    if m < k * 4:
+        return 0.0
+    r = np.sqrt((x[:m].reshape(-1, k) ** 2).mean(axis=1)) + 1e-12
+    return float(20 * np.log10(r.max() / np.percentile(r, 10)))
+
+
 def find_quiet_spans(tracks, dur: float, sr: int, want: int = 8,
-                      seg: float = 1.2, probes: int = 400):
-    """在整集裡找最安靜的幾段(三軌能量和最小)當 room-tone 取樣點。"""
+                      seg: float = 1.2, probes: int = 400,
+                      max_spread_db: float = 12.0):
+    """在整集裡找最安靜**且最平坦**的幾段當 room-tone 取樣點。
+
+    2026-08-11 EP18 事故(ADR 0017):原本只排「三軌能量和最小」,挑出來的
+    8 段有 7 段的短窗峰谷差 15.7–25.7dB —— 全是含呼吸/衣物/微弱人聲的窗。
+    那些事件被鋪成每 7.84 秒重複一次的循環,MM 實聽在 0:36–0:38 抓到。
+    **能量低不等於乾淨**,挑窗必須同時看平坦度。
+
+    平坦的窗不足 `want` 個時回傳較少(甚至 0)——寧可不鋪底,也不鋪一段
+    帶事件的音訊;呼叫端負責 fallback。
+    """
     paths = [t[1] if isinstance(t, tuple) else Path(t) for t in tracks]
     cand = []
     step = max(seg, (dur - seg) / max(1, probes))
     t = 0.0
     while t + seg <= dur:
         e = 0.0
+        acc = None
         for p in paths:
             x = _read_mono(p, sr, t, t + seg)
             e += float((x ** 2).mean())
-        cand.append((e, t))
+            acc = x if acc is None else acc + x[:len(acc)]
+        cand.append((e, t, _spread_db(acc, sr)))
         t += step
-    cand.sort()
-    return [(t, t + seg) for _e, t in cand[:want]]
+    flat = sorted((e, t) for e, t, s in cand if s <= max_spread_db)
+    return [(t, t + seg) for _e, t in flat[:want]]
 
 
 def measure_noise_floor(tracks, spans, sr: int, win: float = 0.02,
@@ -143,56 +168,58 @@ def measure_noise_floor(tracks, spans, sr: int, win: float = 0.02,
     return float(20 * np.log10(max(np.percentile(vals, pct), 1e-9)))
 
 
+ROOM_TONE_NFFT = 2048
+
+
 def build_room_tone(tracks, spans, n: int, sr: int, seg: float = 1.0,
-                    xfade: float = 0.02, normalize_to_db: float | None = None):
-    """真靜音區取樣 → 等功率 crossfade 串成長度 n 的 room-tone bed。
+                    normalize_to_db: float | None = None, seed: int = 0):
+    """真靜音區取樣 → **頻譜合成**長度 n 的 room-tone bed(穩態、無循環)。
 
     D5:每次關麥噪聲地板都抽動一下,聽起來會「呼吸」。鋪一層固定的房間底噪
     就不會 —— EP16 實測不鋪的話,全軌都被 duck 的區間會掉到 −92dBFS
     (幾乎是數位靜音),跟旁邊 −68dBFS 的開麥底噪差 24dB。
 
-    **不用單一片段迴圈**:那樣每繞一圈接縫就 click 一次。改成多段真實底噪
-    輪流接,接縫走等功率 crossfade,頭尾功率互補。
+    2026-08-11 改成頻譜合成(ADR 0017)。**原本是把取樣段輪流交叉淡接後
+    循環**,問題不在接縫而在內容:取樣段裡的呼吸/衣物/微弱人聲會跟著循環,
+    EP18 實測變成每 7.84 秒重複一次的鬼影(自相關 0.77、內部峰谷差 23.5dB),
+    整集 20 分鐘每輪逼人聽一次,MM 一分鐘就聽不下去。
+
+    做法:量取樣段的平均幅度譜(這是房間的音色),用**隨機相位**重新合成
+    ——音色一模一樣,但沒有任何事件、沒有任何週期。相位隨機、50% 重疊、
+    Hann 窗 overlap-add,能量恆定。seed 固定,同一集重跑結果一致。
     """
     paths = [t[1] if isinstance(t, tuple) else Path(t) for t in tracks]
-    chunks = []
+    frames = []
+    nfft = min(ROOM_TONE_NFFT, max(64, 1 << (int(seg * sr).bit_length() - 1)))
+    win = np.hanning(nfft)
     for a, b in spans:
         take = min(seg, b - a)
-        if take < xfade * 3:
-            continue
         acc = None
         for p in paths:
             x = _read_mono(p, sr, a, a + take)
             acc = x if acc is None else acc + x[:len(acc)]
-        if acc is not None and len(acc) > int(xfade * sr) * 3:
-            chunks.append(acc)
-    if not chunks:
-        return np.zeros(n)
-    h = int(xfade * sr)
-    x = np.linspace(0.0, 1.0, h)
-    fo, fi = np.cos(np.pi * x / 2), np.sin(np.pi * x / 2)
-    out = np.zeros(n)
-    at = 0
-    k = 0
-    while at < n:
-        c = chunks[k % len(chunks)]
-        k += 1
-        body = len(c) - h
-        if at:                                   # 與前一段等功率交疊
-            lo = max(0, at - h)
-            m = min(h, n - lo, len(c))
-            out[lo:lo + m] = out[lo:lo + m] * fo[:m] + c[:m] * fi[:m]
-            at = lo + m
-            c = c[m:]
-        m = min(len(c), n - at)
-        out[at:at + m] = c[:m]
-        at += m
-        if body <= 0:
-            break
-    if normalize_to_db is not None:
-        cur = float(np.sqrt((out ** 2).mean()))
-        if cur > 1e-12:
-            out = out * (10 ** (normalize_to_db / 20) / cur)
+        if acc is None:
+            continue
+        for i in range(0, max(0, len(acc) - nfft) + 1, nfft // 2):
+            frames.append(np.abs(np.fft.rfft(acc[i:i + nfft] * win)))
+    if not frames or n <= 0:
+        return np.zeros(max(0, n))
+    mag = np.median(np.stack(frames), axis=0)     # 中位數:單一事件不影響音色
+    rng = np.random.default_rng(seed)
+    out = np.zeros(n + nfft)
+    hop = nfft // 2
+    for at in range(0, n, hop):
+        ph = rng.uniform(0.0, 2 * np.pi, len(mag))
+        ph[0] = 0.0
+        frame = np.fft.irfft(mag * np.exp(1j * ph), nfft) * win
+        out[at:at + nfft] += frame
+    out = out[:n]
+    cur = float(np.sqrt((out ** 2).mean()))
+    if normalize_to_db is not None and cur > 1e-12:
+        out = out * (10 ** (normalize_to_db / 20) / cur)
+    elif cur > 1e-12:                             # 沒指定就對齊取樣段的實際電平
+        ref = float(np.sqrt((np.stack(frames) ** 2).mean()) ** 0.5)
+        out = out * (ref / cur) if ref > 1e-12 else out
     return out
 
 

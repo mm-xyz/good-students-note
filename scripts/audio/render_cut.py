@@ -1308,14 +1308,22 @@ def main():
             n_bus = sum(int(round(b * bus_sr)) - int(round(a * bus_sr))
                         for a, b in bus_ranges)
             tt = [(t.name, sdir / t.file) for t in tracks_plan]
-            floor_db = ptr.measure_noise_floor(tt, spans, bus_sr)
-            bed = ptr.build_room_tone(
-                tt, spans, n_bus, bus_sr,
-                normalize_to_db=floor_db + args.room_tone_db)
-            import numpy as _np
-            print(f"[render] room-tone 鋪底:取樣 {len(spans)} 段真靜音,"
-                  f"實測底噪 {floor_db:.1f}dBFS → 鋪底 "
-                  f"{20 * _np.log10(float(_np.sqrt((bed ** 2).mean())) + 1e-12):.1f}dBFS")
+            if not spans:
+                # 全片找不到夠平坦的窗 → 寧可不鋪,也不鋪一段帶事件的音訊
+                # (ADR 0017:EP18 的 8 段有 7 段含呼吸/人聲,鋪成 7.84 秒循環)
+                print("[render] ⚠ 找不到夠平坦的真靜音窗 — 不鋪 room-tone")
+            else:
+                floor_db = ptr.measure_noise_floor(tt, spans, bus_sr)
+                bed = ptr.build_room_tone(
+                    tt, spans, n_bus, bus_sr,
+                    normalize_to_db=floor_db + args.room_tone_db)
+                import numpy as _np
+                print(f"[render] room-tone 鋪底:{len(spans)} 段平坦真靜音"
+                      f"(" + "、".join(f"{int(a // 60)}:{a % 60:04.1f}"
+                                       for a, _b in spans[:4])
+                      + (" …" if len(spans) > 4 else "") + ")"
+                      f",實測底噪 {floor_db:.1f}dBFS → 頻譜合成鋪底 "
+                      f"{20 * _np.log10(float(_np.sqrt((bed ** 2).mean())) + 1e-12):.1f}dBFS")
         bus = sdir / ".pertrack_bus.wav"
         print(f"[render] 混 speech bus:{len(bus_ranges)} 段 × "
               f"{len(tracks_plan)} 軌 @ {bus_sr}Hz …")
