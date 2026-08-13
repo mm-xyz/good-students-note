@@ -26,6 +26,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from srt_utils import parse_srt, fmt_mmss  # noqa: E402
+from cutplan import detect_asr_artifact  # noqa: E402 — #675 同根因:補錄跟正片
+# 一樣是 whisper ASR 轉出來的,一樣可能陷入重複迴圈,守門判準與正片共用一份。
 
 INSERT_HDR_RE = re.compile(r"^##\s*➕\s*(\S+)")
 
@@ -36,15 +38,24 @@ def build_blocks(cues: list[dict], speaker: str) -> list[dict]:
         text = c["text"].strip()
         if not text:
             continue
-        blocks.append({"id": f"S{i:04d}", "start": round(c["start"], 3),
-                       "end": round(c["end"], 3), "text": text,
-                       "speaker": speaker, "keep": True})
+        reason = detect_asr_artifact(text)
+        b = {"id": f"S{i:04d}", "start": round(c["start"], 3),
+             "end": round(c["end"], 3), "text": text,
+             "speaker": speaker, "keep": True,
+             "asr_artifact": bool(reason), "asr_artifact_reason": reason or ""}
+        if reason:
+            b["reason"] = f"⚠ASR-artifact：{reason}"
+        blocks.append(b)
     return blocks
 
 
 def md_lines(blocks: list[dict]) -> list[str]:
-    return [f"- [x] {b['id']} [{fmt_mmss(b['start'])}–{fmt_mmss(b['end'])}]"
-            f" [{b['speaker']}] {b['text']}" for b in blocks]
+    out = []
+    for b in blocks:
+        reason = f" ← {b['reason']}" if b.get("reason") else ""
+        out.append(f"- [x] {b['id']} [{fmt_mmss(b['start'])}–{fmt_mmss(b['end'])}]"
+                   f" [{b['speaker']}] {b['text']}{reason}")
+    return out
 
 
 def main() -> int:
