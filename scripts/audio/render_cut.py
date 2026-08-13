@@ -1230,9 +1230,11 @@ def main():
         print(f"[render] 語速 {args.tempo}x(只套語音,配樂原速)")
 
     if args.dump_ranges:
+        # kind 含 insert(補錄 unit)——字級精剪同樣要能被這支測試探針看到,
+        # 不然 #682 那種「insert unit 早退、刪除線沒套用」會對 --dump-ranges 隱形。
         args.dump_ranges.write_text(json.dumps(
             [[round(s.get("src_a", s["a"]), 3), round(s.get("src_b", s["b"]), 3)]
-             for s in segments if s["kind"] == "speech"],
+             for s in segments if s["kind"] in ("speech", "insert")],
             ensure_ascii=False), encoding="utf-8")
 
     speech_secs = sum(s["b"] - s["a"] for s in segments if s["kind"] == "speech")

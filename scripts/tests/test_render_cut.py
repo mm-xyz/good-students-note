@@ -580,6 +580,52 @@ class TestInsertRender(TestDryRunE2E):
         self.assertNotEqual(proc.returncode, 0)
         self.assertIn("不准改字", proc.stderr + proc.stdout)
 
+    def _with_s_block_strike(self, sdir: Path) -> None:
+        """S block(補錄)帶 ~~刪除線~~ + 補錄自己的 word 級時間戳
+        (`<媒體檔>.words.json`,與 insert_prepare.py 產出的既有命名慣例同構,
+        見 sessions/…/raw/2_Sarah_補錄.words.json 的真實命名)。時間軸刻意
+        推到 10.0s 之後,與 `_make_session` 的正片時間軸(0–6s)不重疊,
+        避免 `--dump-ranges` 的區間比對誤觸正片保留段。"""
+        wav = sdir / "補錄.wav"
+        write_wav(wav, 4.0, bursts=[(0.1, 1.9)])
+        wav.with_suffix(".words.json").write_text(json.dumps([
+            w(10.1, 10.4, "補"), w(10.4, 10.7, "錄"), w(10.7, 11.0, "第"),
+            w(11.0, 11.3, "一"), w(11.3, 11.8, "句。"),
+        ], ensure_ascii=False), encoding="utf-8")
+        cj = sdir / "cutplan.json"
+        data = json.loads(cj.read_text(encoding="utf-8"))
+        data["inserts"] = [{"file": "補錄.wav", "speaker": "Sarah", "blocks": [
+            {"id": "S0001", "start": 10.1, "end": 11.8, "text": "補錄第一句。",
+             "speaker": "Sarah", "keep": True}]}]
+        cj.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        md = sdir / "cutplan.md"
+        md.write_text(md.read_text(encoding="utf-8").replace(
+            "- [x] B0002",
+            "## ➕ 補錄.wav gain=0  補錄說明\n"
+            "- [x] S0001 [0:00–0:01] [Sarah] 補錄~~第~~一句。\n"
+            "- [x] B0002"), encoding="utf-8")
+
+    def test_s_block_strikethrough_is_actually_cut(self):
+        """S block(補錄)的 ~~刪除線~~ 不准被 insert unit 早退丟掉 — 卡 #682。
+
+        render_cut.py 對 `kind in ("silence", "insert")` 的 unit 早退,
+        segments 直接 append 整段(見「每個 speech unit:snap → 字級精剪/
+        停頓收緊 → 谷底 → word 保護」迴圈開頭),insert unit 的字級精剪
+        (`strike_removals`)從未被套用過——人審在補錄 S block 標了刪除線,
+        成品裡照樣聽得到。跟 ADR 0016(人審點名的剪除被早退/後製步驟蓋掉)
+        是同一族失效,差別只在丟掉的地方是「根本沒跑」而不是「跑了又被蓋回去」。
+        """
+        with tempfile.TemporaryDirectory() as td:
+            sdir = self._make_session(td)
+            self._with_s_block_strike(sdir)
+            dump = Path(td) / "ranges.json"
+            proc = self._render(sdir, "--dump-ranges", str(dump))
+            self.assertEqual(proc.returncode, 0, proc.stderr or proc.stdout)
+            rs = json.loads(dump.read_text(encoding="utf-8"))
+        # 「第」被標刪除線,補錄自己時間軸上 10.7–11.0s,不准出現在任何保留段
+        hit = [r for r in rs if r[0] < 11.0 - 1e-6 and r[1] > 10.7 + 1e-6]
+        self.assertEqual(hit, [], f"補錄的刪除線字仍在成品裡:{hit}")
+
     def test_missing_insert_file_fails_loudly(self):
         with tempfile.TemporaryDirectory() as td:
             sdir = self._make_session(td)
