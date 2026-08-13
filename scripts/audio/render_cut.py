@@ -1147,10 +1147,43 @@ def main():
     unit_first_seg = {}
     n_pause = 0
     manual_secs = 0.0
+    ins_words_cache: dict[Path, list[dict] | None] = {}
     for ui, u in enumerate(units):
-        if u["kind"] in ("silence", "insert"):
+        if u["kind"] == "silence":
             unit_first_seg[ui] = len(segments)
             segments.append(u)
+            continue
+        if u["kind"] == "insert":
+            # ➕ 補錄 unit(卡 #682):補錄不在 source 的時間軸上,沒有可套的
+            # snap/refine_boundaries(那兩步量的是正片的靜音/波形谷底),但
+            # 人審點名的刪除線(~~..~~)跟正片一樣說了算,一律要套 —— 舊版
+            # 這裡直接把整段 unit append 進 segments,字級精剪從未跑過。
+            # 對齊來源是補錄檔自己的 word 級時間戳(`<媒體檔>.words.json`,
+            # insert_prepare.py 錯誤訊息裡提示的既有命名慣例,對照
+            # sessions/…/raw/2_Sarah_補錄.words.json 的真實命名)。
+            unit_first_seg[ui] = len(segments)
+            ranges = [[u["a"], u["b"]]]
+            spanned_items = [it for it in u["items"] if it.get("spans")]
+            if spanned_items:
+                wp = u["path"].with_suffix(".words.json")
+                if wp not in ins_words_cache:
+                    ins_words_cache[wp] = (
+                        json.loads(wp.read_text(encoding="utf-8"))
+                        if wp.exists() else None)
+                ins_words = ins_words_cache[wp]
+                if ins_words is None:
+                    sys.exit(f"[render] FAIL: {u['file']} 的補錄 block 有 "
+                             f"~~刪除線~~ 但缺 {wp.name} — 用 "
+                             f"transcribe_local.py 重轉錄補錄檔產生 word 級"
+                             f"時間戳(見 insert_prepare.py 的提示)")
+                removals = []
+                for it in spanned_items:
+                    removals += strike_removals(it["block"], it["spans"],
+                                                ins_words)
+                    n_strike += len(it["spans"])
+                ranges = merge_ranges(subtract(ranges, removals), min_gap=0.05)
+            for a, b in ranges:
+                segments.append(dict(u, a=a, b=b))
             continue
         if u.get("raw"):  # G 空白列:保留原聲原長,不 snap/不收停頓/不精剪
             unit_first_seg[ui] = len(segments)
