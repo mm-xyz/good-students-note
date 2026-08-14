@@ -99,14 +99,21 @@ def _merge_reasons(a: str, b: str) -> str:
     """依序保留、去重、用「；」串接(既有分隔慣例,見本檔 PREAMBLE／
     diff_clips.py)。
 
-    2026-08-14 luna 守門抓到:早期版本合併理由用『prev 空才採後列』
-    (先到先贏),前列已有其他理由(如換手點未切開)、後列是「歸屬不確定」
-    時,這個安全網 marker 會被悄悄蓋掉,合併後的 block 看起來像確定的,
-    人審沒有線索分辨。改成兩邊理由都留著,不是誰先誰贏。"""
+    2026-08-14 luna 守門抓到(round 1):早期版本合併理由用『prev 空才採
+    後列』(先到先贏),前列已有其他理由(如換手點未切開)、後列是「歸屬不
+    確定」時,這個安全網 marker 會被悄悄蓋掉,合併後的 block 看起來像確
+    定的,人審沒有線索分辨。改成兩邊理由都留著,不是誰先誰贏。
+
+    2026-08-14 luna 守門抓到(round 2):去重只比對**完整字串**——三列以
+    上逐列合併時,prev 已經是「A；B」這種複合字串,第三列若帶著跟 B 相同
+    的理由(但不是逐字相同的複合字串),`p not in out` 比對不出來,一樣被
+    當成新理由追加,變成「A；B；B」堆疊。改成兩邊都先用「；」拆成 token
+    再對 token 去重,不管輸入是單一理由還是先前合併過的複合字串。"""
     out: list[str] = []
-    for p in (a, b):
-        if p and p not in out:
-            out.append(p)
+    for s in (a, b):
+        for tok in s.split("；"):
+            if tok and tok not in out:
+                out.append(tok)
     return "；".join(out)
 
 
