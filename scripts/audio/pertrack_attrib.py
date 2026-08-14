@@ -99,9 +99,42 @@ def predict_bleed_db(lv_db, g_db, noise_db):
     return out
 
 
+def _uncertain_cause(total: int, floor_n: int, max_active_lead: float,
+                     margin: float) -> str:
+    """owner=None 的原因碼(#728,搬自 #677 診斷腳本 diag1_causes.py 的等價
+    分類,判定當下就記下來,不是事後分析):
+
+    · floor_gated  — 這段至少半數 frame 三軌都在各自底噪之下(#677 量到
+      59%、時長佔 68% 屬這類:被底噪閘擋下的清楚贏家)
+    · below_margin — 扣掉 floor_gated 的 frame 後,對第二名的領先從未
+      達到 margin(#677 量到僅 0.3% 屬這類 —— 字面「三軌差距 <3dB」
+      成立的其實只有這一小撮)
+    · unstable     — 領先幅度達過 margin,但同一名候選人沒能連續撐滿
+      穩定時長就被打斷(逐 frame 抖動、換手太快)(#677 量到 38%)
+
+    優先序 floor_gated → below_margin → unstable,對齊 diag1 的分類順序。
+    """
+    if total == 0 or floor_n / total >= 0.5:
+        return "floor_gated"
+    if max_active_lead < margin:
+        return "below_margin"
+    return "unstable"
+
+
+UNCERTAIN_REASON_TEXT = {
+    "floor_gated": "歸屬不確定（三軌皆近底噪，領先不足）",
+    "below_margin": "歸屬不確定（三軌差距 <3dB）",
+    "unstable": "歸屬不確定（領先未能持續）",
+}
+
+
 def owner_runs(lv_db, hop: float, t0: float, t1: float, margin: float = 3.0,
                stable: float = 0.2, switch: float = 0.18, floor_db=None):
-    """支配 ＋ hysteresis ＋ **噪聲底閘** → [(start, end, owner|None), ...]。
+    """支配 ＋ hysteresis ＋ **噪聲底閘** → [(start, end, owner|None, cause|None), ...]。
+
+    2026-08-14 #728:owner=None 的 run 額外帶一個原因碼(`cause`,見
+    `_uncertain_cause`);owner 已判定的 run,`cause` 一律 None。原因碼在
+    判定當下、用同一份逐 frame 資料就地記下,不是另外重跑一遍分析。
 
     · 還沒有 owner:第一名要領先**第二名** ≥margin 並持續 ≥stable 秒才成立
     · 已經有 owner:挑戰者要領先**現任** ≥margin 並持續 ≥switch 秒才換手
@@ -133,15 +166,45 @@ def owner_runs(lv_db, hop: float, t0: float, t1: float, margin: float = 3.0,
     i0 = max(0, int(round(t0 / hop)))
     i1 = min(lv.shape[1], int(round(t1 / hop)))
     if i1 <= i0:
-        return [(t0, t1, None)]
+        return [(t0, t1, None, "below_margin")]
     span = (i1 - i0) * hop
     stable = min(stable, max(2 * hop, 0.6 * span))
     switch = min(switch, max(2 * hop, 0.6 * span))
-    runs: list[tuple[float, float, int | None]] = []
+    runs: list[tuple[float, float, int | None, str | None]] = []
     owner: int | None = None
     run_start = i0
     cand: int | None = None
     cand_start = i0
+    # owner 只可能在函式一開始是 None,一旦建立就不會再變回 None(見下方
+    # 換手邏輯),所以「不確定原因」的累計量只在 owner 還是 None 的這段
+    # 前綴期間有意義 —— 判定當下就記,不是事後對 L_attr 另跑一遍分析。
+    #
+    # 2026-08-14 luna 守門抓到(round 1,#728):輸出的 None-run 只到
+    # cand_start 為止(候選人成立後、正在撐穩定時長的 frame 屬於**下一段**
+    # owner run 的醞釀期),但累計量原本是逐 frame 一路加到確立那一刻,
+    # 沒有在 cand_start 切斷——候選人撐穩定時長的那幾個 frame(通常是
+    # 「清楚在講話」的 active frame)混進了 committed 統計,把本該是
+    # floor_gated 的區間污染成 unstable。改成 committed/pending 雙桶:
+    # comm_* 只計「確定屬於最終輸出的 None-run」的 frame;pend_* 是
+    # 「目前存活候選人」正在累積、但還沒確定會不會被輸出排除的 frame ——
+    # 候選人換人(舊候選人放棄)或候選人本身失敗(below_floor 擋下／margin
+    # 不足)時,pend 併回 comm(那些 frame 仍在 None-run 範圍內);候選人
+    # 撐滿穩定時長、真的確立所有權時,pend 直接丟棄不進 comm(那些 frame
+    # 已經是下一段 owner run 的一部分,不屬於這個 None-run)。
+    comm_total = comm_floor = 0
+    comm_max_lead = float("-inf")
+    pend_total = pend_floor = 0
+    pend_max_lead = float("-inf")
+
+    def _merge_pending_into_committed():
+        nonlocal comm_total, comm_floor, comm_max_lead
+        nonlocal pend_total, pend_floor, pend_max_lead
+        comm_total += pend_total
+        comm_floor += pend_floor
+        comm_max_lead = max(comm_max_lead, pend_max_lead)
+        pend_total = pend_floor = 0
+        pend_max_lead = float("-inf")
+
     for f in range(i0, i1):
         col = lv[:, f]
         order = np.argsort(-col)
@@ -155,26 +218,76 @@ def owner_runs(lv_db, hop: float, t0: float, t1: float, margin: float = 3.0,
         # 不能只看「挑戰者夠不夠大聲」——講得小聲仍然是在講話(EP16 Sarah 的
         # 「消息吧」只有 -54.4dB,低於 -48.6 的門檻,那樣擋會讓 44% 的句子
         # 變成歸屬不確定)。只有大家都沒出聲時才維持現任。
-        if floor_db is not None and all(
-                col[j] < floor_db[j] for j in range(col.shape[0])):
+        below_floor = floor_db is not None and all(
+            col[j] < floor_db[j] for j in range(col.shape[0]))
+        # below_floor 用**原始**門檻(不管 #726 的相對領先例外有沒有豁免),
+        # 對齊 #677 diag1 的口徑:這個 frame 是不是「三軌都貼著底噪」本身
+        # 就是值得回報人審的性質,跟它最後有沒有被豁免通過是兩件事。
+        frame_lead = None if below_floor else (col[best] - ref)
+
+        if below_floor:
             # #726 相對領先例外:全員在底噪之下不代表沒人講話 —— leader
             # 對第二名仍領先 ≥FLOOR_BYPASS_LEAD_DB 就跳過此閘,落下去走
             # 下面一般的 margin/hysteresis 判定(不豁免就照舊維持現任)。
             rel_lead = col[best] - col[int(order[1])]
             if rel_lead < FLOOR_BYPASS_LEAD_DB:
+                # 候選人(如果有)死在這一 frame —— pending 併回 committed,
+                # 這一 frame 自己也直接記 committed(不屬於任何存活候選)。
+                if owner is None:
+                    _merge_pending_into_committed()
+                    comm_total += 1
+                    comm_floor += 1
                 cand = None
                 continue
+
         if col[best] - ref >= margin:
             if cand != best:
+                # 新候選人上場:舊 pending(屬於剛被放棄的舊候選人,若
+                # cand 原本就是 None 則 pending 本來就是空的)併回
+                # committed,這個候選人重新起算 pending。
+                if owner is None:
+                    _merge_pending_into_committed()
                 cand, cand_start = best, f
+            if owner is None:
+                pend_total += 1
+                if below_floor:
+                    pend_floor += 1
+                elif frame_lead is not None and frame_lead > pend_max_lead:
+                    pend_max_lead = frame_lead
             if (f - cand_start + 1) * hop >= need - 1e-9:
                 if cand_start > run_start:
-                    runs.append((run_start * hop, cand_start * hop, owner))
+                    # 確立當下:cause 只看 committed(pending 的這批 frame
+                    # 屬於剛確立的這段 owner run,不進這個 None-run 的統計)。
+                    cause = (_uncertain_cause(comm_total, comm_floor,
+                                              comm_max_lead, margin)
+                             if owner is None else None)
+                    runs.append((run_start * hop, cand_start * hop, owner, cause))
                 owner, run_start, cand = best, cand_start, None
+                comm_total = comm_floor = 0
+                comm_max_lead = float("-inf")
+                pend_total = pend_floor = 0
+                pend_max_lead = float("-inf")
         else:
+            # 候選人(如果有)因這一 frame 沒達到 margin 而死 —— pending
+            # 併回 committed,這一 frame 自己也直接記 committed。
+            if owner is None:
+                _merge_pending_into_committed()
+                comm_total += 1
+                if below_floor:
+                    comm_floor += 1
+                elif frame_lead is not None and frame_lead > comm_max_lead:
+                    comm_max_lead = frame_lead
             cand = None
-    runs.append((run_start * hop, i1 * hop, owner))
-    return [(round(a, 6), round(b, 6), o) for a, b, o in runs if b - a > 1e-9]
+    # 迴圈結束時 owner 還是 None:從沒確立過所有權,pending(如果有,代表
+    # 一個還在撐穩定時長、但沒撐到終點的候選人)理所當然屬於這段 None-run
+    # 的輸出範圍,併回 committed 才分類。
+    if owner is None:
+        _merge_pending_into_committed()
+    cause = (_uncertain_cause(comm_total, comm_floor, comm_max_lead, margin)
+             if owner is None else None)
+    runs.append((run_start * hop, i1 * hop, owner, cause))
+    return [(round(a, 6), round(b, 6), o, c) for a, b, o, c in runs
+            if b - a > 1e-9]
 
 
 def annotate_canonical(words: list[dict], block_text: str) -> list[dict]:
@@ -220,6 +333,14 @@ def split_phrase(words: list[dict], ref_text: str, runs, snap: float = 0.25):
     (D2:換手只能落在字界;硬切會把字切成兩半)。
     回傳 [{start, end, text, owner, uncertain, reason, words}]。
     文字一律由 canonical words 重建 —— 逐軌 ASR 不參與(D1)。
+
+    2026-08-14 #728:`runs` 是 owner_runs() 的 4-tuple
+    [(start, end, owner, cause), ...] —— owner=None 時按 `cause`(見
+    `pertrack_attrib._uncertain_cause`)分流成 `UNCERTAIN_REASON_TEXT` 裡
+    對應的文案,不再全部寫死同一句「三軌差距 <3dB」(#677 診斷:字面成立
+    的只有 0.3%)。一個 phrase 若跨了多個 owner=None 的 run(各自原因可能
+    不同),取重疊時長最長的那個原因當代表 —— 跟 owner 本身「佔多數的那
+    一位」用同一套邏輯,不是另外發明規則。
     """
     if not words:
         return []
@@ -227,7 +348,7 @@ def split_phrase(words: list[dict], ref_text: str, runs, snap: float = 0.25):
             for k in range(1, len(words))]
     cuts: list[int] = []
     dropped = False
-    for a, _b, _o in runs[1:]:
+    for a, _b, _o, _c in runs[1:]:
         best = min(gaps, key=lambda x: abs(x[0] - a), default=None)
         if best is None or abs(best[0] - a) > snap or best[1] in cuts:
             dropped = True
@@ -237,13 +358,19 @@ def split_phrase(words: list[dict], ref_text: str, runs, snap: float = 0.25):
 
     def owner_of(a: float, b: float):
         acc: dict[int | None, float] = {}
-        for ra, rb, o in runs:
+        cause_acc: dict[str, float] = {}
+        for ra, rb, o, c in runs:
             ov = min(b, rb) - max(a, ra)
             if ov > 0:
                 acc[o] = acc.get(o, 0.0) + ov
+                if o is None and c:
+                    cause_acc[c] = cause_acc.get(c, 0.0) + ov
         if not acc:
-            return None
-        return max(acc.items(), key=lambda kv: kv[1])[0]
+            return None, None
+        winner = max(acc.items(), key=lambda kv: kv[1])[0]
+        cause = (max(cause_acc.items(), key=lambda kv: kv[1])[0]
+                 if winner is None and cause_acc else None)
+        return winner, cause
 
     out = []
     for lo, hi in zip([0] + cuts, cuts + [len(words)]):
@@ -251,10 +378,11 @@ def split_phrase(words: list[dict], ref_text: str, runs, snap: float = 0.25):
         if not ws:
             continue
         a, b = ws[0]["start"], ws[-1]["end"]
-        o = owner_of(a, b)
+        o, cause = owner_of(a, b)
         reason = ""
         if o is None:
-            reason = "歸屬不確定（三軌差距 <3dB）"
+            reason = UNCERTAIN_REASON_TEXT.get(
+                cause, UNCERTAIN_REASON_TEXT["below_margin"])
         elif dropped and len(cuts) < len(runs) - 1:
             reason = "換手點附近 250ms 內沒有字界，未切開"
         text = ("".join(x["ctext"] for x in ws) if "ctext" in ws[0]
