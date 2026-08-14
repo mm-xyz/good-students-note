@@ -22,7 +22,8 @@ sys.path.insert(0, str(AUDIO_DIR))
 
 from pertrack_blocks import (  # noqa: E402
     derive_prefixes, enforce_phrase_len, carry_over_program, build_md,
-    pick_visible, backfill_artifact_flags,
+    pick_visible, backfill_artifact_flags, merge_sentence_rows,
+    _merge_reasons,
 )
 from render_cut import parse_program  # noqa: E402
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -242,6 +243,133 @@ class TestBackfillArtifactFlags(unittest.TestCase):
         self.assertEqual(n, 0)  # B0001 補上後判定為 False,B0068 本來就有欄位不重算
         self.assertFalse(blocks[0]["asr_artifact"])
         self.assertEqual(blocks[1]["asr_artifact_reason"], "已標")
+
+
+def row(a, b, text, kind="speech", src="B0001", reason=""):
+    return {"start": a, "end": b, "text": text, "kind": kind,
+            "keep": True, "speaker": "Sarah", "reason": reason, "src": src}
+
+
+class TestMergeSentenceRows(unittest.TestCase):
+    """#676:同 owner、緊鄰無停頓的碎片併回句子級 block。"""
+
+    def test_adjacent_same_owner_fragments_merge(self):
+        rows = [row(0.0, 1.0, "上班忙著解副"), row(1.1, 1.3, "本,"),
+                row(1.4, 2.0, "下班忙著開副"), row(2.05, 2.3, "本。")]
+        out = merge_sentence_rows(rows, gap=0.45, max_block=2.5)
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0]["text"], "上班忙著解副本,下班忙著開副本。")
+
+    def test_real_pause_is_not_bridged(self):
+        """間隔 ≥gap ＝真實停頓，不合併(保留原本的斷點)。"""
+        rows = [row(0.0, 1.0, "嗨"), row(1.6, 2.0, "大家好")]
+        out = merge_sentence_rows(rows, gap=0.45, max_block=2.5)
+        self.assertEqual(len(out), 2)
+
+    def test_max_block_cap_stops_the_merge(self):
+        """合併後會超過 max_block 秒就不再併，避免退回 cc9ecc6 之前的大塊。"""
+        rows = [row(0.0, 1.0, "一"), row(1.05, 2.0, "二"),
+                row(2.05, 3.0, "三")]
+        out = merge_sentence_rows(rows, gap=0.45, max_block=2.0)
+        self.assertEqual(len(out), 2)
+        self.assertEqual(out[0]["text"], "一二")
+        self.assertEqual(out[1]["text"], "三")
+
+    def test_voicing_row_breaks_the_chain(self):
+        """非詞彙出聲列不參與合併,天然當講者換手斷點。"""
+        rows = [row(0.0, 1.0, "一"),
+                row(1.05, 1.2, "（非詞彙出聲／待辨 0.2s）", kind="voicing"),
+                row(1.25, 2.0, "二")]
+        out = merge_sentence_rows(rows, gap=0.45, max_block=5.0)
+        self.assertEqual(len(out), 3)
+
+    def test_timecodes_and_text_are_conserved(self):
+        """只合不丟:envelope(首尾時間)不變,文字全部保留、順序不亂。"""
+        rows = [row(0.0, 1.0, "一"), row(1.05, 2.0, "二"),
+                row(2.1, 3.0, "三")]
+        out = merge_sentence_rows(rows, gap=0.45, max_block=10.0)
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0]["start"], 0.0)
+        self.assertEqual(out[0]["end"], 3.0)
+        self.assertEqual(out[0]["text"], "一二三")
+
+    def test_no_gap_before_first_row_is_never_dropped(self):
+        rows = [row(5.0, 6.0, "只有一句")]
+        out = merge_sentence_rows(rows, gap=0.45, max_block=2.5)
+        self.assertEqual(out, rows)
+
+    def test_does_not_bridge_over_another_owners_interjection(self):
+        """A 講兩段、間隔中間 B 有插話 —— 就算間隔 <gap,合併起來的文字會
+        跳過 B 講的內容,跟來源 SRT 對不上,不能併(render_cut 逐字驗證
+        需要:每個 block 的文字必須是來源 SRT 的連續子字串)。"""
+        rows = [row(0.0, 1.0, "前半句"), row(1.2, 2.0, "後半句")]
+        other = [(1.05, 1.15)]  # B 在 A 的間隔裡插了一句
+        out = merge_sentence_rows(rows, gap=0.45, max_block=2.5,
+                                  blocked_by=other)
+        self.assertEqual(len(out), 2)
+
+    def test_merges_when_gap_is_clear_of_other_owners(self):
+        rows = [row(0.0, 1.0, "前半句"), row(1.2, 2.0, "後半句")]
+        other = [(5.0, 5.5)]  # 不在間隔範圍內,不擋
+        out = merge_sentence_rows(rows, gap=0.45, max_block=2.5,
+                                  blocked_by=other)
+        self.assertEqual(len(out), 1)
+
+    def test_merge_keeps_both_reasons_uncertain_marker_never_lost(self):
+        """luna 守門 FAIL 的最小重現:前列已有其他理由、後列是「歸屬不確定」
+        ——舊版『prev reason 空才採後列』會讓歸屬不確定 marker 消失,合併
+        後看起來像確定,人審的安全網被拔掉。兩邊理由都要留著。"""
+        a = row(0.0, 1.0, "換手處", reason="換手點附近 250ms 內沒有字界，未切開")
+        b = row(1.05, 2.0, "後半句",
+               reason="歸屬不確定（三軌差距 <3dB）（暫掛 diarize 判的 Sarah）")
+        out = merge_sentence_rows([a, b], gap=0.45, max_block=2.5)
+        self.assertEqual(len(out), 1)
+        self.assertIn("換手點附近 250ms 內沒有字界，未切開", out[0]["reason"])
+        self.assertIn("歸屬不確定", out[0]["reason"])
+
+    def test_merge_reason_dedupes_identical_text(self):
+        a = row(0.0, 1.0, "一", reason="同一理由")
+        b = row(1.05, 2.0, "二", reason="同一理由")
+        out = merge_sentence_rows([a, b], gap=0.45, max_block=2.5)
+        self.assertEqual(out[0]["reason"], "同一理由")
+
+    def test_merge_keeps_prev_reason_when_later_row_has_none(self):
+        a = row(0.0, 1.0, "一", reason="前列理由")
+        b = row(1.05, 2.0, "二", reason="")
+        out = merge_sentence_rows([a, b], gap=0.45, max_block=2.5)
+        self.assertEqual(out[0]["reason"], "前列理由")
+
+    def test_merge_reasons_dedupes_tokens_not_whole_strings(self):
+        """luna round-2:_merge_reasons("A；B","B") 舊版回 "A；B；B"——
+        去重只比對完整字串,前一次結果已是複合字串時,後面重複的 token 照樣
+        被追加堆疊。要先拆 token 再去重。"""
+        self.assertEqual(_merge_reasons("A；B", "B"), "A；B")
+
+    def test_three_row_chain_merge_does_not_stack_duplicate_marker(self):
+        """三列連併,每列都帶「歸屬不確定」——合併後該 marker 只出現一次,
+        不會因為逐列合併(第三列撞上已經是複合字串的 prev.reason)而重複
+        堆疊。"""
+        uncertain = "歸屬不確定（三軌差距 <3dB）（暫掛 diarize 判的 Sarah）"
+        rows = [row(0.0, 1.0, "一", reason="換手點附近 250ms 內沒有字界，未切開"),
+                row(1.05, 2.0, "二", reason=uncertain),
+                row(2.1, 3.0, "三", reason=uncertain)]
+        out = merge_sentence_rows(rows, gap=0.45, max_block=5.0)
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0]["reason"].count(uncertain), 1)
+        self.assertEqual(out[0]["reason"],
+                         f"換手點附近 250ms 內沒有字界，未切開；{uncertain}")
+
+    def test_merge_across_original_block_boundary_keeps_src_traceable(self):
+        """同一講者一直講、沒停頓,可以跨原本的 canonical block(src)邊界
+        合併(這正是 no-src-limit 才壓得下 #676 的 69.8% 的原因)——但 src
+        不能悄悄丟掉後半段來源,要看得出這行是哪幾個原始 block 拼的。"""
+        rows = [row(0.0, 1.0, "它的模式呢?", src="B0013"),
+                row(1.05, 2.0, "或者它的產品", src="B0014")]
+        out = merge_sentence_rows(rows, gap=0.45, max_block=2.5)
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0]["text"], "它的模式呢?或者它的產品")
+        self.assertIn("B0013", out[0]["src"])
+        self.assertIn("B0014", out[0]["src"])
 
 
 class TestVisibleBudget(unittest.TestCase):

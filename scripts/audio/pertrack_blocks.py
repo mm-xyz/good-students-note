@@ -95,6 +95,28 @@ def derive_prefixes(names: list[str]) -> dict[str, str]:
     return out
 
 
+def _merge_reasons(a: str, b: str) -> str:
+    """依序保留、去重、用「；」串接(既有分隔慣例,見本檔 PREAMBLE／
+    diff_clips.py)。
+
+    2026-08-14 luna 守門抓到(round 1):早期版本合併理由用『prev 空才採
+    後列』(先到先贏),前列已有其他理由(如換手點未切開)、後列是「歸屬不
+    確定」時,這個安全網 marker 會被悄悄蓋掉,合併後的 block 看起來像確
+    定的,人審沒有線索分辨。改成兩邊理由都留著,不是誰先誰贏。
+
+    2026-08-14 luna 守門抓到(round 2):去重只比對**完整字串**——三列以
+    上逐列合併時,prev 已經是「A；B」這種複合字串,第三列若帶著跟 B 相同
+    的理由(但不是逐字相同的複合字串),`p not in out` 比對不出來,一樣被
+    當成新理由追加,變成「A；B；B」堆疊。改成兩邊都先用「；」拆成 token
+    再對 token 去重,不管輸入是單一理由還是先前合併過的複合字串。"""
+    out: list[str] = []
+    for s in (a, b):
+        for tok in s.split("；"):
+            if tok and tok not in out:
+                out.append(tok)
+    return "；".join(out)
+
+
 # ── 粒度 ────────────────────────────────────────────────────────────────
 def enforce_phrase_len(parts: list[dict], lo: float = 0.4,
                        hi: float = 1.2) -> list[dict]:
@@ -120,6 +142,70 @@ def enforce_phrase_len(parts: list[dict], lo: float = 0.4,
         out[1]["text"] = out[0]["text"] + out[1]["text"]
         out[1]["words"] = out[0]["words"] + out[1]["words"]
         out.pop(0)
+    return out
+
+
+def merge_sentence_rows(rows: list[dict], gap: float = 0.45,
+                        max_block: float = 2.0,
+                        blocked_by: list[tuple[float, float]] | None = None
+                        ) -> list[dict]:
+    """把同 owner、間隔 <gap 秒、合併後不超過 max_block 秒的相鄰 speech row
+    併成句子級 block(#676)。
+
+    D1 為了「每秒一個可勾選」(cc9ecc6)把 canonical block 切到 0.4–1.2s 的
+    phrase,但 D2 逐 phrase-cue 各自判定歸屬、逐 phrase 各自呼叫
+    `enforce_phrase_len`——同一句被標點/字間空隙切成的多個 phrase-cue,
+    即使歸屬相同、時間緊鄰,從未在下游合併回去。EP16 實測 69.8% 的分軌
+    列 ≤4 字,一句話被劈成 3 行,人審讀不動(卡 #676)。
+
+    這裡在 D1/D2 跑完、rows 已依時間排序**之後**做最後一道合併,只吃已經
+    判定好的 owner 分組結果,**不重新判定歸屬**(#677 的事)。
+    voicing(非詞彙出聲)列不參與合併,天然是講者換手/事件的斷點。
+    間隔 ≥gap(預設 0.45s,略低於 D1 斷句用的 0.5s 停頓門檻)視為真實
+    停頓,不跨過去合併——只黏合「非因停頓、純因粒度上限被切開」的碎片。
+    max_block 擋住退回 cc9ecc6 之前的大塊問題(EP16 曾見 27.9s 一個
+    block)。
+
+    **不限同一 src**:同一講者連續講、中間沒有真實停頓,常常會跨過上游
+    混音線 build_blocks 自己切的 canonical block 邊界(EP16 實測:只限
+    同 src 合併卡在 32% 降不下去,拿掉這個限制才壓到 21.8%——上游的
+    block 邊界本來就是混音線自己的 merge_gap/max_block 決定的,不代表
+    句子邊界)。跨邊界合併時 src 改記所有來源 id(`B0013+B0014`),不悄悄
+    只留第一段的 src 誤導人審溯源。
+
+    **不跨過別人插的話**:`blocked_by` 是其他 owner 的 speech row 區間
+    (start, end)清單。就算間隔 <gap,只要那段時間別人也在講話,合併起來
+    的文字就會跳過別人講的內容、不再是來源 SRT 的連續子字串——
+    render_cut.py 的逐字防幻覺驗證(`validate_program`)會直接 FAIL。
+    EP16 實測:拿掉同 src 限制後有 17 處(merged 列的 5.0%)撞到這個,
+    全部是「A 講到一半、B 插了一句(通常是附和的『嗯』)、A 接著講」——
+    這裡擋住,不留給 render 階段才爆。
+
+    只延伸 prev 的 end、串接 text,不動任何 start、不丟任何片段——
+    時間碼守恆。"""
+    blocked_by = blocked_by or []
+
+    def _bridged_by_other(t0: float, t1: float) -> bool:
+        return any(s < t1 and e > t0 for s, e in blocked_by)
+
+    out: list[dict] = []
+    for r in rows:
+        prev = out[-1] if out else None
+        joinable = (prev is not None
+                    and prev["kind"] == "speech" and r["kind"] == "speech"
+                    and r["start"] - prev["end"] < gap
+                    and r["end"] - prev["start"] <= max_block
+                    and not _bridged_by_other(prev["end"], r["start"]))
+        if joinable:
+            prev["end"] = r["end"]
+            prev["text"] += r["text"]
+            if r.get("src") and r["src"] != prev.get("src"):
+                prev["src"] = f"{prev.get('src', '')}+{r['src']}" \
+                    if prev.get("src") else r["src"]
+            prev["reason"] = _merge_reasons(prev.get("reason", ""),
+                                            r.get("reason", ""))
+        else:
+            out.append(dict(r))
     return out
 
 
@@ -170,6 +256,9 @@ def carry_over_program(md_lines: list[str], id_time: dict[str, float]):
 
 def _row_line(r: dict) -> str:
     mark = "x" if r["keep"] else " "
+    # reason 可能是 merge_sentence_rows 用「；」串接的多筆理由(#676 luna
+    # 守門修正)——原樣印出,不用另外拆解,「歸屬不確定」等安全網 marker
+    # 保證在裡面,不會因為合併而消失。
     tail = f" ← {r['reason']}" if r.get("reason") else ""
     return (f"- [{mark}] {r['id']} [{fmt_mmss(r['start'])}–{fmt_mmss(r['end'])}]"
             f" [{r['speaker']}] {r['text']}{tail}")
@@ -265,6 +354,12 @@ def main() -> int:
                          "緊貼自己字頭的事件留著會把字頭削掉")
     ap.add_argument("--visible-per-min", type=float, default=2.0)
     ap.add_argument("--high-conf", type=float, default=6.0)
+    ap.add_argument("--sentence-gap", type=float, default=0.45,
+                    help="句子級合併(#676):同 owner、間隔小於此值秒的相鄰"
+                         " speech row 併成一句;≥此值視為真實停頓不合併")
+    ap.add_argument("--sentence-max", type=float, default=2.0,
+                    help="句子級合併後單一 block 的秒數上限，避免併回"
+                         "cc9ecc6 之前粒度太粗的大塊")
     args = ap.parse_args()
 
     sdir = Path(args.session)
@@ -409,10 +504,17 @@ def main() -> int:
         per_track[e["track"]].append(e_row)
 
     # ── 編號 ＋ 落檔 ──────────────────────────────────────────────────
+    sorted_tracks = {n: sorted(per_track[n], key=lambda r: (r["start"], r["end"]))
+                     for n in names}
     rows_all: list[dict] = []
     tracks_json = []
     for i, n in enumerate(names):
-        rows = sorted(per_track[n], key=lambda r: (r["start"], r["end"]))
+        blocked_by = sorted(
+            (r["start"], r["end"])
+            for m in names if m != n
+            for r in sorted_tracks[m] if r["kind"] == "speech")
+        rows = merge_sentence_rows(sorted_tracks[n], args.sentence_gap,
+                                   args.sentence_max, blocked_by=blocked_by)
         for k, r in enumerate(rows, 1):
             r["id"] = f"{pfx[n]}{k:04d}"
         rows_all += rows
