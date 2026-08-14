@@ -123,6 +123,42 @@ def enforce_phrase_len(parts: list[dict], lo: float = 0.4,
     return out
 
 
+def merge_sentence_rows(rows: list[dict], gap: float = 0.45,
+                        max_block: float = 2.0) -> list[dict]:
+    """把同 owner、間隔 <gap 秒、合併後不超過 max_block 秒的相鄰 speech row
+    併成句子級 block(#676)。
+
+    D1 為了「每秒一個可勾選」(cc9ecc6)把 canonical block 切到 0.4–1.2s 的
+    phrase,但 D2 逐 phrase-cue 各自判定歸屬、逐 phrase 各自呼叫
+    `enforce_phrase_len`——同一句被標點/字間空隙切成的多個 phrase-cue,
+    即使歸屬相同、時間緊鄰,從未在下游合併回去。EP16 實測 69.8% 的分軌
+    列 ≤4 字,一句話被劈成 3 行,人審讀不動(卡 #676)。
+
+    這裡在 D1/D2 跑完、rows 已依時間排序**之後**做最後一道合併,只吃已經
+    判定好的 owner 分組結果,**不重新判定歸屬**(#677 的事)。
+    voicing(非詞彙出聲)列不參與合併,天然是講者換手/事件的斷點。
+    間隔 ≥gap(預設 0.45s,略低於 D1 斷句用的 0.5s 停頓門檻)視為真實
+    停頓,不跨過去合併——只黏合「非因停頓、純因粒度上限被切開」的碎片。
+    max_block 擋住退回 cc9ecc6 之前的大塊問題(EP16 曾見 27.9s 一個
+    block)。只延伸 prev 的 end、串接 text,不動任何 start、不丟任何
+    片段——時間碼守恆。"""
+    out: list[dict] = []
+    for r in rows:
+        prev = out[-1] if out else None
+        joinable = (prev is not None
+                    and prev["kind"] == "speech" and r["kind"] == "speech"
+                    and r["start"] - prev["end"] < gap
+                    and r["end"] - prev["start"] <= max_block)
+        if joinable:
+            prev["end"] = r["end"]
+            prev["text"] += r["text"]
+            if r.get("reason") and not prev.get("reason"):
+                prev["reason"] = r["reason"]
+        else:
+            out.append(dict(r))
+    return out
+
+
 # ── 文件結構搬運 ─────────────────────────────────────────────────────────
 def carry_over_program(md_lines: list[str], id_time: dict[str, float]):
     """cutplan.md 的非 B 列結構抽出來,附錨點時間(＝文件中它後面第一個計時列)。
@@ -265,6 +301,12 @@ def main() -> int:
                          "緊貼自己字頭的事件留著會把字頭削掉")
     ap.add_argument("--visible-per-min", type=float, default=2.0)
     ap.add_argument("--high-conf", type=float, default=6.0)
+    ap.add_argument("--sentence-gap", type=float, default=0.45,
+                    help="句子級合併(#676):同 owner、間隔小於此值秒的相鄰"
+                         " speech row 併成一句;≥此值視為真實停頓不合併")
+    ap.add_argument("--sentence-max", type=float, default=2.0,
+                    help="句子級合併後單一 block 的秒數上限，避免併回"
+                         "cc9ecc6 之前粒度太粗的大塊")
     args = ap.parse_args()
 
     sdir = Path(args.session)
@@ -413,6 +455,7 @@ def main() -> int:
     tracks_json = []
     for i, n in enumerate(names):
         rows = sorted(per_track[n], key=lambda r: (r["start"], r["end"]))
+        rows = merge_sentence_rows(rows, args.sentence_gap, args.sentence_max)
         for k, r in enumerate(rows, 1):
             r["id"] = f"{pfx[n]}{k:04d}"
         rows_all += rows
