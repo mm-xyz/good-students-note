@@ -113,3 +113,16 @@ pertrack 這邊的 `backfill_artifact_flags` 只設 `asr_artifact`/
 
 全套 `scripts/tests/run_all.sh` 實測 383 條(先前回報誤用 376,重新數
 一次以此為準)。
+
+### round 2:去重要拆 token,不能比對整個字串
+
+luna 接著抓到 `_merge_reasons` 的去重比對的是**完整字串**——三列以上
+逐列合併時,`prev.reason` 已經是上一次合併產出的複合字串(如「A；B」),
+第三列若帶著跟 B 相同的理由,但不是逐字相同的複合字串,`p not in out`
+比對不出來,一樣被當成新理由追加,變成「A；B；B」堆疊。改法:兩邊輸入
+都先用「；」拆成 token 再對 token 去重、依序保留。回歸測試兩條:三列
+連併(每列都帶「歸屬不確定」)→ marker 只出現一次;`_merge_reasons(
+"A；B", "B")` → `"A；B"`。EP16 真跑掃描:1266 句語音 0 句 reason 出現
+重複 token。
+
+全套測試最終 385 條。
