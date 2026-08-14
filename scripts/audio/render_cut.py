@@ -319,6 +319,34 @@ def strike_removals(block: dict, spans: list[list[int]], words: list[dict],
     return out
 
 
+def insert_words_candidates(logical: Path, resolved: Path) -> list[Path]:
+    """補錄 word 級時間戳的 sidecar 候選路徑,依序試(卡 #682 luna 守門實測):
+
+    1. cutplan 寫的 logical media 路徑(`## ➕` 檔名,可能是 symlink)旁
+       `<media>.words.json` —— 真實 session 的常態:`raw/2_Sarah_補錄.WAV`
+       是指到 Drive 外部原始檔的 symlink,`.words.json` 放在 symlink 這一側
+       (`raw/2_Sarah_補錄.words.json`),不是 target 旁。
+    2. resolved(symlink 解完的 target)路徑旁 `<media>.words.json` ——
+       media 本身不是 symlink,或 sidecar 剛好也搬到 target 端時的備援。
+    3. `transcribe_local.py:85` 實際產出的目錄級 `words.json`
+       (`out.parent / "words.json"`,`-o` 慣例上跟 media 同層,對齊
+       `insert_prepare.py` 的 `media.with_suffix(".srt")` 假設)—— logical
+       側優先。
+    4. 同一套目錄級命名,resolved 側再試一次。
+
+    只回傳候選清單,呼叫端逐一 `.exists()`——找不到任何一個才 fail-fast,
+    不得對「symlink 補錄檔」這種現存 session 一律炸掉。
+    """
+    seen: list[Path] = []
+    for c in (logical.with_suffix(".words.json"),
+              resolved.with_suffix(".words.json"),
+              logical.parent / "words.json",
+              resolved.parent / "words.json"):
+        if c not in seen:
+            seen.append(c)
+    return seen
+
+
 def pause_removals(ranges: list[list[float]], silences: list[dict],
                    max_pause: float, keep: float,
                    words: list[dict] | None) -> list[list[float]]:
@@ -1049,7 +1077,8 @@ def main():
                 sys.exit(f"[render] FAIL: 補錄檔不存在:{it['file']}"
                          f"(找過 session 目錄/repo 根/絕對路徑)")
             file_dur = ffprobe_duration(path)
-            cfg = {"path": path.resolve(), "gain": it["gain"], "gain_db": 0.0,
+            cfg = {"path": path.resolve(), "logical_path": path,
+                   "gain": it["gain"], "gain_db": 0.0,
                    "fade": it["fade"], "tempo": it["tempo"], "note": it["note"],
                    "file": it["file"]}
             ins_cfg[it["file"]] = cfg
@@ -1147,10 +1176,47 @@ def main():
     unit_first_seg = {}
     n_pause = 0
     manual_secs = 0.0
+    ins_words_cache: dict[tuple[Path, Path], list[dict] | None] = {}
     for ui, u in enumerate(units):
-        if u["kind"] in ("silence", "insert"):
+        if u["kind"] == "silence":
             unit_first_seg[ui] = len(segments)
             segments.append(u)
+            continue
+        if u["kind"] == "insert":
+            # ➕ 補錄 unit(卡 #682):補錄不在 source 的時間軸上,沒有可套的
+            # snap/refine_boundaries(那兩步量的是正片的靜音/波形谷底),但
+            # 人審點名的刪除線(~~..~~)跟正片一樣說了算,一律要套 —— 舊版
+            # 這裡直接把整段 unit append 進 segments,字級精剪從未跑過。
+            # word 級時間戳來源見 insert_words_candidates() 的四階梯查找
+            # (真實 session 的補錄檔常是 symlink,sidecar 命名/存放側不只一種)。
+            unit_first_seg[ui] = len(segments)
+            ranges = [[u["a"], u["b"]]]
+            spanned_items = [it for it in u["items"] if it.get("spans")]
+            if spanned_items:
+                logical = u.get("logical_path", u["path"])
+                cache_key = (logical, u["path"])
+                if cache_key not in ins_words_cache:
+                    candidates = insert_words_candidates(logical, u["path"])
+                    hit = next((c for c in candidates if c.exists()), None)
+                    ins_words_cache[cache_key] = (
+                        json.loads(hit.read_text(encoding="utf-8"))
+                        if hit else None)
+                ins_words = ins_words_cache[cache_key]
+                if ins_words is None:
+                    tried = "、".join(str(c) for c in
+                                     insert_words_candidates(logical, u["path"]))
+                    sys.exit(f"[render] FAIL: {u['file']} 的補錄 block 有 "
+                             f"~~刪除線~~ 但找不到 word 級時間戳 — 試過:"
+                             f"{tried} — 用 transcribe_local.py 重轉錄補錄檔"
+                             f"產生(見 insert_prepare.py 的提示)")
+                removals = []
+                for it in spanned_items:
+                    removals += strike_removals(it["block"], it["spans"],
+                                                ins_words)
+                    n_strike += len(it["spans"])
+                ranges = merge_ranges(subtract(ranges, removals), min_gap=0.05)
+            for a, b in ranges:
+                segments.append(dict(u, a=a, b=b))
             continue
         if u.get("raw"):  # G 空白列:保留原聲原長,不 snap/不收停頓/不精剪
             unit_first_seg[ui] = len(segments)
@@ -1230,9 +1296,11 @@ def main():
         print(f"[render] 語速 {args.tempo}x(只套語音,配樂原速)")
 
     if args.dump_ranges:
+        # kind 含 insert(補錄 unit)——字級精剪同樣要能被這支測試探針看到,
+        # 不然 #682 那種「insert unit 早退、刪除線沒套用」會對 --dump-ranges 隱形。
         args.dump_ranges.write_text(json.dumps(
             [[round(s.get("src_a", s["a"]), 3), round(s.get("src_b", s["b"]), 3)]
-             for s in segments if s["kind"] == "speech"],
+             for s in segments if s["kind"] in ("speech", "insert")],
             ensure_ascii=False), encoding="utf-8")
 
     speech_secs = sum(s["b"] - s["a"] for s in segments if s["kind"] == "speech")
