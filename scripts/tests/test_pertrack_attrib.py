@@ -160,6 +160,40 @@ class TestOwnerRuns(unittest.TestCase):
                         const([-2.0, 0.0, -40.0], 0.6)])
         self.assertEqual([r[2] for r in owner_runs(lv, HOP, 0.0, 1.0)], [0])
 
+    def test_floor_gate_with_a_clear_relative_leader_still_attributes(self):
+        """#726:三軌都低於底噪、但 leader 對第二名領先 ≥10dB → 跳過底噪閘。
+
+        #677 診斷:880 筆「歸屬不確定」裡 520 筆(59%)是底噪閘擋掉 median
+        領先 18.6dB 的清楚贏家 —— 跟 test_nobody_above_the_floor 的 4.7dB
+        搶麥案例在數值上有 >5dB 的緩衝帶,不是同一種情境。這裡複刻同款三段
+        結構,只把底噪段的 leader 領先幅度從 4.7dB 換成 18dB(Sarah −56.0 vs
+        Mars −74.0,KIN −90.0 墊底),兩者都仍在各自 floor(−55dB)之下。
+        """
+        floor = [-55.0, -55.0, -55.0]
+        lv = np.hstack([const([-30.0, -60.0, -60.0], 0.4),      # 0 明確在講
+                        const([-74.0, -56.0, -90.0], 0.3)])     # 底噪但 Sarah 領先 18dB
+        runs = owner_runs(lv, HOP, 0.0, 0.7, floor_db=floor)
+        self.assertIn(1, [r[2] for r in runs],
+                      "領先 18dB 的底噪區應該跳過底噪閘、正常判定歸屬")
+
+    def test_floor_bypass_boundary_below_threshold_stays_gated(self):
+        """邊界:lead=9.9dB(<10dB 門檻)不豁免,維持底噪閘不換手。"""
+        floor = [-55.0, -55.0, -55.0]
+        lv = np.hstack([const([-30.0, -60.0, -60.0], 0.4),
+                        const([-65.9, -56.0, -90.0], 0.3)])     # lead = 9.9dB
+        runs = owner_runs(lv, HOP, 0.0, 0.7, floor_db=floor)
+        self.assertEqual([r[2] for r in runs], [0],
+                         "9.9dB 領先未達門檻,不該豁免底噪閘")
+
+    def test_floor_bypass_boundary_above_threshold_attributes(self):
+        """邊界:lead=10.1dB(>10dB 門檻)豁免,正常判定歸屬。"""
+        floor = [-55.0, -55.0, -55.0]
+        lv = np.hstack([const([-30.0, -60.0, -60.0], 0.4),
+                        const([-66.1, -56.0, -90.0], 0.3)])     # lead = 10.1dB
+        runs = owner_runs(lv, HOP, 0.0, 0.7, floor_db=floor)
+        self.assertIn(1, [r[2] for r in runs],
+                      "10.1dB 領先已達門檻,應豁免底噪閘並判定歸屬")
+
 
 @unittest.skipIf(np is None, "需要 numpy")
 class TestSplitPhrase(unittest.TestCase):

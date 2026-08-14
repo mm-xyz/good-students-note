@@ -32,6 +32,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from srt_utils import join_words  # noqa: E402
 
 BLEED_FALLBACK_DB = -12.0     # 樣本不足時保守估一個偏大的串音,寧可少抓
+FLOOR_BYPASS_LEAD_DB = 10.0   # 底噪閘的相對領先例外(#726):三軌都在各自
+                               # floor_db 之下時,leader 對第二名領先仍達
+                               # 此門檻就跳過底噪閘、照常判定 —— 跟原始
+                               # 4.7dB 搶麥破口(2026-08-11)有 >5dB 緩衝帶
 
 
 def integrate(power, win: int):
@@ -108,6 +112,13 @@ def owner_runs(lv_db, hop: float, t0: float, t1: float, margin: float = 3.0,
       沒有人真的在出聲,Sarah 只因底噪高 4.7dB 就搶走,KIN 的麥在詞中間被
       關掉 0.5 秒,聽到的是 KIN 透過 Sarah 的麥傳來的聲音(距離感全變)。
       floor_db=None 就不套這道閘(保留舊行為給不知道噪聲底的呼叫端)。
+    · **相對領先例外**(2026-08-14 #726,#677 診斷修法 A):三軌都在底噪之下,
+      但 leader 對第二名領先 ≥FLOOR_BYPASS_LEAD_DB(10dB)時,跳過這道閘、
+      照常走 margin/hysteresis 判定。#677 量到 880 筆「歸屬不確定」裡
+      520 筆(59%、時長 68%)是底噪閘擋掉 median 領先 18.6dB 的清楚贏家 ——
+      跟本閘要修的原始破口(Sarah 只領先第二名 4.7dB 就搶麥)在數值上有
+      >5dB 緩衝帶,不是同一種情境:那次沒人真的在講話,這次是講得比校準
+      底噪還小聲、但相對其他軌仍明顯是唯一在出聲的人。
     · **穩定時長隨 block 長度縮放**(2026-08-11 MM 實聽 EP18 0:49「遠方的
       KIN 的嗯」):源 53.10–53.20 只有 0.10 秒,而 stable=0.2 秒 —— 0.1 秒的
       窗**在數學上永遠湊不到 0.2 秒**,一律退回混音 diarize 的標籤。那句
@@ -146,8 +157,13 @@ def owner_runs(lv_db, hop: float, t0: float, t1: float, margin: float = 3.0,
         # 變成歸屬不確定)。只有大家都沒出聲時才維持現任。
         if floor_db is not None and all(
                 col[j] < floor_db[j] for j in range(col.shape[0])):
-            cand = None
-            continue
+            # #726 相對領先例外:全員在底噪之下不代表沒人講話 —— leader
+            # 對第二名仍領先 ≥FLOOR_BYPASS_LEAD_DB 就跳過此閘,落下去走
+            # 下面一般的 margin/hysteresis 判定(不豁免就照舊維持現任)。
+            rel_lead = col[best] - col[int(order[1])]
+            if rel_lead < FLOOR_BYPASS_LEAD_DB:
+                cand = None
+                continue
         if col[best] - ref >= margin:
             if cand != best:
                 cand, cand_start = best, f
