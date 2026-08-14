@@ -23,6 +23,7 @@ sys.path.insert(0, str(AUDIO_DIR))
 from pertrack_blocks import (  # noqa: E402
     derive_prefixes, enforce_phrase_len, carry_over_program, build_md,
     pick_visible, backfill_artifact_flags, merge_sentence_rows,
+    _merge_reasons,
 )
 from render_cut import parse_program  # noqa: E402
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -337,6 +338,26 @@ class TestMergeSentenceRows(unittest.TestCase):
         b = row(1.05, 2.0, "二", reason="")
         out = merge_sentence_rows([a, b], gap=0.45, max_block=2.5)
         self.assertEqual(out[0]["reason"], "前列理由")
+
+    def test_merge_reasons_dedupes_tokens_not_whole_strings(self):
+        """luna round-2:_merge_reasons("A；B","B") 舊版回 "A；B；B"——
+        去重只比對完整字串,前一次結果已是複合字串時,後面重複的 token 照樣
+        被追加堆疊。要先拆 token 再去重。"""
+        self.assertEqual(_merge_reasons("A；B", "B"), "A；B")
+
+    def test_three_row_chain_merge_does_not_stack_duplicate_marker(self):
+        """三列連併,每列都帶「歸屬不確定」——合併後該 marker 只出現一次,
+        不會因為逐列合併(第三列撞上已經是複合字串的 prev.reason)而重複
+        堆疊。"""
+        uncertain = "歸屬不確定（三軌差距 <3dB）（暫掛 diarize 判的 Sarah）"
+        rows = [row(0.0, 1.0, "一", reason="換手點附近 250ms 內沒有字界，未切開"),
+                row(1.05, 2.0, "二", reason=uncertain),
+                row(2.1, 3.0, "三", reason=uncertain)]
+        out = merge_sentence_rows(rows, gap=0.45, max_block=5.0)
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0]["reason"].count(uncertain), 1)
+        self.assertEqual(out[0]["reason"],
+                         f"換手點附近 250ms 內沒有字界，未切開；{uncertain}")
 
     def test_merge_across_original_block_boundary_keeps_src_traceable(self):
         """同一講者一直講、沒停頓,可以跨原本的 canonical block(src)邊界
