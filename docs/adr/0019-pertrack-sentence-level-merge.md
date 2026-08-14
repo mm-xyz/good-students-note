@@ -91,3 +91,25 @@ EP16 實測卡在 32%,降不下去——因為同一講者連續講、中間沒�
 `build_blocks` 本來就是「同講者、間隔小、有上限」的合併邏輯(分軌線這次
 補的正是這一套),沒有 D1 那種「先切到 0.4–1.2s 再也沒黏回去」的結構性
 缺口。列為觀察項,不在本卡動,若 MM 想進一步壓低可另開卡。
+
+## 追記(luna 守門 FAIL,同日修正)
+
+luna 對照組發現:合併 reason 的邏輯是『prev reason 空才採後列』(先到先
+贏)——前列已有其他理由(如「換手點附近未切開」)、後列是「歸屬不確定」
+時,這個安全網 marker 會被悄悄蓋掉,合併後的 block 看起來像確定的,人審
+沒有線索分辨。EP16 真跑實測:1266 句語音裡有 40 句(3.2%)踩到這個。
+
+修法:新增 `_merge_reasons(a, b)`——依序保留、去重、用「；」串接(既有
+分隔慣例,見本檔 PREAMBLE／`diff_clips.py`),不是誰先誰贏。`_row_line()`
+不用改,它本來就原樣印出 `reason` 欄。確認過共存不打架:`⚠ASR-artifact`
+只存在於混音線 `cutplan.py` 的 `flag_artifacts`(`cutplan.md` 專用),
+pertrack 這邊的 `backfill_artifact_flags` 只設 `asr_artifact`/
+`asr_artifact_reason` 兩個獨立欄位,從不寫進 per-track row 的 `reason`
+——兩個通道不會混在一起。
+
+回歸測試三條(`TestMergeSentenceRows`):兩邊理由都留著、完全相同的理由
+去重、後列理由為空時維持前列理由不動。修正不影響 D1/D2/D3 統計與 ≤4 字
+占比(仍是 22.3%)。
+
+全套 `scripts/tests/run_all.sh` 實測 383 條(先前回報誤用 376,重新數
+一次以此為準)。
