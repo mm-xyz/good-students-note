@@ -25,7 +25,7 @@ except ImportError:                                    # pragma: no cover
 from pertrack_attrib import (  # noqa: E402
     calibrate_bleed, predict_bleed_db, owner_runs, split_phrase,
     cfar_percentile, find_events, integrate, drop_self_adjacent,
-    annotate_canonical,
+    annotate_canonical, UNCERTAIN_REASON_TEXT,
 )
 
 HOP = 0.01
@@ -89,7 +89,7 @@ class TestBleedPrediction(unittest.TestCase):
 class TestOwnerRuns(unittest.TestCase):
     def test_clear_dominance_gives_one_run(self):
         lv = const([0.0, -20.0])
-        self.assertEqual(owner_runs(lv, HOP, 0.0, 1.0), [(0.0, 1.0, 0)])
+        self.assertEqual(owner_runs(lv, HOP, 0.0, 1.0), [(0.0, 1.0, 0, None)])
 
     def test_handover_makes_two_runs_at_the_switch_point(self):
         lv = np.hstack([const([0.0, -20.0], 0.5), const([-20.0, 0.0], 0.5)])
@@ -102,7 +102,7 @@ class TestOwnerRuns(unittest.TestCase):
         """hysteresis:挑戰者連續領先不到 switch 秒就不換手(逐 frame 抖動)。"""
         lv = np.hstack([const([0.0, -20.0], 0.40), const([-20.0, 0.0], 0.10),
                         const([0.0, -20.0], 0.50)])
-        self.assertEqual(owner_runs(lv, HOP, 0.0, 1.0), [(0.0, 1.0, 0)])
+        self.assertEqual(owner_runs(lv, HOP, 0.0, 1.0), [(0.0, 1.0, 0, None)])
 
     def test_block_shorter_than_stable_can_still_be_attributed(self):
         """比 `stable` 還短的 block 不該在數學上注定「歸屬不確定」。
@@ -118,18 +118,40 @@ class TestOwnerRuns(unittest.TestCase):
         """
         lv = const([-50.0, -35.0], 0.10)                # KIN(1) 全程領先 15dB
         runs = owner_runs(lv, HOP, 0.0, 0.10)
-        self.assertEqual([o for _a, _b, o in runs], [1],
+        self.assertEqual([o for _a, _b, o, _c in runs], [1],
                          "0.1s 的 block 領先 15dB 仍被判不確定 —— "
                          "穩定時長門檻必須隨 block 長度縮放")
 
     def test_short_block_with_thin_margin_is_still_uncertain(self):
-        """縮放穩定門檻**不等於**放寬證據標準:差距不夠仍然是不確定。"""
+        """縮放穩定門檻**不等於**放寬證據標準:差距不夠仍然是不確定。
+
+        差距 2dB(<3dB margin)全程不變、沒有底噪門檻 → 原因碼
+        below_margin(#728:從未達到 margin 的那 0.3%)。"""
         lv = const([-38.0, -36.0], 0.10)
-        self.assertEqual(owner_runs(lv, HOP, 0.0, 0.10), [(0.0, 0.10, None)])
+        self.assertEqual(owner_runs(lv, HOP, 0.0, 0.10),
+                         [(0.0, 0.10, None, "below_margin")])
 
     def test_thin_margin_is_left_uncertain_not_hard_picked(self):
         lv = const([0.0, -2.0])
-        self.assertEqual(owner_runs(lv, HOP, 0.0, 1.0), [(0.0, 1.0, None)])
+        self.assertEqual(owner_runs(lv, HOP, 0.0, 1.0),
+                         [(0.0, 1.0, None, "below_margin")])
+
+    def test_floor_gated_cause_when_nobody_is_speaking(self):
+        """#728:三軌全程都在各自底噪之下、領先幅度不到 #726 豁免門檻
+        (10dB)→ 原因碼 floor_gated(#677 量到佔比最大的一類,59%)。"""
+        floor = [-55.0, -55.0, -55.0]
+        lv = const([-60.0, -62.0, -65.0], 1.0)          # 全程都在底噪,領先僅 2dB
+        runs = owner_runs(lv, HOP, 0.0, 1.0, floor_db=floor)
+        self.assertEqual([(r[2], r[3]) for r in runs], [(None, "floor_gated")])
+
+    def test_unstable_cause_when_leader_flickers_before_stabilizing(self):
+        """#728:領先幅度有達過 margin,但同一名候選人撐不滿穩定時長就被
+        打斷(逐 frame 抖動)→ 原因碼 unstable(#677 量到 38%)。"""
+        seg0 = const([-30.0, -35.0], 0.05)              # track0 領先 5dB
+        seg1 = const([-35.0, -30.0], 0.05)              # track1 領先 5dB
+        lv = np.hstack([seg0, seg1] * 10)               # 每 0.05s 換人,stable=0.2s 永遠湊不到
+        runs = owner_runs(lv, HOP, 0.0, 1.0)
+        self.assertEqual([(r[2], r[3]) for r in runs], [(None, "unstable")])
 
     def test_nobody_above_the_floor_means_no_handover(self):
         """三軌都在噪聲底時不換手 —— 2026-08-11 MM 實聽抓到的破口。
@@ -202,7 +224,8 @@ class TestSplitPhrase(unittest.TestCase):
 
     def test_handover_splits_at_the_nearest_word_boundary(self):
         out = split_phrase(self.WORDS, "今天很好",
-                           [(0.0, 0.50, 0), (0.50, 1.0, 1)], snap=0.25)
+                           [(0.0, 0.50, 0, None), (0.50, 1.0, 1, None)],
+                           snap=0.25)
         self.assertEqual([(p["text"], p["owner"]) for p in out],
                          [("今天", 0), ("很好", 1)])
         self.assertAlmostEqual(out[0]["end"], 0.45, places=6)
@@ -210,28 +233,52 @@ class TestSplitPhrase(unittest.TestCase):
 
     def test_no_word_boundary_within_snap_means_no_split(self):
         out = split_phrase(self.WORDS, "今天很好",
-                           [(0.0, 0.90, 0), (0.90, 1.0, 1)], snap=0.10)
+                           [(0.0, 0.90, 0, None), (0.90, 1.0, 1, None)],
+                           snap=0.10)
         self.assertEqual(len(out), 1)
         self.assertEqual(out[0]["owner"], 0)          # 佔多數的那一位
         self.assertEqual(out[0]["text"], "今天很好")
 
     def test_uncertain_run_is_flagged_and_keeps_the_canonical_text(self):
-        out = split_phrase(self.WORDS, "今天很好", [(0.0, 1.0, None)], snap=0.25)
+        out = split_phrase(self.WORDS, "今天很好",
+                           [(0.0, 1.0, None, "below_margin")], snap=0.25)
         self.assertEqual(len(out), 1)
         self.assertIsNone(out[0]["owner"])
         self.assertTrue(out[0]["uncertain"])
         self.assertEqual(out[0]["text"], "今天很好")
 
+    def test_reason_text_is_picked_by_the_cause_code(self):
+        """#728:reason 文案按 owner_runs 回傳的 cause 分流,不再全部寫死
+        同一句「三軌差距 <3dB」。"""
+        for cause in ("floor_gated", "below_margin", "unstable"):
+            with self.subTest(cause=cause):
+                out = split_phrase(self.WORDS, "今天很好",
+                                   [(0.0, 1.0, None, cause)], snap=0.25)
+                self.assertEqual(out[0]["reason"], UNCERTAIN_REASON_TEXT[cause])
+        # 三種文案彼此不同 —— 人審一眼要能分辨,不是換皮同一句
+        self.assertEqual(len(set(UNCERTAIN_REASON_TEXT.values())), 3)
+
+    def test_uncertain_reason_picks_the_cause_with_the_most_overlap(self):
+        """一個 phrase 若跨了多個 owner=None 的 run,各自原因可能不同 ——
+        取重疊時長最長的那個原因,跟「owner 本身佔多數的那一位」同一套邏輯。"""
+        out = split_phrase(self.WORDS, "今天很好",
+                           [(0.0, 0.30, None, "floor_gated"),
+                            (0.30, 1.0, None, "unstable")], snap=0.0)
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0]["reason"], UNCERTAIN_REASON_TEXT["unstable"])
+
     def test_text_always_comes_from_the_canonical_words(self):
         """D1:逐軌 ASR 不可當出片文字 —— 這裡連個逐軌參數都沒有。"""
-        out = split_phrase(self.WORDS, "今天很好", [(0.0, 1.0, 1)], snap=0.25)
+        out = split_phrase(self.WORDS, "今天很好", [(0.0, 1.0, 1, None)],
+                           snap=0.25)
         self.assertEqual(out[0]["text"], "今天很好")
 
     def test_split_uses_the_canonical_slice_when_words_disagree(self):
         ws = annotate_canonical(
             [w(0.0, 0.2, "今"), w(0.2, 0.45, "天"), w(0.52, 0.75, "隻"),
              w(0.75, 1.0, "好")], "今天只好")
-        out = split_phrase(ws, "今天只好", [(0.0, 0.5, 0), (0.5, 1.0, 1)],
+        out = split_phrase(ws, "今天只好",
+                           [(0.0, 0.5, 0, None), (0.5, 1.0, 1, None)],
                            snap=0.25)
         self.assertEqual([p["text"] for p in out], ["今天", "只好"])
 
