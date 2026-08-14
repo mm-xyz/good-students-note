@@ -95,6 +95,21 @@ def derive_prefixes(names: list[str]) -> dict[str, str]:
     return out
 
 
+def _merge_reasons(a: str, b: str) -> str:
+    """依序保留、去重、用「；」串接(既有分隔慣例,見本檔 PREAMBLE／
+    diff_clips.py)。
+
+    2026-08-14 luna 守門抓到:早期版本合併理由用『prev 空才採後列』
+    (先到先贏),前列已有其他理由(如換手點未切開)、後列是「歸屬不確定」
+    時,這個安全網 marker 會被悄悄蓋掉,合併後的 block 看起來像確定的,
+    人審沒有線索分辨。改成兩邊理由都留著,不是誰先誰贏。"""
+    out: list[str] = []
+    for p in (a, b):
+        if p and p not in out:
+            out.append(p)
+    return "；".join(out)
+
+
 # ── 粒度 ────────────────────────────────────────────────────────────────
 def enforce_phrase_len(parts: list[dict], lo: float = 0.4,
                        hi: float = 1.2) -> list[dict]:
@@ -180,8 +195,8 @@ def merge_sentence_rows(rows: list[dict], gap: float = 0.45,
             if r.get("src") and r["src"] != prev.get("src"):
                 prev["src"] = f"{prev.get('src', '')}+{r['src']}" \
                     if prev.get("src") else r["src"]
-            if r.get("reason") and not prev.get("reason"):
-                prev["reason"] = r["reason"]
+            prev["reason"] = _merge_reasons(prev.get("reason", ""),
+                                            r.get("reason", ""))
         else:
             out.append(dict(r))
     return out
@@ -234,6 +249,9 @@ def carry_over_program(md_lines: list[str], id_time: dict[str, float]):
 
 def _row_line(r: dict) -> str:
     mark = "x" if r["keep"] else " "
+    # reason 可能是 merge_sentence_rows 用「；」串接的多筆理由(#676 luna
+    # 守門修正)——原樣印出,不用另外拆解,「歸屬不確定」等安全網 marker
+    # 保證在裡面,不會因為合併而消失。
     tail = f" ← {r['reason']}" if r.get("reason") else ""
     return (f"- [{mark}] {r['id']} [{fmt_mmss(r['start'])}–{fmt_mmss(r['end'])}]"
             f" [{r['speaker']}] {r['text']}{tail}")
