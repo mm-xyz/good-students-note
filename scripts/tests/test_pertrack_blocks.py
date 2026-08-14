@@ -297,6 +297,23 @@ class TestMergeSentenceRows(unittest.TestCase):
         out = merge_sentence_rows(rows, gap=0.45, max_block=2.5)
         self.assertEqual(out, rows)
 
+    def test_does_not_bridge_over_another_owners_interjection(self):
+        """A 講兩段、間隔中間 B 有插話 —— 就算間隔 <gap,合併起來的文字會
+        跳過 B 講的內容,跟來源 SRT 對不上,不能併(render_cut 逐字驗證
+        需要:每個 block 的文字必須是來源 SRT 的連續子字串)。"""
+        rows = [row(0.0, 1.0, "前半句"), row(1.2, 2.0, "後半句")]
+        other = [(1.05, 1.15)]  # B 在 A 的間隔裡插了一句
+        out = merge_sentence_rows(rows, gap=0.45, max_block=2.5,
+                                  blocked_by=other)
+        self.assertEqual(len(out), 2)
+
+    def test_merges_when_gap_is_clear_of_other_owners(self):
+        rows = [row(0.0, 1.0, "前半句"), row(1.2, 2.0, "後半句")]
+        other = [(5.0, 5.5)]  # 不在間隔範圍內,不擋
+        out = merge_sentence_rows(rows, gap=0.45, max_block=2.5,
+                                  blocked_by=other)
+        self.assertEqual(len(out), 1)
+
     def test_merge_across_original_block_boundary_keeps_src_traceable(self):
         """同一講者一直講、沒停頓,可以跨原本的 canonical block(src)邊界
         合併(這正是 no-src-limit 才壓得下 #676 的 69.8% 的原因)——但 src

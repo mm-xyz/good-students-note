@@ -124,7 +124,9 @@ def enforce_phrase_len(parts: list[dict], lo: float = 0.4,
 
 
 def merge_sentence_rows(rows: list[dict], gap: float = 0.45,
-                        max_block: float = 2.0) -> list[dict]:
+                        max_block: float = 2.0,
+                        blocked_by: list[tuple[float, float]] | None = None
+                        ) -> list[dict]:
     """把同 owner、間隔 <gap 秒、合併後不超過 max_block 秒的相鄰 speech row
     併成句子級 block(#676)。
 
@@ -149,15 +151,29 @@ def merge_sentence_rows(rows: list[dict], gap: float = 0.45,
     句子邊界)。跨邊界合併時 src 改記所有來源 id(`B0013+B0014`),不悄悄
     只留第一段的 src 誤導人審溯源。
 
+    **不跨過別人插的話**:`blocked_by` 是其他 owner 的 speech row 區間
+    (start, end)清單。就算間隔 <gap,只要那段時間別人也在講話,合併起來
+    的文字就會跳過別人講的內容、不再是來源 SRT 的連續子字串——
+    render_cut.py 的逐字防幻覺驗證(`validate_program`)會直接 FAIL。
+    EP16 實測:拿掉同 src 限制後有 17 處(merged 列的 5.0%)撞到這個,
+    全部是「A 講到一半、B 插了一句(通常是附和的『嗯』)、A 接著講」——
+    這裡擋住,不留給 render 階段才爆。
+
     只延伸 prev 的 end、串接 text,不動任何 start、不丟任何片段——
     時間碼守恆。"""
+    blocked_by = blocked_by or []
+
+    def _bridged_by_other(t0: float, t1: float) -> bool:
+        return any(s < t1 and e > t0 for s, e in blocked_by)
+
     out: list[dict] = []
     for r in rows:
         prev = out[-1] if out else None
         joinable = (prev is not None
                     and prev["kind"] == "speech" and r["kind"] == "speech"
                     and r["start"] - prev["end"] < gap
-                    and r["end"] - prev["start"] <= max_block)
+                    and r["end"] - prev["start"] <= max_block
+                    and not _bridged_by_other(prev["end"], r["start"]))
         if joinable:
             prev["end"] = r["end"]
             prev["text"] += r["text"]
@@ -463,11 +479,17 @@ def main() -> int:
         per_track[e["track"]].append(e_row)
 
     # ── 編號 ＋ 落檔 ──────────────────────────────────────────────────
+    sorted_tracks = {n: sorted(per_track[n], key=lambda r: (r["start"], r["end"]))
+                     for n in names}
     rows_all: list[dict] = []
     tracks_json = []
     for i, n in enumerate(names):
-        rows = sorted(per_track[n], key=lambda r: (r["start"], r["end"]))
-        rows = merge_sentence_rows(rows, args.sentence_gap, args.sentence_max)
+        blocked_by = sorted(
+            (r["start"], r["end"])
+            for m in names if m != n
+            for r in sorted_tracks[m] if r["kind"] == "speech")
+        rows = merge_sentence_rows(sorted_tracks[n], args.sentence_gap,
+                                   args.sentence_max, blocked_by=blocked_by)
         for k, r in enumerate(rows, 1):
             r["id"] = f"{pfx[n]}{k:04d}"
         rows_all += rows
