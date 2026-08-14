@@ -178,9 +178,33 @@ def owner_runs(lv_db, hop: float, t0: float, t1: float, margin: float = 3.0,
     # owner 只可能在函式一開始是 None,一旦建立就不會再變回 None(見下方
     # 換手邏輯),所以「不確定原因」的累計量只在 owner 還是 None 的這段
     # 前綴期間有意義 —— 判定當下就記,不是事後對 L_attr 另跑一遍分析。
-    none_total_n = 0
-    none_floor_n = 0
-    none_max_active_lead = float("-inf")
+    #
+    # 2026-08-14 luna 守門抓到(round 1,#728):輸出的 None-run 只到
+    # cand_start 為止(候選人成立後、正在撐穩定時長的 frame 屬於**下一段**
+    # owner run 的醞釀期),但累計量原本是逐 frame 一路加到確立那一刻,
+    # 沒有在 cand_start 切斷——候選人撐穩定時長的那幾個 frame(通常是
+    # 「清楚在講話」的 active frame)混進了 committed 統計,把本該是
+    # floor_gated 的區間污染成 unstable。改成 committed/pending 雙桶:
+    # comm_* 只計「確定屬於最終輸出的 None-run」的 frame;pend_* 是
+    # 「目前存活候選人」正在累積、但還沒確定會不會被輸出排除的 frame ——
+    # 候選人換人(舊候選人放棄)或候選人本身失敗(below_floor 擋下／margin
+    # 不足)時,pend 併回 comm(那些 frame 仍在 None-run 範圍內);候選人
+    # 撐滿穩定時長、真的確立所有權時,pend 直接丟棄不進 comm(那些 frame
+    # 已經是下一段 owner run 的一部分,不屬於這個 None-run)。
+    comm_total = comm_floor = 0
+    comm_max_lead = float("-inf")
+    pend_total = pend_floor = 0
+    pend_max_lead = float("-inf")
+
+    def _merge_pending_into_committed():
+        nonlocal comm_total, comm_floor, comm_max_lead
+        nonlocal pend_total, pend_floor, pend_max_lead
+        comm_total += pend_total
+        comm_floor += pend_floor
+        comm_max_lead = max(comm_max_lead, pend_max_lead)
+        pend_total = pend_floor = 0
+        pend_max_lead = float("-inf")
+
     for f in range(i0, i1):
         col = lv[:, f]
         order = np.argsort(-col)
@@ -196,38 +220,70 @@ def owner_runs(lv_db, hop: float, t0: float, t1: float, margin: float = 3.0,
         # 變成歸屬不確定)。只有大家都沒出聲時才維持現任。
         below_floor = floor_db is not None and all(
             col[j] < floor_db[j] for j in range(col.shape[0]))
-        if owner is None:
-            # below_floor 用**原始**門檻(不管 #726 的相對領先例外有沒有
-            # 豁免),對齊 #677 diag1 的口徑:這個 frame 是不是「三軌都
-            # 貼著底噪」本身就是值得回報人審的性質,跟它最後有沒有被
-            # 豁免通過是兩件事。
-            none_total_n += 1
-            if below_floor:
-                none_floor_n += 1
-            elif col[best] - ref > none_max_active_lead:
-                none_max_active_lead = col[best] - ref
+        # below_floor 用**原始**門檻(不管 #726 的相對領先例外有沒有豁免),
+        # 對齊 #677 diag1 的口徑:這個 frame 是不是「三軌都貼著底噪」本身
+        # 就是值得回報人審的性質,跟它最後有沒有被豁免通過是兩件事。
+        frame_lead = None if below_floor else (col[best] - ref)
+
         if below_floor:
             # #726 相對領先例外:全員在底噪之下不代表沒人講話 —— leader
             # 對第二名仍領先 ≥FLOOR_BYPASS_LEAD_DB 就跳過此閘,落下去走
             # 下面一般的 margin/hysteresis 判定(不豁免就照舊維持現任)。
             rel_lead = col[best] - col[int(order[1])]
             if rel_lead < FLOOR_BYPASS_LEAD_DB:
+                # 候選人(如果有)死在這一 frame —— pending 併回 committed,
+                # 這一 frame 自己也直接記 committed(不屬於任何存活候選)。
+                if owner is None:
+                    _merge_pending_into_committed()
+                    comm_total += 1
+                    comm_floor += 1
                 cand = None
                 continue
+
         if col[best] - ref >= margin:
             if cand != best:
+                # 新候選人上場:舊 pending(屬於剛被放棄的舊候選人,若
+                # cand 原本就是 None 則 pending 本來就是空的)併回
+                # committed,這個候選人重新起算 pending。
+                if owner is None:
+                    _merge_pending_into_committed()
                 cand, cand_start = best, f
+            if owner is None:
+                pend_total += 1
+                if below_floor:
+                    pend_floor += 1
+                elif frame_lead is not None and frame_lead > pend_max_lead:
+                    pend_max_lead = frame_lead
             if (f - cand_start + 1) * hop >= need - 1e-9:
                 if cand_start > run_start:
-                    cause = (_uncertain_cause(none_total_n, none_floor_n,
-                                              none_max_active_lead, margin)
+                    # 確立當下:cause 只看 committed(pending 的這批 frame
+                    # 屬於剛確立的這段 owner run,不進這個 None-run 的統計)。
+                    cause = (_uncertain_cause(comm_total, comm_floor,
+                                              comm_max_lead, margin)
                              if owner is None else None)
                     runs.append((run_start * hop, cand_start * hop, owner, cause))
                 owner, run_start, cand = best, cand_start, None
+                comm_total = comm_floor = 0
+                comm_max_lead = float("-inf")
+                pend_total = pend_floor = 0
+                pend_max_lead = float("-inf")
         else:
+            # 候選人(如果有)因這一 frame 沒達到 margin 而死 —— pending
+            # 併回 committed,這一 frame 自己也直接記 committed。
+            if owner is None:
+                _merge_pending_into_committed()
+                comm_total += 1
+                if below_floor:
+                    comm_floor += 1
+                elif frame_lead is not None and frame_lead > comm_max_lead:
+                    comm_max_lead = frame_lead
             cand = None
-    cause = (_uncertain_cause(none_total_n, none_floor_n,
-                              none_max_active_lead, margin)
+    # 迴圈結束時 owner 還是 None:從沒確立過所有權,pending(如果有,代表
+    # 一個還在撐穩定時長、但沒撐到終點的候選人)理所當然屬於這段 None-run
+    # 的輸出範圍,併回 committed 才分類。
+    if owner is None:
+        _merge_pending_into_committed()
+    cause = (_uncertain_cause(comm_total, comm_floor, comm_max_lead, margin)
              if owner is None else None)
     runs.append((run_start * hop, i1 * hop, owner, cause))
     return [(round(a, 6), round(b, 6), o, c) for a, b, o, c in runs

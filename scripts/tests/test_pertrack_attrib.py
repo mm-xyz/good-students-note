@@ -153,6 +153,23 @@ class TestOwnerRuns(unittest.TestCase):
         runs = owner_runs(lv, HOP, 0.0, 1.0)
         self.assertEqual([(r[2], r[3]) for r in runs], [(None, "unstable")])
 
+    def test_cause_window_excludes_frames_that_belong_to_the_confirmed_owner(self):
+        """luna 守門(round 1,#728):cause 累計不能一路吃到候選人確立、正在
+        撐穩定時長的 frame —— 那些 frame 屬於**下一段** owner run 的醞釀期
+        (輸出的 None-run 只到 cand_start 為止,不含它們)。
+
+        最小重現:前 0.10s 三軌都在底噪(領先僅 2dB,未達 #726 豁免門檻)、
+        後 0.20s 某軌穩定領先 30dB(足以確立所有權)。應該切成
+        `(0.0, 0.10, None, floor_gated)` + `(0.10, 0.30, 0, None)` ——
+        絕不能因為「確立所有權當下也算了一筆」而把 floor_gated 錯標成
+        unstable(領先未能持續)。"""
+        floor = [-55.0, -55.0, -55.0]
+        lv = np.hstack([const([-60.0, -62.0, -65.0], 0.10),   # 三軌都在底噪,領先僅 2dB
+                        const([-30.0, -60.0, -60.0], 0.20)])  # 穩定領先 30dB,足以確立
+        runs = owner_runs(lv, HOP, 0.0, 0.30, floor_db=floor)
+        self.assertEqual([(round(r[0], 2), round(r[1], 2), r[2], r[3]) for r in runs],
+                         [(0.0, 0.10, None, "floor_gated"), (0.10, 0.30, 0, None)])
+
     def test_nobody_above_the_floor_means_no_handover(self):
         """三軌都在噪聲底時不換手 —— 2026-08-11 MM 實聽抓到的破口。
 
