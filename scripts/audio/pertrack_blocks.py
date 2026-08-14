@@ -131,7 +131,7 @@ def enforce_phrase_len(parts: list[dict], lo: float = 0.4,
             prev["text"] += p["text"]
             prev["words"] = prev["words"] + p["words"]
             prev["uncertain"] = prev["uncertain"] or p["uncertain"]
-            prev["reason"] = prev["reason"] or p["reason"]
+            prev["reason"] = _merge_reasons(prev["reason"], p["reason"])
             continue
         out.append(dict(p))
     # 開頭那個碎片沒有前鄰可併 → 往後併
