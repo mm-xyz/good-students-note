@@ -314,6 +314,30 @@ class TestMergeSentenceRows(unittest.TestCase):
                                   blocked_by=other)
         self.assertEqual(len(out), 1)
 
+    def test_merge_keeps_both_reasons_uncertain_marker_never_lost(self):
+        """luna 守門 FAIL 的最小重現:前列已有其他理由、後列是「歸屬不確定」
+        ——舊版『prev reason 空才採後列』會讓歸屬不確定 marker 消失,合併
+        後看起來像確定,人審的安全網被拔掉。兩邊理由都要留著。"""
+        a = row(0.0, 1.0, "換手處", reason="換手點附近 250ms 內沒有字界，未切開")
+        b = row(1.05, 2.0, "後半句",
+               reason="歸屬不確定（三軌差距 <3dB）（暫掛 diarize 判的 Sarah）")
+        out = merge_sentence_rows([a, b], gap=0.45, max_block=2.5)
+        self.assertEqual(len(out), 1)
+        self.assertIn("換手點附近 250ms 內沒有字界，未切開", out[0]["reason"])
+        self.assertIn("歸屬不確定", out[0]["reason"])
+
+    def test_merge_reason_dedupes_identical_text(self):
+        a = row(0.0, 1.0, "一", reason="同一理由")
+        b = row(1.05, 2.0, "二", reason="同一理由")
+        out = merge_sentence_rows([a, b], gap=0.45, max_block=2.5)
+        self.assertEqual(out[0]["reason"], "同一理由")
+
+    def test_merge_keeps_prev_reason_when_later_row_has_none(self):
+        a = row(0.0, 1.0, "一", reason="前列理由")
+        b = row(1.05, 2.0, "二", reason="")
+        out = merge_sentence_rows([a, b], gap=0.45, max_block=2.5)
+        self.assertEqual(out[0]["reason"], "前列理由")
+
     def test_merge_across_original_block_boundary_keeps_src_traceable(self):
         """同一講者一直講、沒停頓,可以跨原本的 canonical block(src)邊界
         合併(這正是 no-src-limit 才壓得下 #676 的 69.8% 的原因)——但 src
