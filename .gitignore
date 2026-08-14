@@ -106,3 +106,4 @@ build/
 
 # 分軌 render 的中繼 speech bus(每次 render 重生,幾百 MB)
 .pertrack_bus.wav
+.claude/worktrees
