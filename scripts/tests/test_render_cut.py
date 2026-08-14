@@ -605,6 +605,55 @@ class TestInsertRender(TestDryRunE2E):
             "- [x] S0001 [0:00–0:01] [Sarah] 補錄~~第~~一句。\n"
             "- [x] B0002"), encoding="utf-8")
 
+    def _with_s_block_strike_symlink(self, sdir: Path) -> None:
+        """補錄檔是 symlink(真實 session 常態:`raw/2_Sarah_補錄.WAV` →
+        Drive 外部原始檔 `MIC3_Sarah_2.WAV`),sidecar `.words.json` 放在
+        symlink 這一側,resolved target 旁刻意不放 —— 卡 #682 luna 守門
+        對真實 EP16 session 跑 dry-run 實測到的精確症狀。"""
+        raw = sdir / "raw"
+        raw.mkdir()
+        external = sdir.parent / "external-mic"
+        external.mkdir()
+        target = external / "MIC3_target.WAV"
+        write_wav(target, 4.0, bursts=[(0.1, 1.9)])
+        link = raw / "補錄.wav"
+        link.symlink_to(target)
+        # sidecar 命名對齊 symlink 的 stem(補錄.words.json),不是 target 的
+        # stem(MIC3_target.words.json)——target 旁完全沒有任何 sidecar。
+        link.with_suffix(".words.json").write_text(json.dumps([
+            w(10.1, 10.4, "補"), w(10.4, 10.7, "錄"), w(10.7, 11.0, "第"),
+            w(11.0, 11.3, "一"), w(11.3, 11.8, "句。"),
+        ], ensure_ascii=False), encoding="utf-8")
+        cj = sdir / "cutplan.json"
+        data = json.loads(cj.read_text(encoding="utf-8"))
+        data["inserts"] = [{"file": "raw/補錄.wav", "speaker": "Sarah", "blocks": [
+            {"id": "S0001", "start": 10.1, "end": 11.8, "text": "補錄第一句。",
+             "speaker": "Sarah", "keep": True}]}]
+        cj.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        md = sdir / "cutplan.md"
+        md.write_text(md.read_text(encoding="utf-8").replace(
+            "- [x] B0002",
+            "## ➕ raw/補錄.wav gain=0  補錄說明\n"
+            "- [x] S0001 [0:00–0:01] [Sarah] 補錄~~第~~一句。\n"
+            "- [x] B0002"), encoding="utf-8")
+
+    def test_s_block_strikethrough_survives_symlinked_insert_media(self):
+        """補錄檔是 symlink 時,sidecar words.json 查找不准只看 resolved
+        target — 卡 #682 luna 守門實測:基底 EP16 session(真實補錄檔是
+        symlink)dry-run exit 0(163 處刪除線),本卡分支一度對它 exit 1,
+        報缺 `MIC3_Sarah_2.words.json`(resolved target 旁根本沒有這個
+        檔,sidecar 一直放在 symlink 這一側)—— 等於把每個現存帶 strike
+        補錄的 session 一跑就炸。"""
+        with tempfile.TemporaryDirectory() as td:
+            sdir = self._make_session(td)
+            self._with_s_block_strike_symlink(sdir)
+            dump = Path(td) / "ranges.json"
+            proc = self._render(sdir, "--dump-ranges", str(dump))
+            self.assertEqual(proc.returncode, 0, proc.stderr or proc.stdout)
+            rs = json.loads(dump.read_text(encoding="utf-8"))
+        hit = [r for r in rs if r[0] < 11.0 - 1e-6 and r[1] > 10.7 + 1e-6]
+        self.assertEqual(hit, [], f"補錄的刪除線字仍在成品裡:{hit}")
+
     def test_s_block_strikethrough_is_actually_cut(self):
         """S block(補錄)的 ~~刪除線~~ 不准被 insert unit 早退丟掉 — 卡 #682。
 
