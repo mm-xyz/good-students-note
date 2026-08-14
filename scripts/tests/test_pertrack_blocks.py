@@ -31,9 +31,9 @@ from fixtures.ep16_artifact_samples import (  # noqa: E402
     B0068_ARTIFACT_TEXT, B0067_CLEAN_TEXT)
 
 
-def ph(a, b, text="字"):
+def ph(a, b, text="字", reason=""):
     return {"start": a, "end": b, "text": text, "owner": 0,
-            "uncertain": False, "reason": "",
+            "uncertain": False, "reason": reason,
             "words": [{"start": a, "end": b, "word": text}]}
 
 
@@ -73,6 +73,40 @@ class TestPhraseLength(unittest.TestCase):
         a, b = ph(0.0, 0.2, "啊"), ph(0.2, 0.8, "今天")
         b["owner"] = 1
         self.assertEqual(len(enforce_phrase_len([a, b], lo=0.4, hi=1.2)), 2)
+
+    def test_merge_keeps_both_reasons_uncertain_marker_never_lost(self):
+        """#725(#676 同根因殘留):enforce_phrase_len 合併碎片時舊版沿用
+        『prev reason 空才採後列』——前列已有換手未切開的理由、後列是
+        「歸屬不確定」時,後列會被悄悄蓋掉,人審的安全網 marker 消失。
+        改用 _merge_reasons 後兩邊理由都要留著。"""
+        a = ph(0.0, 0.2, "前", reason="換手點附近 250ms 內沒有字界，未切開")
+        b = ph(0.2, 0.5, "後", reason="歸屬不確定（三軌差距 <3dB）")
+        out = enforce_phrase_len([a, b], lo=0.4, hi=1.2)
+        self.assertEqual(len(out), 1)
+        self.assertIn("換手點附近 250ms 內沒有字界，未切開", out[0]["reason"])
+        self.assertIn("歸屬不確定", out[0]["reason"])
+
+    def test_merge_reason_dedupes_identical_text(self):
+        a = ph(0.0, 0.2, "前", reason="同一理由")
+        b = ph(0.2, 0.5, "後", reason="同一理由")
+        out = enforce_phrase_len([a, b], lo=0.4, hi=1.2)
+        self.assertEqual(out[0]["reason"], "同一理由")
+
+    def test_merge_keeps_prev_reason_when_later_has_none(self):
+        a = ph(0.0, 0.2, "前", reason="前列理由")
+        b = ph(0.2, 0.5, "後", reason="")
+        out = enforce_phrase_len([a, b], lo=0.4, hi=1.2)
+        self.assertEqual(out[0]["reason"], "前列理由")
+
+    def test_three_fragment_chain_does_not_stack_duplicate_marker(self):
+        """三段連併(都 <lo,逐一併進同一個 prev)、都帶「歸屬不確定」——
+        合併後該 marker 只出現一次,不因逐段合併而堆疊成三份。"""
+        a = ph(0.0, 0.1, "一", reason="歸屬不確定（三軌差距 <3dB）")
+        b = ph(0.1, 0.2, "二", reason="歸屬不確定（三軌差距 <3dB）")
+        c = ph(0.2, 0.3, "三", reason="歸屬不確定（三軌差距 <3dB）")
+        out = enforce_phrase_len([a, b, c], lo=0.4, hi=1.2)
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0]["reason"].count("歸屬不確定"), 1)
 
 
 CUTPLAN_MD = """# Cutplan — demo
