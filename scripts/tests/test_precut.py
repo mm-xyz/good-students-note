@@ -11,6 +11,9 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
+import io
+import os
 import sys
 import tempfile
 import unittest
@@ -34,10 +37,13 @@ def touch(p: Path) -> None:
 
 
 class TestDetectMaterial(unittest.TestCase):
-    def test_tracks_dir_present_is_tracks_line(self) -> None:
+    """luna 守門發現：EP18 的 tracks/ 是指到外接硬碟的 symlink，「目錄存在即分軌」
+    在 symlink 斷鏈/空目錄時會誤判——本類別對照三種實際/合成佈局逐一驗證。"""
+
+    def test_tracks_dir_with_real_file_is_tracks_line(self) -> None:
         with tempfile.TemporaryDirectory() as t:
             d = Path(t)
-            (d / "tracks").mkdir()
+            touch(d / "tracks" / "1_Mars.wav")
             self.assertEqual(detect_material(d), MATERIAL_TRACKS)
 
     def test_no_tracks_dir_is_mixdown_line(self) -> None:
@@ -50,6 +56,76 @@ class TestDetectMaterial(unittest.TestCase):
             d = Path(t)
             (d / "tracks").write_text("oops", encoding="utf-8")
             self.assertEqual(detect_material(d), MATERIAL_MIXDOWN)
+
+    def test_ep16_layout_symlinks_to_real_files_is_tracks(self) -> None:
+        """複刻 EP16 實物佈局：tracks/1_Mars.WAV -> 外接硬碟真實檔案(symlink)。"""
+        with tempfile.TemporaryDirectory() as t:
+            d = Path(t)
+            external = d.parent / (Path(t).name + "_external")
+            external.mkdir()
+            targets = {"1_Mars.WAV": "MIC1_Mars.WAV", "2_Sarah.WAV": "MIC3_Sarah.WAV",
+                      "3_KIN.WAV": "MIC4_KIN.WAV"}
+            tracks = d / "tracks"
+            tracks.mkdir()
+            for link_name, real_name in targets.items():
+                real = external / real_name
+                touch(real)
+                os.symlink(real, tracks / link_name)
+            self.assertEqual(detect_material(d), MATERIAL_TRACKS)
+
+    def test_ep18_layout_symlinks_to_real_files_is_tracks(self) -> None:
+        """複刻 EP18 實物佈局:同款 symlink-to-external 結構,講者名大小寫不同。"""
+        with tempfile.TemporaryDirectory() as t:
+            d = Path(t)
+            external = d.parent / (Path(t).name + "_external18")
+            external.mkdir()
+            targets = {"1_Mars.WAV": "MIC1_Mars.WAV", "2_Sarah.WAV": "MIC3_Sarah.WAV",
+                      "3_KIN.WAV": "MIC4_Kin.WAV"}
+            tracks = d / "tracks"
+            tracks.mkdir()
+            for link_name, real_name in targets.items():
+                real = external / real_name
+                touch(real)
+                os.symlink(real, tracks / link_name)
+            self.assertEqual(detect_material(d), MATERIAL_TRACKS)
+
+    def test_synthetic_empty_tracks_dir_is_mixdown_with_warning(self) -> None:
+        """合成佈局:tracks/ 存在但是空的(從未 ingest 過)→ 混音線,並印警告。"""
+        with tempfile.TemporaryDirectory() as t:
+            d = Path(t)
+            (d / "tracks").mkdir()
+            buf = io.StringIO()
+            with contextlib.redirect_stderr(buf):
+                material = detect_material(d)
+            self.assertEqual(material, MATERIAL_MIXDOWN)
+            self.assertIn("沒有可用的 .wav", buf.getvalue())
+
+    def test_dangling_symlink_only_is_mixdown_with_warning(self) -> None:
+        """tracks/ 只有斷鏈 symlink(外接硬碟沒插上)→ 混音線,並印警告。"""
+        with tempfile.TemporaryDirectory() as t:
+            d = Path(t)
+            tracks = d / "tracks"
+            tracks.mkdir()
+            os.symlink(d / "does-not-exist" / "1_Mars.WAV", tracks / "1_Mars.WAV")
+            buf = io.StringIO()
+            with contextlib.redirect_stderr(buf):
+                material = detect_material(d)
+            self.assertEqual(material, MATERIAL_MIXDOWN)
+            self.assertIn("沒有可用的 .wav", buf.getvalue())
+
+    def test_mixed_dangling_and_real_symlink_is_tracks(self) -> None:
+        """一軌斷鏈、其他軌正常(外接硬碟只掉了一顆)→ 仍算分軌線(至少一個可用)。"""
+        with tempfile.TemporaryDirectory() as t:
+            d = Path(t)
+            external = d.parent / (Path(t).name + "_mixed")
+            external.mkdir()
+            real = external / "MIC1_Mars.WAV"
+            touch(real)
+            tracks = d / "tracks"
+            tracks.mkdir()
+            os.symlink(real, tracks / "1_Mars.WAV")
+            os.symlink(d / "gone" / "MIC3_Sarah.WAV", tracks / "2_Sarah.WAV")
+            self.assertEqual(detect_material(d), MATERIAL_TRACKS)
 
 
 class TestPlanStagesMixdown(unittest.TestCase):

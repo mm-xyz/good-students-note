@@ -60,8 +60,25 @@ class Stage:
 
 
 def detect_material(session_dir: Path) -> str:
-    """ADR 0014:有 tracks/ 走分軌線,沒有走混音線——素材決定路線,不是人選路線。"""
-    return MATERIAL_TRACKS if (session_dir / "tracks").is_dir() else MATERIAL_MIXDOWN
+    """ADR 0014:tracks/ 裡有至少一個**可用**的 .wav 才算分軌線,沒有走混音線
+    ——素材決定路線,不是人選路線。
+
+    「可用」= `Path.is_file()`(對 symlink 會 follow 到目標,斷鏈或目標不存在
+    一律回傳 False,不需要另外手動 resolve)。只看目錄存不存在會誤判:
+    EP16/EP18 真實 session 的 tracks/ 是**指到外接硬碟的 symlink**
+    (`tracks/1_Mars.WAV -> /Users/.../MIC1_Mars.WAV`),空目錄或 symlink
+    斷鏈時目錄仍然「存在」但沒有可剪的分軌素材,那種情況要退回混音線,
+    不能對著空氣走分軌。與 `ingest_tracks.py` 的檔案選取邏輯同款
+    (`.suffix.lower() == ".wav"`,大小寫不敏感)。"""
+    tracks_dir = session_dir / "tracks"
+    if not tracks_dir.is_dir():
+        return MATERIAL_MIXDOWN
+    usable = any(p.is_file() and p.suffix.lower() == ".wav"
+                for p in tracks_dir.iterdir())
+    if not usable:
+        print(f"[precut] ⚠ {tracks_dir} 存在但沒有可用的 .wav"
+             "(空目錄或全部 symlink 斷鏈)——當混音線處理", file=sys.stderr)
+    return MATERIAL_TRACKS if usable else MATERIAL_MIXDOWN
 
 
 def plan_stages(session_dir: Path, args: argparse.Namespace) -> tuple[str, list[Stage]]:
