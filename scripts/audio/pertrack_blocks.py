@@ -140,8 +140,17 @@ def merge_sentence_rows(rows: list[dict], gap: float = 0.45,
     間隔 ≥gap(預設 0.45s,略低於 D1 斷句用的 0.5s 停頓門檻)視為真實
     停頓,不跨過去合併——只黏合「非因停頓、純因粒度上限被切開」的碎片。
     max_block 擋住退回 cc9ecc6 之前的大塊問題(EP16 曾見 27.9s 一個
-    block)。只延伸 prev 的 end、串接 text,不動任何 start、不丟任何
-    片段——時間碼守恆。"""
+    block)。
+
+    **不限同一 src**:同一講者連續講、中間沒有真實停頓,常常會跨過上游
+    混音線 build_blocks 自己切的 canonical block 邊界(EP16 實測:只限
+    同 src 合併卡在 32% 降不下去,拿掉這個限制才壓到 21.8%——上游的
+    block 邊界本來就是混音線自己的 merge_gap/max_block 決定的,不代表
+    句子邊界)。跨邊界合併時 src 改記所有來源 id(`B0013+B0014`),不悄悄
+    只留第一段的 src 誤導人審溯源。
+
+    只延伸 prev 的 end、串接 text,不動任何 start、不丟任何片段——
+    時間碼守恆。"""
     out: list[dict] = []
     for r in rows:
         prev = out[-1] if out else None
@@ -152,6 +161,9 @@ def merge_sentence_rows(rows: list[dict], gap: float = 0.45,
         if joinable:
             prev["end"] = r["end"]
             prev["text"] += r["text"]
+            if r.get("src") and r["src"] != prev.get("src"):
+                prev["src"] = f"{prev.get('src', '')}+{r['src']}" \
+                    if prev.get("src") else r["src"]
             if r.get("reason") and not prev.get("reason"):
                 prev["reason"] = r["reason"]
         else:

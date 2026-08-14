@@ -297,6 +297,18 @@ class TestMergeSentenceRows(unittest.TestCase):
         out = merge_sentence_rows(rows, gap=0.45, max_block=2.5)
         self.assertEqual(out, rows)
 
+    def test_merge_across_original_block_boundary_keeps_src_traceable(self):
+        """同一講者一直講、沒停頓,可以跨原本的 canonical block(src)邊界
+        合併(這正是 no-src-limit 才壓得下 #676 的 69.8% 的原因)——但 src
+        不能悄悄丟掉後半段來源,要看得出這行是哪幾個原始 block 拼的。"""
+        rows = [row(0.0, 1.0, "它的模式呢?", src="B0013"),
+                row(1.05, 2.0, "或者它的產品", src="B0014")]
+        out = merge_sentence_rows(rows, gap=0.45, max_block=2.5)
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0]["text"], "它的模式呢?或者它的產品")
+        self.assertIn("B0013", out[0]["src"])
+        self.assertIn("B0014", out[0]["src"])
+
 
 class TestVisibleBudget(unittest.TestCase):
     def test_visible_candidates_are_capped_at_two_per_minute(self):
