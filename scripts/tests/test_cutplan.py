@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import subprocess
 import sys
 import tempfile
@@ -23,7 +24,10 @@ AUDIO_DIR = Path(__file__).resolve().parent.parent / "audio"
 REPO_ROOT = AUDIO_DIR.parent.parent
 sys.path.insert(0, str(AUDIO_DIR))
 
-from cutplan import build_blocks, build_gaps, refine_gaps, gap_line  # noqa: E402
+from cutplan import (build_blocks, build_gaps, refine_gaps, gap_line,  # noqa: E402
+                     detect_asr_artifact, flag_artifacts)
+from fixtures.ep16_artifact_samples import (  # noqa: E402
+    B0068_ARTIFACT_TEXT, B0067_CLEAN_TEXT, B0001_CLEAN_TEXT)
 
 
 def cue(idx, start, end, text, speaker=None):
@@ -157,6 +161,75 @@ class TestRefineGaps(unittest.TestCase):
         self.assertEqual(out[0]["kind"], "silence")
 
 
+class TestDetectAsrArtifact(unittest.TestCase):
+    """#675 — whisper 重複迴圈/亂碼守門(混音線,cutplan 產生階段)。
+
+    判準沿用 pertrack_blocks.is_artifact()(2026-08-11,EP16 Mars 軌「嘗」×40):
+    同字元連續重複 ≥4、含 U+FFFD、整句只由 ≤2 種字元組成(長度 ≥6),再加一條
+    混音線需要的短語(n-gram)連續重複偵測,因為混音線的 block 可能是「正常開場
+    + 重複段」混在一起,不是整句都退化。"""
+
+    def test_ep16_b0068_repeat_loop_detected(self):
+        # 實測:EP16 B0068 [7:33-7:53] 20.4 秒「反而反而反而…」
+        reason = detect_asr_artifact(B0068_ARTIFACT_TEXT)
+        self.assertIsNotNone(reason)
+
+    def test_ep16_b0067_clean_block_not_flagged(self):
+        self.assertIsNone(detect_asr_artifact(B0067_CLEAN_TEXT))
+
+    def test_ep16_b0001_opening_not_flagged(self):
+        self.assertIsNone(detect_asr_artifact(B0001_CLEAN_TEXT))
+
+    def test_same_char_run_below_threshold_not_flagged(self):
+        # 口語重複 3 次是正常停頓/強調(「對對對」),不到 4 次不算迴圈
+        self.assertIsNone(detect_asr_artifact("對對對,我也覺得。"))
+
+    def test_same_char_run_at_threshold_flagged(self):
+        self.assertIsNotNone(detect_asr_artifact("啊啊啊啊啊啊啊啊"))
+
+    def test_replacement_char_flagged(self):
+        self.assertIsNotNone(detect_asr_artifact("正常一半��亂碼一半"))
+
+    def test_short_normal_text_not_flagged(self):
+        self.assertIsNone(detect_asr_artifact("我是King。"))
+
+    def test_empty_text_not_flagged(self):
+        # 空字串不是 artifact 的問題(是別處的問題),偵測器不對它下判斷
+        self.assertIsNone(detect_asr_artifact(""))
+
+    def test_phrase_repeat_mixed_with_real_content_flagged(self):
+        # 混音線常見型態:正常起頭接一段短語迴圈,不是整句退化
+        text = "然後我覺得" + "反而" * 10
+        self.assertIsNotNone(detect_asr_artifact(text))
+
+
+class TestFlagArtifacts(unittest.TestCase):
+    def test_flags_artifact_block_reason_and_field(self):
+        blocks = build_blocks(
+            [cue(1, 0.0, 1.0, B0068_ARTIFACT_TEXT, "Sarah")], 0.0, 45.0)
+        n = flag_artifacts(blocks)
+        self.assertEqual(n, 1)
+        self.assertTrue(blocks[0]["asr_artifact"])
+        self.assertIn("⚠ASR-artifact", blocks[0]["reason"])
+        self.assertTrue(blocks[0]["keep"])  # 只標記,不自動剪
+
+    def test_clean_block_not_flagged(self):
+        blocks = build_blocks(
+            [cue(1, 0.0, 1.0, B0067_CLEAN_TEXT, "Sarah")], 0.0, 45.0)
+        n = flag_artifacts(blocks)
+        self.assertEqual(n, 0)
+        self.assertFalse(blocks[0]["asr_artifact"])
+        self.assertEqual(blocks[0]["reason"], "")
+
+    def test_does_not_clobber_existing_reason(self):
+        blocks = build_blocks(
+            [cue(1, 0.0, 1.0, B0068_ARTIFACT_TEXT, "Sarah")], 0.0, 45.0)
+        blocks[0]["reason"] = "人審已手動判斷"
+        flag_artifacts(blocks)
+        self.assertEqual(blocks[0]["reason"], "人審已手動判斷")
+        self.assertTrue(blocks[0]["asr_artifact"])  # 結構化欄位仍要標記
+
+
 class TestGapLine(unittest.TestCase):
     def test_sound_line_format(self):
         line = gap_line({"id": "G0001", "start": 60.0, "end": 61.5, "keep": False,
@@ -230,6 +303,52 @@ class TestPrepareE2E(unittest.TestCase):
             capture_output=True, text=True, cwd=REPO_ROOT)
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertIn("不重複加", proc.stdout)
+
+
+class TestPrepareE2EArtifact(unittest.TestCase):
+    """#675 — prepare 端對端接上 artifact 守門:混合一個正常 cue 與一個
+    EP16 實測的重複迴圈 cue,驗證 cutplan.md/json 都標記,且不影響 keep 狀態。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls._td = tempfile.TemporaryDirectory()
+        cls.sdir = Path(cls._td.name) / "ep-artifact-test"
+        cls.sdir.mkdir()
+        srt = (
+            "1\n00:00:00,000 --> 00:00:01,000\n[Sarah] " + B0001_CLEAN_TEXT + "\n\n"
+            "2\n00:00:05,000 --> 00:00:25,000\n[Sarah] " + B0068_ARTIFACT_TEXT + "\n")
+        (cls.sdir / "transcript.srt").write_text(srt, encoding="utf-8")
+        cls.proc = subprocess.run(
+            [sys.executable, str(AUDIO_DIR / "cutplan.py"), "prepare",
+             "--session", str(cls.sdir)],
+            capture_output=True, text=True, cwd=REPO_ROOT)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._td.cleanup()
+
+    def test_exit_zero(self):
+        self.assertEqual(self.proc.returncode, 0, self.proc.stderr)
+
+    def test_stdout_reports_artifact_count(self):
+        self.assertIn("artifact", self.proc.stdout.lower())
+
+    def test_json_marks_artifact_block_only(self):
+        data = json.loads((self.sdir / "cutplan.json").read_text(encoding="utf-8"))
+        by_id = {b["id"]: b for b in data["blocks"]}
+        self.assertFalse(by_id["B0001"]["asr_artifact"])
+        self.assertTrue(by_id["B0002"]["asr_artifact"])
+        self.assertTrue(by_id["B0002"]["keep"])  # 標記不等於自動剪
+
+    def test_md_shows_marker_on_artifact_line_only(self):
+        md = (self.sdir / "cutplan.md").read_text(encoding="utf-8")
+        lines = {}
+        for l in md.splitlines():
+            m = re.match(r"^- \[.\] (B\d{4}) ", l)
+            if m:
+                lines[m.group(1)] = l
+        self.assertNotIn("⚠ASR-artifact", lines["B0001"])
+        self.assertIn("⚠ASR-artifact", lines["B0002"])
 
 
 if __name__ == "__main__":

@@ -22,9 +22,12 @@ sys.path.insert(0, str(AUDIO_DIR))
 
 from pertrack_blocks import (  # noqa: E402
     derive_prefixes, enforce_phrase_len, carry_over_program, build_md,
-    pick_visible,
+    pick_visible, backfill_artifact_flags,
 )
 from render_cut import parse_program  # noqa: E402
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from fixtures.ep16_artifact_samples import (  # noqa: E402
+    B0068_ARTIFACT_TEXT, B0067_CLEAN_TEXT)
 
 
 def ph(a, b, text="字"):
@@ -184,6 +187,61 @@ class TestBuildMd(unittest.TestCase):
         self.assertEqual(s["insert"], "raw/補錄.WAV")
         self.assertIsNone(next(it for it in prog
                                if it.get("id") == "SR0001")["insert"])
+
+
+class TestBackfillArtifactFlags(unittest.TestCase):
+    """#675 追修(luna FAIL 2026-08-14):5663ea3 改版把 7c555fc 的
+    is_artifact() 一起砍掉了,現行 pertrack_blocks.py 直接吃 cp["blocks"]
+    (混音線 canonical 文字)做逐軌切分,不帶任何 artifact 判斷;既有(舊格式)
+    cutplan.json 的 block 也沒有 cutplan.flag_artifacts() 補的欄位。入口
+    對缺欄位的 block 防禦性補跑 detect_asr_artifact(),新舊資料都安全,
+    不需要 migration。"""
+
+    def test_old_format_block_without_field_gets_backfilled(self):
+        # 舊格式 cutplan.json 的 block:沒有 asr_artifact 欄位,B0068 型內容
+        blocks = [{"id": "B0068", "start": 453.2, "end": 473.64,
+                  "speaker": "Sarah", "text": B0068_ARTIFACT_TEXT,
+                  "keep": True, "reason": ""}]
+        n = backfill_artifact_flags(blocks)
+        self.assertEqual(n, 1)
+        self.assertTrue(blocks[0]["asr_artifact"])
+        self.assertTrue(blocks[0]["asr_artifact_reason"])
+        self.assertTrue(blocks[0]["keep"])  # 只標記,不改動任何既有欄位
+
+    def test_old_format_clean_block_not_flagged(self):
+        blocks = [{"id": "B0067", "start": 440.9, "end": 450.28,
+                  "speaker": "Sarah", "text": B0067_CLEAN_TEXT,
+                  "keep": True, "reason": ""}]
+        n = backfill_artifact_flags(blocks)
+        self.assertEqual(n, 0)
+        self.assertFalse(blocks[0]["asr_artifact"])
+
+    def test_existing_field_not_overwritten(self):
+        # 已有欄位(不論真假)一律跳過,冪等
+        blocks = [{"id": "B0068", "text": B0068_ARTIFACT_TEXT,
+                  "asr_artifact": False, "asr_artifact_reason": "人工核可"}]
+        n = backfill_artifact_flags(blocks)
+        self.assertEqual(n, 0)
+        self.assertFalse(blocks[0]["asr_artifact"])
+        self.assertEqual(blocks[0]["asr_artifact_reason"], "人工核可")
+
+    def test_idempotent_second_call_no_change(self):
+        blocks = [{"id": "B0068", "text": B0068_ARTIFACT_TEXT}]
+        backfill_artifact_flags(blocks)
+        first = dict(blocks[0])
+        backfill_artifact_flags(blocks)
+        self.assertEqual(blocks[0], first)
+
+    def test_mixed_batch_only_missing_field_backfilled(self):
+        blocks = [
+            {"id": "B0001", "text": B0067_CLEAN_TEXT},              # 舊格式,缺欄位
+            {"id": "B0068", "text": B0068_ARTIFACT_TEXT,
+             "asr_artifact": True, "asr_artifact_reason": "已標"},  # 新格式,已有欄位
+        ]
+        n = backfill_artifact_flags(blocks)
+        self.assertEqual(n, 0)  # B0001 補上後判定為 False,B0068 本來就有欄位不重算
+        self.assertFalse(blocks[0]["asr_artifact"])
+        self.assertEqual(blocks[1]["asr_artifact_reason"], "已標")
 
 
 class TestVisibleBudget(unittest.TestCase):

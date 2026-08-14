@@ -29,6 +29,79 @@ from srt_utils import parse_srt, pick_transcript, fmt_mmss, rel
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 
+# whisper artifact 守門(#675)— 同族判準見 pertrack_blocks.is_artifact()
+# (2026-08-11,EP16 Mars 軌「嘗」×40 實證)。混音線這裡的差異:pertrack 直接
+# 丟棄整個 block(逐軌 ASR 只是佐證),cutplan 只標記——文字是人審剪輯的唯一
+# 依據,不能默默消失,要留給人看見「這段不可信」(見 CHANGELOG 2026-08-11、
+# EP16 B0068「反而反而反而…」)。
+ARTIFACT_RUN_MIN = 4          # 同一字元連續重複幾次算迴圈
+ARTIFACT_DEGENERATE_LEN = 6   # 整句只有 <=2 種字元時,至少要這麼長才算(太短
+                              # 的正常口語也可能只用兩個字,如「我是King。」)
+ARTIFACT_PHRASE_LENS = (2, 3, 4, 5, 6)  # 掃描的短語(n-gram)長度
+ARTIFACT_PHRASE_REPEAT_MIN = 4          # 同一短語連續出現幾次算迴圈
+
+
+def detect_asr_artifact(text: str) -> str | None:
+    """whisper 重複迴圈/亂碼偵測。回傳觸發原因,正常文字回傳 None。
+
+    三條判準,任一命中即視為 artifact:
+    1. 同一字元連續重複 >= ARTIFACT_RUN_MIN 次(「嘗嘗嘗嘗…」)
+    2. 含 U+FFFD(解碼失敗的替代字元)
+    3. 整句只由 <=2 種字元組成且長度 >= ARTIFACT_DEGENERATE_LEN
+       (「反而反而反而…」— 逐字交替,單字連續重複抓不到,靠這條)
+    4. 任一長度 2-6 的短語連續重複 >= ARTIFACT_PHRASE_REPEAT_MIN 次
+       (block 前段正常、後段才跑進迴圈的混合型態,前三條不會命中整句)
+    """
+    t = text.strip()
+    if not t:
+        return None  # 空字串不是本偵測器要管的問題
+    if "�" in t:
+        return "含 U+FFFD 解碼失敗字元"
+    run = best = 1
+    for a, b in zip(t, t[1:]):
+        run = run + 1 if a == b else 1
+        best = max(best, run)
+    if best >= ARTIFACT_RUN_MIN:
+        return f"同字元連續重複 {best} 次"
+    if len(t) >= ARTIFACT_DEGENERATE_LEN and len(set(t)) <= 2:
+        return f"整句僅由 {len(set(t))} 種字元組成({len(t)} 字)"
+    for n in ARTIFACT_PHRASE_LENS:
+        if len(t) < n * ARTIFACT_PHRASE_REPEAT_MIN:
+            continue
+        i = 0
+        while i + n <= len(t):
+            gram = t[i:i + n]
+            if not gram.strip():
+                i += 1
+                continue
+            reps = 1
+            j = i + n
+            while t[j:j + n] == gram:
+                reps += 1
+                j += n
+            if reps >= ARTIFACT_PHRASE_REPEAT_MIN:
+                return f"短語「{gram}」連續重複 {reps} 次"
+            i = j if reps > 1 else i + 1
+    return None
+
+
+def flag_artifacts(blocks: list[dict]) -> int:
+    """對每個 block 跑 detect_asr_artifact(),標記但不改動 keep/文字/時間碼。
+
+    寫入結構化欄位 asr_artifact(bool)+asr_artifact_reason(str),供程式判斷;
+    reason 欄目前是空的才順手補上 `⚠ASR-artifact：<原因>`(cutplan.md 會把
+    reason 印在行尾,人審一眼看到),已有理由的 block 不覆蓋。回傳命中數。"""
+    n = 0
+    for b in blocks:
+        reason = detect_asr_artifact(b.get("text", ""))
+        b["asr_artifact"] = bool(reason)
+        b["asr_artifact_reason"] = reason or ""
+        if reason:
+            n += 1
+            if not b.get("reason"):
+                b["reason"] = f"⚠ASR-artifact：{reason}"
+    return n
+
 
 def build_blocks(cues: list[dict], merge_gap: float, max_block: float) -> list[dict]:
     blocks = []
@@ -193,6 +266,7 @@ def prepare(args):
     srt_src = spk_srt if spk_srt.exists() else pick_transcript(session_dir)
     cues = parse_srt(srt_src)
     blocks = build_blocks(cues, args.merge_gap, args.max_block)
+    n_art = flag_artifacts(blocks)
     gaps = build_gaps(blocks, args.min_gap)
     gaps = refine_gaps(gaps, session_dir / "audio16k.wav")
 
@@ -211,6 +285,9 @@ def prepare(args):
     total = sum(b["end"] - b["start"] for b in blocks)
     print(f"[cutplan] {len(blocks)} blocks({fmt_mmss(total)} 內容)→ "
           f"{rel(cp_md, PROJECT_ROOT)}")
+    if n_art:
+        print(f"[cutplan] ⚠ {n_art} 個 block 疑似 whisper artifact(已標記,"
+              f"未自動剪,人審前先看 ⚠ASR-artifact 理由)")
 
     prosody_note = ("prosody.json 已就緒,高分段見 highlights.md,剪點會 snap 靜音"
                     if (session_dir / "prosody.json").exists()
