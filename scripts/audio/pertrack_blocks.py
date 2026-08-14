@@ -34,6 +34,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from srt_utils import fmt_mmss, parse_srt, split_words_to_phrases  # noqa: E402
+from cutplan import detect_asr_artifact  # noqa: E402 — #675 入口防禦性補標,見下
 
 HOP = 0.01                # 基底 frame 網格(10ms),D2/D3 都在上面積分
 SR = 8000                 # 能量分析取樣率(語音能量夠用,記憶體省)
@@ -42,6 +43,31 @@ SCAN_WIN = 0.02           # D3 掃描窗 20ms
 ROW_RE = re.compile(r"^- \[( |x|X)\] ([A-Z]{1,2}\d{3,5}) ")
 INSERT_ID_RE = re.compile(r"^S\d{3,5}$")
 VOWELS = set("AEIOU")
+
+
+# ── whisper artifact 入口防禦(#675)──────────────────────────────────────
+def backfill_artifact_flags(blocks: list[dict]) -> int:
+    """對缺 asr_artifact 欄位的 block 防禦性補跑 detect_asr_artifact()。
+
+    2026-08-14 luna 查證:5663ea3 改版把 7c555fc 的 is_artifact() 一起砍掉
+    了——現行 pertrack_blocks 直接吃 cp["blocks"](混音線 canonical 文字)
+    做逐軌切分,沒有任何 artifact 判斷;既有(舊格式)cutplan.json 的 block
+    也不會有 cutplan.flag_artifacts() 補的欄位。這裡在入口統一補標,新舊
+    cutplan.json 都安全,不需要另外寫 migration。
+
+    冪等:已有 asr_artifact 欄位(不論值為何)一律跳過,不覆蓋——避免蓋掉
+    别處(未來或人工)寫入的判斷。純標記,不改動 text/start/end/keep 或任何
+    既有欄位,不影響逐軌切分/歸屬邏輯。回傳新標記數。"""
+    n = 0
+    for b in blocks:
+        if "asr_artifact" in b:
+            continue
+        reason = detect_asr_artifact(b.get("text", ""))
+        b["asr_artifact"] = bool(reason)
+        b["asr_artifact_reason"] = reason or ""
+        if reason:
+            n += 1
+    return n
 
 
 # ── 前綴 ────────────────────────────────────────────────────────────────
@@ -244,6 +270,11 @@ def main() -> int:
     sdir = Path(args.session)
     cj = sdir / "cutplan.json"
     cp = json.loads(cj.read_text(encoding="utf-8"))
+    n_backfill = backfill_artifact_flags(cp["blocks"])
+    if n_backfill:
+        print(f"[pertrack] ⚠ 入口補標 {n_backfill} 個疑似 whisper artifact 的"
+              f" block(缺 asr_artifact 欄位的舊格式或新命中,來源:cutplan.json"
+              f" canonical 文字,只標記不影響切分)")
     words = json.loads((sdir / "words.json").read_text(encoding="utf-8"))
     wavs = sorted(p for p in (sdir / "tracks").glob("*")
                   if p.suffix.lower() in (".wav", ".flac"))
