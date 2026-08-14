@@ -74,20 +74,51 @@ frame 迭代時，只用「該 None run 自己的 frame」累計分類，不會�
 `diag1_causes.py` 這支診斷腳本本身的量測口徑，它是分析工具不是
 production code，不在本卡範圍）。
 
+## luna 守門 round 1：cause 累計窗口污染（已修，見下）
+
+luna 抓到一個真 Major：`owner_runs()` 輸出的 None-run 只到 `cand_start`
+為止（候選人成立後、正在撐穩定時長的 frame 屬於**下一段** owner run 的
+醞釀期），但原本的累計是逐 frame 一路加到確立那一刻才分類，等於把
+候選人撐穩定時長的 active frame 也算進了 cause 統計——本該是
+`floor_gated` 的區間被這些「後段清楚領先」的 frame 污染成 `unstable`。
+
+最小重現（luna 給的）：前 0.10s 三軌都在底噪（領先僅 2dB）、後 0.20s
+某軌穩定領先 30dB（足以確立所有權）。修前 `owner_runs()` 回傳
+`(0.0, 0.1, None, 'unstable')`，應為 `'floor_gated'`。
+
+修法：`owner_runs()` 內部改成 committed／pending 雙桶。`pend_*` 是目前
+存活候選人正在累積、還沒確定會不會被最終輸出排除的 frame；候選人換人
+或本身失敗（below_floor 擋下／margin 不足）時，`pend_*` 併回
+`comm_*`（那些 frame 仍在這個 None-run 的輸出範圍內）；候選人撐滿穩定
+時長真的確立所有權時，`pend_*` 直接丟棄不進 `comm_*`（那些 frame 已經
+是下一段 owner run 的一部分）。`cause` 分類只看 `comm_*`。已補回歸測試
+`test_cause_window_excludes_frames_that_belong_to_the_confirmed_owner`，
+紅（重現 `'unstable'` 誤判）→ 綠（`'floor_gated'` 正確）。commit
+`b587d0e`。未動門檻/hysteresis/#726 bypass 本身，純修累計窗口對位。
+
 ## 量測（EP16 實資料，production `split_phrase` 直接產出的 `reason`
 欄位，非另一套分類腳本；n_unc 前後一致 =708，證實純標示不改筆數）
 
-| reason 文案 | 筆數 | 筆數% | 時長(s) | 時長% |
-| :--- | :--- | :--- | :--- | :--- |
-| 歸屬不確定（三軌皆近底噪，領先不足） | 400 | 56.5% | 222.8 | 67.8% |
-| 歸屬不確定（領先未能持續） | 299 | 42.2% | 105.9 | 32.2% |
-| 歸屬不確定（三軌差距 <3dB） | 9 | 1.3% | 0.0 | 0.0% |
-| TOTAL | 708 | 100.0% | 328.7 | 100.0% |
+**修正版跟先前送審版的數字有差**——先前版本吃到 luna 抓到的累計窗口
+污染，偏差方向是「本該 floor_gated 的被誤標成 unstable」，修完後
+floor_gated 佔比明顯回升：
 
-（`FLOOR_GATED` 佔比較 #677 原始 59%／#726 前更高比重仍是最大宗但
-筆數已從 520 降到 400——跟 #726「底噪閘相對領先例外」把清楚贏家撈出
-不確定池一致；below_margin 9 筆＝1.3%，跟 #677「字面成立僅 0.3%」量級
-吻合，`diag1` 的 0.3% 是筆數口徑；本卡是 D2 唯一入口，兩者統計母體一致。）
+| reason 文案 | 筆數(修前) | 筆數(修後) | 筆數%(修後) | 時長(s)(修後) | 時長%(修後) |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| 歸屬不確定（三軌皆近底噪，領先不足） | 400 | **494** | 69.8% | 261.1 | 79.4% |
+| 歸屬不確定（領先未能持續） | 299 | **201** | 28.4% | 66.9 | 20.3% |
+| 歸屬不確定（三軌差距 <3dB） | 9 | **13** | 1.8% | 0.7 | 0.2% |
+| TOTAL | 708 | 708 | 100.0% | 328.7 | 100.0% |
+
+（跑法：worktree `feat/728-reason-split` 的 production code＋主 checkout
+`/Users/marslo/GithubRepo_mm-xyz/good-students-note/sessions/2026-07-27_
+EP16-不要跟工作談戀愛/`（唯讀，worktree 內 `sessions/` 被 gitignore 沒有
+實體）；腳本吃跟 `pertrack_blocks.main()` 完全一致的 D1/D2 呼叫鏈與
+argparse 預設參數，直接讀 `split_phrase` 產出的 `reason` 欄位，不是另一套
+分類腳本——這個路徑先前送審版就已經是這樣跑，本次只是用修好的 code
+重跑一次；n_unc=708 前後不變，證實純標示改動不影響筆數這件事在 fix
+前後都成立。below_margin 13 筆＝1.8%，仍跟 #677「字面成立僅 0.3%」
+同量級，不是這次修正影響的分類邊界。）
 
 ## 後果
 
