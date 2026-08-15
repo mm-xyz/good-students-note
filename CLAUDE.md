@@ -29,6 +29,9 @@ It is the **single authoritative specification** for all AI-assisted workflows i
 # 處理一個音檔,產出去時間軸、合併、通順的 cleaned.md(大宗使用者終點)
 python3 scripts/session.py new <audio_file> --context "領域專名詞"
 
+# 處理一份文件(pdf/epub/txt),同一入口按副檔名自動分流,直接產 cleaned.md(見原則 12)
+python3 scripts/session.py new <doc_file.pdf> --vlm   # --vlm 選配:pdf 圖表理解
+
 # 要好學生筆記?加 --stop-at notes --identity "<立場>"
 # 要互動校稿 + 即時貼 context?開 web/studio.html
 # 閉環(音檔+圖片 → 出版前全自動,deploy 人工按):
@@ -226,11 +229,48 @@ Phase A/B/C/D 都在精修同一份 cleaned.md(A/B 產出、C/D 出版前強制�
 - **`SKILL.md`**: Skill 定義,使用者透過 `/good-student-notes` 呼叫
 - **`scripts/groq_transcribe.py`**: Groq Whisper 單檔轉錄(從 `.env` 讀 key,只從輸入檔同目錄讀 context.txt)
 
+### CLI Skill (`/.claude/skills/good-student`)— 知識點線(2026-08-01,ADR 0009)
+
+- 把 `cleaned.md`(或任意乾淨長文本)切成**概念級、好記憶的知識點**(一概念一檔、
+  自足可檢索、帶 🎯 視角類比＋一句鉤;RAG-ready Obsidian 知識庫)
+- **蒸餾產物,與零省略產線平行、不取代**——零省略 checklist 只管 Step 2/3/4,
+  不適用本線;反之亦然
+- 鐵門:啟動必談「切分軸/視角/輸出位置」三件事(視角每次重談);
+  auto mode 也必須**先試切 5 張、使用者驗收後才可批量**
+- 另有 symlink 進 `~/.claude/skills/`,跨 repo 可用 `/good-student` 呼叫
+
 ### Shared Scripts (`/scripts`)
 
 - **`session.py`**: Pipeline 統籌器 — `python3 scripts/session.py new <audio> [--context] [--domain] [--identity]`
 - **`qaqc_phase_b.py`**: Gemini-powered Phase B(支援 merged 與 structured 兩模式)
 - **`lang/`**: 多語系轉錄/清理腳本(見 `scripts/lang/README.md`)。目前有 `it/`(義大利文,歷史參考)、`en/`(英文)、`ja/`(日文);跨語系格式工具(`srt_clean_md.py`、`vtt_to_txt.py`)放 `lang/` 根
+
+### 文件輸入線 (`/scripts/doc`,見原則 12)
+
+- **`extract.py`**: Phase-1 確定性抽取器(0 token)— PDF(PyMuPDF)/EPUB(ebooklib)/TXT →
+  結構化繁體 markdown,直接產出 `cleaned.md`,跳過 ASR 專屬清理
+- **`figures.py`**: PDF 圖表確定性渲染器(0 token)— 內嵌點陣圖/向量圖表頁/掃描頁 →
+  `<session>/images/` + `doc_figures.json`,供既有 `describe_images.py` 續接
+  (`session.py new <pdf> --vlm` 觸發)
+- 重依賴(fitz/ebooklib/lxml/chardet/opencc)住 `.venv-doc`(見 `requirements-doc.txt`),
+  與 `.venv-audio` 同構——「輸入前端各自一個 deps venv,主管線輕量承諾不變」
+
+### 回歸測試 (`/scripts/tests`)
+
+音訊剪輯線的行為鎖定測試(characterization,2026-07-30 起),文件輸入線測試(2026-07-31
+起)併入同一套 runner。**改 `scripts/audio/` 或 `scripts/doc/` 任何檔案,改完必跑**:
+
+```bash
+bash scripts/tests/run_all.sh
+```
+
+- 音檔線每份 `test_*.py` 皆可獨立直接執行(unittest,零 pytest 依賴);`test_prosody.py`
+  的 numpy 測試主環境自動 skip,runner 會用 `.venv-audio` 跑該檔
+- 文件線三份(`test_doc_extract`/`test_doc_figures`/`test_session_doc_line`)需要
+  fitz/ebooklib/lxml/PIL,主環境沒裝,runner 獨立用 `.venv-doc/bin/python -m pytest`
+  跑;`.venv-doc` 不存在則印安裝提示並跳過該段,不讓整支 run_all 失敗
+- 涵蓋:`srt_utils`(斷句/時間碼/SRT roundtrip)、`cutplan`(block/G 列/burst/prepare e2e)、`resegment_srt`+`migrate_marks`(phrase-level 改版兩工具)、`diarize` 零模型路徑(換手切開/from-tracks/apply-map)、`render_cut`(防幻覺驗證/剪距運算/BGM 包絡/dry-run e2e)、`copy_prompt_build`、`prosody` 確定性部分、`doc_extract`(簡繁/章節/直排重排/OCR 去交錯)、`doc_figures`(四維篩選/manifest)、`session_doc_line`(副檔名分流 e2e)
+- **不在範圍**:ASR/pyannote/librosa 模型呼叫、ffmpeg 實際出片、掃描 PDF 的 OCR(外部依賴或未實作,詳見原則 12 / ADR 0008)
 
 ### SRT Component (`/SRT`)
 
@@ -334,6 +374,11 @@ python3 transcribe.py          # Interactive mode(既有互動模式)
 | Step 5 | `<slug>.html` + 線上網址 | **分頁式 HTML 出版稿,deploy 到 Firebase `goodedunote` 專案** | 要把筆記做成可分享的網頁 |
 | **Step 6** | (審查報告) | **出版後 QAQC**:自動 audit 三本書是否一致(`python3 scripts/publish_qaqc.py`) | 統一書架回連、data.js 完整、OG meta、視覺一致性 |
 
+> **知識點線(`/good-student`,ADR 0009)**:與上表**平行的蒸餾產線**,不在 Step 編號內——
+> 吃 Step 2 的 `cleaned.md`(或任意乾淨長文本),產概念級知識點(`atoms/` 或指定 vault,
+> 一概念一檔、300–800 字、🎯 視角類比＋一句鉤)。**零省略鐵律不適用**(它是濃縮改寫,
+> `confidence: distilled`);想長期記住、建 RAG 知識庫的人走這條。
+
 Web 的差異化定位(未來):**圖像視角好學生筆記** —— 用影像把既有筆記內容**不破壞地**
 疊上專業視角(建築師/醫學/會計/工程)的手寫風格註解,讓學習者在原文上「墊高角度」做知識串聯。
 **完整設計 SSoT 見 [`prompts/image_notes_design.md`](./prompts/image_notes_design.md)**
@@ -409,6 +454,126 @@ Step 5 只在 `goodedunote` 專案的 hosting 上新增/更新該篇 `<slug>/`,�
 - **marker 依賴鏈逐一清除**:`phase-b → phase-c → phase-d → step-3 → step-4`,清一個、驗一個(字數/全形/段落數等),再清下一個。
 - **Phase C / Phase D 是 cleaned.md 出版前的強制門**(原 Step 2.2/2.5;與 Phase A/B 同屬 Step 2 內部、精修同一份 cleaned.md):SSoT [`§ R7`](./prompts/qaqc_core_rules.md) / [`§ R8`](./prompts/qaqc_core_rules.md);由 `scripts/prepublish_gate.py` 在 `publish_goodedunote.sh` 開頭把關,未過不得進 Step 5/6。
 - **Why**:2026-06 多場校稿出版時確認,批次打包、一次跑完多步會造成品質崩壞與 token 濫用;拆成獨立可驗收的 step、各自用對工具,結果才一致。
+
+### 原則 10 — 音訊分析線:全本地、判斷仍走 marker(2026-07-27 引入)
+
+`--diarize` / `--prosody` / `--cut` 是與 Phase B **平行**的加值線,吃 transcript.srt/cleaned.srt
+的時間軸,不動任何既有產物(SRT 不可變原則不受影響)。
+
+- **重依賴隔離**:pyannote/torch/librosa 住 `.venv-audio`(`requirements-audio.txt`),
+  session.py 只在用到時呼叫 `.venv-audio/bin/python`;缺 venv 印安裝指引、不擋主管線。
+  主管線「`pip install requests` 就能跑」的輕量承諾不變。
+- **全本地零雲端**:diarization(pyannote community-1,`.env` 需 `HF_TOKEN`,gated model)
+  與聲學分析(librosa)都在本機跑,音檔不出門。
+- **轉錄主線也是本地(2026-07-27 MM 拍板)**:`--asr local`(預設)用 mlx-whisper
+  large-v3-turbo(`scripts/audio/transcribe_local.py`,context 餵 initial_prompt、
+  OpenCC s2twp 繁化);Groq 降為選配 `--asr groq`(非 Apple Silicon 或無 .venv-audio 時用)。
+  Auth 雙軌總表的「Groq Auth」欄自此僅適用 `--asr groq` 路徑。
+- **判斷步驟照原則 5 走 marker**:speaker 命名(`.speaker_naming_pending.json`)、
+  剪輯提案(`.cutplan_pending.json`)交對話 agent,腳本本身零 LLM 呼叫。
+- **剪輯的人審不可跳過**:cutplan.md 的勾選是 MM 的剪輯決定;agent 只提案
+  (翻勾選+理由+章節),**render 前必須 MM 人審**,agent 絕不代審直接出片。
+- **防篡改**:`render_cut.py` 三道驗證(md/json block 一致、md 文字==json 文字、
+  json 文字 ⊂ 來源 SRT),cutplan 只准翻勾選,文字時間碼不可動。
+- **產物**:`speakers.json`、`transcript.speakers.srt`、`prosody.json`、`highlights.md`、
+  `cutplan.md/json`、`final_cut.mp3`、`cut_map.json`、`chapters.txt`,全落 `sessions/<slug>/`。
+- **標準流程(2026-08-11 MM 定,ADR 0015)**:丟音檔改好名 → **初剪(全自動,
+  不需要 MM 介入)** → 給 cutplan(**集數資料夾根**,session 與 GDrive 同一位置,
+  不進 `_meta/`)→ 跑 script/文案/生圖 → 建版本目錄 → 備份 cutplan →
+  依最後一版開剪 → **給 diff 片段**(`diff_clips.py`,只切改動處 ±5s,不產文檔)
+  → 再修 cutplan → 再跑 → 定稿 → 出文案。後四步是迴圈。
+  **每次執行都要同步 GDrive 與 local 的 cutplan:詢問,預設擇新**(`cut.py`)。
+  render 參數與路線住 cutplan 的 `## ⚙`(含 `line=pertrack|mixdown`),
+  **不住 render.txt**——cutplan 是參數真相源,重跑時它是輸入不只是紀錄。
+- **剪輯路線由素材決定(2026-08-11 MM 拍板,ADR 0014)**:**有分軌走分軌線,
+  只有混音軌走混音線**——`render_cut.py` 依 `cutplan.json` 有沒有 `tracks` 區
+  自動分流,不需要旗標也不需要人選。分軌線是**加法不是替換**:EP15 是單軌錄的、
+  來賓遠端連線與舊素材也只有合軌,那些永遠走混音線。兩條線的人審介面同形
+  (`- [x]` 勾選、`~~刪除線~~`),素材換了手感不換。**`render.txt` 要記錄本次
+  走哪條線**(版本目錄名是人取的標籤,不是機器寫的事實)。
+- **session 目錄分類(2026-08-10,ADR 0011)**:podcast 線的 session 分四類子目錄,
+  與 Google Drive 用同一套語彙——`raw/`(未進管線的原始素材,如事後補錄)、
+  `tracks/`(已對齊的管線分軌,ingest 寫死)、`_meta/`(人看的伴隨檔:highlights/
+  chapters/pipeline_run/文案/封面/生圖 prompt)、`_bak/`(所有 `*.bak-*`)、
+  `vNN_<YYYYMMDD-HHMM>_<標籤>/`(每版成品一個資料夾:mp3 + cutplan 快照 + render.txt)。
+  **管線工作檔(source/audio16k/transcript*/words/prosody/cutplan/cut_map/
+  speakers*/context)留在 session 根不准搬**——這些檔名被 `scripts/audio/*.py`
+  與 `session.py` 寫死。工具:`python3 scripts/audio/tidy_session.py --session <dir>`
+  (預設 dry-run,`--apply` 才搬,只搬不刪)。
+- **➕ 外部補錄插入(2026-08-10,ADR 0011)**:事後補錄的音檔不在 `source.wav`
+  時間軸上,用 `## ➕ <檔案> [gain=auto|±dB start= end= fade= tempo=]  說明`
+  插進 cutplan 的該位置。`gain=auto`(預設)量兩邊 integrated LUFS 差自動對齊電平;
+  `tempo` 預設 1.0(補錄是自然語速,不跟正片變速);接縫走 10ms 微交疊。
+  補錄**不進防幻覺驗證**(文字本來就不在來源 SRT 裡)。
+- **節目結構(2026-07-28)**:cutplan.md 播放順序=文件行序;`## 🎬`=精華集錦區
+  (block 行可複製貼上/重複)、`## 🎵 檔案 fadein= fadeout= lead= tail= start= end=`
+  =BGM overlay 疊接(音量包絡見原則 11;ADR 0004)、其他 `##`=章節。
+- **🎵 檔名解析(2026-07-29)**:session 目錄 → repo 根 → 絕對路徑 → **共用素材庫**
+  `shared-material/水星貓的生活實驗室_v2/`(`--material-dir` 可換)做前綴匹配——
+  素材命名慣例 `opening_*/break_*/ending_*`,cutplan 寫 `## 🎵 opening` 開頭對了
+  就中;前綴命中多個直接 FAIL 列候選,不靜默選第一個。
+- **⚙ config 區(2026-07-29)**:cutplan.md 頂部 `## ⚙ key=value ...` 一行=該集的
+  render 參數真相源(覆蓋 CLI/預設);可用鍵=render_cut.py 數值型旋鈕的 dash 寫法,
+  不認識的鍵直接 FAIL。cutplan.py prepare 會固定產出這一行(帶標準值)。
+- **Prompt 模板也住共用素材庫(2026-07-29)**:跨集重用的 prompt(如
+  `prompt_集數文案.md`)放 `shared-material/<節目版本>/`,節目 profile/輸出格式/
+  語氣規範住模板;每集 session 只放 `copy_material.md`(素材),組裝=模板
+  `{{集數}}`/`{{素材}}` 置換。集數文案跑 cloud 模型(agy/codex),時機=MM 驗收
+  該集 final_cut 之後;改規範改模板,不在 session 裡改。
+- **frames 線(2026-07-28 併入 invisible-context)**:`scripts/frames/`(extract/screen/
+  ocr/diagram/format_text/compose),產物 `sessions/<slug>/frames/`;session.py `--frames`
+  觸發抽幀,VLM 全走本地 LM Studio;compose 吸收音訊線的停頓/🔥/講者圖層;skill
+  `/invisible-context` 實體在 `.claude/skills/invisible-context/`,原 repo 已封存。
+
+### 原則 11 — BGM 疊軌感知、二段式音量包絡(2026-07-29 MM 拍板)
+
+**整個成品的音量變化必須是舒服的遞增遞減**——任何時刻都不得跳變,語音側
+(🎬 集錦淡出入、主音軌進場)與 BGM 側一體適用。BGM 疊到人聲時是「床」,
+獨奏時才是「主角」,音量跟著人聲讓位:
+
+- **fadein 二段式**:疊著人聲進場時 `fadein` 秒內 0→duck,人聲還在就壓著;
+  人聲一結束 `rise` 秒內 duck→solo 並維持。
+- **fadeout 二段式**:人聲要回來前 `predrop`(預設 2 秒)先 solo→duck;
+  人聲進場後再依 `fadeout` 秒 duck→0。
+- duck/solo 是**振幅乘數**非響度(人耳是對數的):預設 duck=0.15(≈-16.5dB,
+  標準 speech bed)、solo=0.55(≈-5dB)——2026-07-29 實聽把初版 0.4/0.7 調低。
+  所有 ramp 走 smoothstep 曲線(頭尾入彎、無稜角)。人聲在哪由 render 從時間軸
+  推導(零音訊偵測、零 LLM)。
+- 參數:cutplan 🎵 行管 `fadein/fadeout/lead/tail/start/end`,全域旋鈕
+  `--bgm-duck/--bgm-solo/--bgm-predrop/--bgm-rise`。
+- 決策脈絡:ADR 0004(overlay 架構)、ADR 0006(本包絡)。
+
+### 原則 12 — 輸入轉接器:副檔名分流,抽取器只做確定性、理解層跨線共用(2026-07-31 引入)
+
+`scripts/session.py new <file>` 是**唯一入口**,依副檔名自動分流,不需要使用者手動選線:
+
+| 副檔名 | 走線 | 產 `cleaned.md` 的路徑 |
+|---|---|---|
+| 音檔/影片(既有,零改動) | 音檔線 | transcribe → phase-a → phase-b(ASR 專屬清理) |
+| `.pdf` / `.epub` / `.txt` | 文件線 | `scripts/doc/extract.py` 直接產出,**跳過** transcribe/phase-a/phase-b |
+
+- **抽取器只做 Phase-1 確定性抽取(0 token)**:`scripts/doc/extract.py` 只做文字抽取、
+  結構偵測(章節→`##`/`###`)、簡繁轉換、雜訊清理,**絕不呼叫 LLM、絕不自己寫摘要或
+  好學生筆記**——這條界線與音檔線 Phase A(確定性清理)同構,呼應原則 6「確定性工作
+  用工具,LLM 只做判斷」。
+- **文件線跳過 ASR 專屬清理**:transcribe/phase-a/phase-b 是為了修正 Whisper 聽錯的
+  東西而存在,文件本來就沒有 ASR 誤差,extract.py 的輸出已是乾淨文本,套用這三段反而
+  是多餘改寫;產物直接當 `cleaned.md`。
+- **理解層跨輸入共用**:Step 3(enhance)、Step 4(好學生筆記)不分音檔/文件輸入,一律
+  吃同一份 `cleaned.md`,下游規則(零省略、字數校驗等)不變——這是「輸入轉接器」設計
+  的核心:前段(抽取/轉錄)依輸入類型各自處理,後段(理解)只認 `cleaned.md` 這個共同
+  介面。
+- **圖片理解複用既有工具,不重造**:`--vlm`(僅 pdf 有意義)先跑 `scripts/doc/figures.py`
+  (確定性渲染內嵌圖/向量圖表頁/掃描頁進 `images/`),再走既有 `--images` 的
+  `describe_images.py`(LLM 看圖描述)+ `insert_images.py`(自動插圖)marker 呼叫路徑
+  ——差別只在圖片來源是渲染而非人工資料夾複製,理解邏輯完全共用。
+- **重依賴隔離**(呼應原則 10 音訊線的 `.venv-audio`):fitz/ebooklib/lxml/chardet/opencc
+  住 `.venv-doc`(`requirements-doc.txt`),`.venv-doc` 不存在時文件線直接報錯退出
+  (不像 frames 線是「跳過」,因為文件線沒有 fallback 產物)。
+
+**Why**:2026-07 把「音檔轉逐字稿知識庫」的工具擴展成「任何輸入 → markdown 知識庫」,
+PDF/EPUB/TXT 是第一批新增輸入類型;純掃描書(無文字層)缺免費 OCR 方案,暫列 backlog
+(#616)。決策脈絡見 ADR 0008。
 
 ---
 
@@ -672,8 +837,10 @@ Web 使用者 git pull(或瀏覽器下次 reload)
 | Web 字典載入器 | `/web/dict-loader.js` |
 | CLI Skill 定義 | `/.claude/skills/good-student-notes/SKILL.md` |
 | Groq 轉錄腳本 | `/.claude/skills/good-student-notes/scripts/groq_transcribe.py` |
-| Pipeline 統籌器 | `/scripts/session.py` |
+| Pipeline 統籌器 | `/scripts/session.py`(音檔/影片線 + 文件線副檔名分流,見原則 12) |
 | Gemini Phase B | `/scripts/qaqc_phase_b.py` |
+| **文件線** Phase-1 確定性抽取(pdf/epub/txt→cleaned.md) | `/scripts/doc/extract.py`(用 `.venv-doc`,見 `requirements-doc.txt`) |
+| **文件線** PDF 圖表確定性渲染(`--vlm`) | `/scripts/doc/figures.py`(用 `.venv-doc`;產物接 `describe_images.py`) |
 | 多語系腳本 | `/scripts/lang/` |
 | 英文轉錄(Groq, language=en) | `/scripts/lang/en/groq_transcribe_en.py` |
 | 結構保留型翻譯(EN→zh-TW;原則 2) | `/scripts/lang/en/srt_zhtw.py`(prep/assemble + 時間軸 byte 驗證) |

@@ -1,0 +1,438 @@
+#!/usr/bin/env python3
+"""
+scripts/audio/pertrack_attrib.py — 分軌歸屬(D2)與非詞彙出聲偵測(D3)的訊號邏輯
+
+全部吃「已經算好的 frame 電平」,不碰音檔、不呼叫 ffmpeg,所以整套可以用合成
+資料單元測試(scripts/tests/test_pertrack_attrib.py)。
+
+D2 文字歸屬:支配 ＋ hysteresis ＋ 字界對齊
+    · 三軌同步波形上以固定 hop(預設 10ms)算能量,積分窗 ~100ms
+    · 第一名領先第二名 ≥3dB 且穩定 ≥200ms → 歸第一名
+    · 差距 <3dB → 標「歸屬不確定」,不硬選
+    · 挑戰者必須連續領先 switch 秒才換手(避免逐 frame 抖動)
+    · 換手只落在 canonical word boundary;附近 snap 秒找不到字界就不切
+
+D3 非詞彙出聲:CFAR 式自適應門檻
+    · 串音預測用**線性功率相加** P_bleed = Σ_j P_j×g[i][j] + P_noise
+      (舊版用 max_j,是錯的物理:兩個各 −20dB 的來源加起來是 −17dB 不是 −20dB)
+    · excess 門檻 = 該軌負樣本殘差的 P99.5;duration 門檻同法
+    · 掃描 20–40ms frame ＋ 80ms gap closing ＋ ~120ms 最短長度
+"""
+
+from __future__ import annotations
+
+import difflib
+import re
+import sys
+from pathlib import Path
+
+import numpy as np
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from srt_utils import join_words  # noqa: E402
+
+BLEED_FALLBACK_DB = -12.0     # 樣本不足時保守估一個偏大的串音,寧可少抓
+FLOOR_BYPASS_LEAD_DB = 10.0   # 底噪閘的相對領先例外(#726):三軌都在各自
+                               # floor_db 之下時,leader 對第二名領先仍達
+                               # 此門檻就跳過底噪閘、照常判定 —— 跟原始
+                               # 4.7dB 搶麥破口(2026-08-11)有 >5dB 緩衝帶
+
+
+def integrate(power, win: int):
+    """frame 功率的移動平均(置中,邊緣按實際樣本數平均,長度不變)。"""
+    p = np.asarray(power, dtype=float)
+    if win <= 1:
+        return p
+    pad = win // 2
+    cs = np.concatenate([[0.0], np.cumsum(p)])
+    lo = np.clip(np.arange(len(p)) - pad, 0, len(p))
+    hi = np.clip(np.arange(len(p)) - pad + win, 0, len(p))
+    return (cs[hi] - cs[lo]) / np.maximum(1, hi - lo)
+
+
+def db(power):
+    return 10.0 * np.log10(np.maximum(np.asarray(power, dtype=float), 1e-20))
+
+
+def lin(dbv):
+    return np.power(10.0, np.asarray(dbv, dtype=float) / 10.0)
+
+
+def calibrate_bleed(lv_db, dominance_db: float = 12.0, pct: float = 30.0,
+                    min_samples: int = 20, active_db: float = -60.0):
+    """量每一對軌的串音增益 g[i][j] ≈「j 講話時 i 軌會收到多少」(dB,負值)。
+
+    只挑「j 明顯獨大(領先第二名 ≥dominance)」的 frame —— 那種時刻 i 軌收到的
+    幾乎純粹是串音。再取這些差值的低分位數(預設 P30):i 自己也在出聲的 frame
+    會把差值往上拉,取低分位才抓得到「i 安靜時」的真實串音底線。
+    """
+    lv = np.asarray(lv_db, dtype=float)
+    n = lv.shape[0]
+    order = np.argsort(-lv, axis=0)
+    top, second = order[0], order[1]
+    idx = np.arange(lv.shape[1])
+    lead = lv[top, idx] - lv[second, idx]
+    ok = (lv[top, idx] > active_db) & (lead >= dominance_db)
+    g = [[0.0] * n for _ in range(n)]
+    for i in range(n):
+        for j in range(n):
+            if i == j:
+                continue
+            sel = ok & (top == j)
+            xs = np.sort(lv[i, idx[sel]] - lv[j, idx[sel]])
+            g[i][j] = (BLEED_FALLBACK_DB if len(xs) < min_samples
+                       else float(xs[int(len(xs) * pct / 100.0)]))
+    return g
+
+
+def predict_bleed_db(lv_db, g_db, noise_db):
+    """P_bleed[i] = Σ_{j≠i} P_j × g[i][j] + P_noise[i](dB 回傳)。"""
+    lv = np.asarray(lv_db, dtype=float)
+    n = lv.shape[0]
+    out = np.zeros_like(lv)
+    for i in range(n):
+        acc = np.full(lv.shape[1], lin(noise_db[i]))
+        for j in range(n):
+            if i != j:
+                acc = acc + lin(lv[j]) * lin(g_db[i][j])
+        out[i] = db(acc)
+    return out
+
+
+def _uncertain_cause(total: int, floor_n: int, max_active_lead: float,
+                     margin: float) -> str:
+    """owner=None 的原因碼(#728,搬自 #677 診斷腳本 diag1_causes.py 的等價
+    分類,判定當下就記下來,不是事後分析):
+
+    · floor_gated  — 這段至少半數 frame 三軌都在各自底噪之下(#677 量到
+      59%、時長佔 68% 屬這類:被底噪閘擋下的清楚贏家)
+    · below_margin — 扣掉 floor_gated 的 frame 後,對第二名的領先從未
+      達到 margin(#677 量到僅 0.3% 屬這類 —— 字面「三軌差距 <3dB」
+      成立的其實只有這一小撮)
+    · unstable     — 領先幅度達過 margin,但同一名候選人沒能連續撐滿
+      穩定時長就被打斷(逐 frame 抖動、換手太快)(#677 量到 38%)
+
+    優先序 floor_gated → below_margin → unstable,對齊 diag1 的分類順序。
+    """
+    if total == 0 or floor_n / total >= 0.5:
+        return "floor_gated"
+    if max_active_lead < margin:
+        return "below_margin"
+    return "unstable"
+
+
+UNCERTAIN_REASON_TEXT = {
+    "floor_gated": "歸屬不確定（三軌皆近底噪，領先不足）",
+    "below_margin": "歸屬不確定（三軌差距 <3dB）",
+    "unstable": "歸屬不確定（領先未能持續）",
+}
+
+
+def owner_runs(lv_db, hop: float, t0: float, t1: float, margin: float = 3.0,
+               stable: float = 0.2, switch: float = 0.18, floor_db=None):
+    """支配 ＋ hysteresis ＋ **噪聲底閘** → [(start, end, owner|None, cause|None), ...]。
+
+    2026-08-14 #728:owner=None 的 run 額外帶一個原因碼(`cause`,見
+    `_uncertain_cause`);owner 已判定的 run,`cause` 一律 None。原因碼在
+    判定當下、用同一份逐 frame 資料就地記下,不是另外重跑一遍分析。
+
+    · 還沒有 owner:第一名要領先**第二名** ≥margin 並持續 ≥stable 秒才成立
+    · 已經有 owner:挑戰者要領先**現任** ≥margin 並持續 ≥switch 秒才換手
+      (跟第二名比會讓「三人中兩人差不多大聲」一直翻面)
+    · **三軌都低於各自 floor_db(沒有人在講話)的區間不換手**(2026-08-11 MM 實聽
+      抓到):三軌都在底噪時,原本只要比現任高 margin 就換手——EP16 源
+      38.5–39.0s「前陣子」的「前」,Mars −69.4／Sarah −62.9／KIN −67.6,
+      沒有人真的在出聲,Sarah 只因底噪高 4.7dB 就搶走,KIN 的麥在詞中間被
+      關掉 0.5 秒,聽到的是 KIN 透過 Sarah 的麥傳來的聲音(距離感全變)。
+      floor_db=None 就不套這道閘(保留舊行為給不知道噪聲底的呼叫端)。
+    · **相對領先例外**(2026-08-14 #726,#677 診斷修法 A):三軌都在底噪之下,
+      但 leader 對第二名領先 ≥FLOOR_BYPASS_LEAD_DB(10dB)時,跳過這道閘、
+      照常走 margin/hysteresis 判定。#677 量到 880 筆「歸屬不確定」裡
+      520 筆(59%、時長 68%)是底噪閘擋掉 median 領先 18.6dB 的清楚贏家 ——
+      跟本閘要修的原始破口(Sarah 只領先第二名 4.7dB 就搶麥)在數值上有
+      >5dB 緩衝帶,不是同一種情境:那次沒人真的在講話,這次是講得比校準
+      底噪還小聲、但相對其他軌仍明顯是唯一在出聲的人。
+    · **穩定時長隨 block 長度縮放**(2026-08-11 MM 實聽 EP18 0:49「遠方的
+      KIN 的嗯」):源 53.10–53.20 只有 0.10 秒,而 stable=0.2 秒 —— 0.1 秒的
+      窗**在數學上永遠湊不到 0.2 秒**,一律退回混音 diarize 的標籤。那句
+      「嗯」KIN 領先 15dB 證據清楚,卻因此開了 Mars 的麥、duck 掉 KIN 自己的
+      麥,聽到的是穿過別人麥克風的 KIN。全片 <0.2s 的列有 51% 中這個。
+      附和(「嗯」「對啊」)正好全是短列,也正好是 diarize 最容易認錯的。
+      縮放的是**時長**不是**證據**:margin 3dB 與噪聲底閘照舊,差距不夠仍是
+      不確定。
+    · 從頭到尾都湊不到 → owner=None ＝ 歸屬不確定,交人審,不硬選
+    """
+    lv = np.asarray(lv_db, dtype=float)
+    i0 = max(0, int(round(t0 / hop)))
+    i1 = min(lv.shape[1], int(round(t1 / hop)))
+    if i1 <= i0:
+        return [(t0, t1, None, "below_margin")]
+    span = (i1 - i0) * hop
+    stable = min(stable, max(2 * hop, 0.6 * span))
+    switch = min(switch, max(2 * hop, 0.6 * span))
+    runs: list[tuple[float, float, int | None, str | None]] = []
+    owner: int | None = None
+    run_start = i0
+    cand: int | None = None
+    cand_start = i0
+    # owner 只可能在函式一開始是 None,一旦建立就不會再變回 None(見下方
+    # 換手邏輯),所以「不確定原因」的累計量只在 owner 還是 None 的這段
+    # 前綴期間有意義 —— 判定當下就記,不是事後對 L_attr 另跑一遍分析。
+    #
+    # 2026-08-14 luna 守門抓到(round 1,#728):輸出的 None-run 只到
+    # cand_start 為止(候選人成立後、正在撐穩定時長的 frame 屬於**下一段**
+    # owner run 的醞釀期),但累計量原本是逐 frame 一路加到確立那一刻,
+    # 沒有在 cand_start 切斷——候選人撐穩定時長的那幾個 frame(通常是
+    # 「清楚在講話」的 active frame)混進了 committed 統計,把本該是
+    # floor_gated 的區間污染成 unstable。改成 committed/pending 雙桶:
+    # comm_* 只計「確定屬於最終輸出的 None-run」的 frame;pend_* 是
+    # 「目前存活候選人」正在累積、但還沒確定會不會被輸出排除的 frame ——
+    # 候選人換人(舊候選人放棄)或候選人本身失敗(below_floor 擋下／margin
+    # 不足)時,pend 併回 comm(那些 frame 仍在 None-run 範圍內);候選人
+    # 撐滿穩定時長、真的確立所有權時,pend 直接丟棄不進 comm(那些 frame
+    # 已經是下一段 owner run 的一部分,不屬於這個 None-run)。
+    comm_total = comm_floor = 0
+    comm_max_lead = float("-inf")
+    pend_total = pend_floor = 0
+    pend_max_lead = float("-inf")
+
+    def _merge_pending_into_committed():
+        nonlocal comm_total, comm_floor, comm_max_lead
+        nonlocal pend_total, pend_floor, pend_max_lead
+        comm_total += pend_total
+        comm_floor += pend_floor
+        comm_max_lead = max(comm_max_lead, pend_max_lead)
+        pend_total = pend_floor = 0
+        pend_max_lead = float("-inf")
+
+    for f in range(i0, i1):
+        col = lv[:, f]
+        order = np.argsort(-col)
+        best = int(order[0])
+        if owner is not None and best == owner:
+            cand = None
+            continue
+        ref = col[owner] if owner is not None else col[int(order[1])]
+        need = switch if owner is not None else stable
+        # 噪聲底閘:**三軌都在各自底噪之下 ＝ 沒有人在講話**,這種區間不換手。
+        # 不能只看「挑戰者夠不夠大聲」——講得小聲仍然是在講話(EP16 Sarah 的
+        # 「消息吧」只有 -54.4dB,低於 -48.6 的門檻,那樣擋會讓 44% 的句子
+        # 變成歸屬不確定)。只有大家都沒出聲時才維持現任。
+        below_floor = floor_db is not None and all(
+            col[j] < floor_db[j] for j in range(col.shape[0]))
+        # below_floor 用**原始**門檻(不管 #726 的相對領先例外有沒有豁免),
+        # 對齊 #677 diag1 的口徑:這個 frame 是不是「三軌都貼著底噪」本身
+        # 就是值得回報人審的性質,跟它最後有沒有被豁免通過是兩件事。
+        frame_lead = None if below_floor else (col[best] - ref)
+
+        if below_floor:
+            # #726 相對領先例外:全員在底噪之下不代表沒人講話 —— leader
+            # 對第二名仍領先 ≥FLOOR_BYPASS_LEAD_DB 就跳過此閘,落下去走
+            # 下面一般的 margin/hysteresis 判定(不豁免就照舊維持現任)。
+            rel_lead = col[best] - col[int(order[1])]
+            if rel_lead < FLOOR_BYPASS_LEAD_DB:
+                # 候選人(如果有)死在這一 frame —— pending 併回 committed,
+                # 這一 frame 自己也直接記 committed(不屬於任何存活候選)。
+                if owner is None:
+                    _merge_pending_into_committed()
+                    comm_total += 1
+                    comm_floor += 1
+                cand = None
+                continue
+
+        if col[best] - ref >= margin:
+            if cand != best:
+                # 新候選人上場:舊 pending(屬於剛被放棄的舊候選人,若
+                # cand 原本就是 None 則 pending 本來就是空的)併回
+                # committed,這個候選人重新起算 pending。
+                if owner is None:
+                    _merge_pending_into_committed()
+                cand, cand_start = best, f
+            if owner is None:
+                pend_total += 1
+                if below_floor:
+                    pend_floor += 1
+                elif frame_lead is not None and frame_lead > pend_max_lead:
+                    pend_max_lead = frame_lead
+            if (f - cand_start + 1) * hop >= need - 1e-9:
+                if cand_start > run_start:
+                    # 確立當下:cause 只看 committed(pending 的這批 frame
+                    # 屬於剛確立的這段 owner run,不進這個 None-run 的統計)。
+                    cause = (_uncertain_cause(comm_total, comm_floor,
+                                              comm_max_lead, margin)
+                             if owner is None else None)
+                    runs.append((run_start * hop, cand_start * hop, owner, cause))
+                owner, run_start, cand = best, cand_start, None
+                comm_total = comm_floor = 0
+                comm_max_lead = float("-inf")
+                pend_total = pend_floor = 0
+                pend_max_lead = float("-inf")
+        else:
+            # 候選人(如果有)因這一 frame 沒達到 margin 而死 —— pending
+            # 併回 committed,這一 frame 自己也直接記 committed。
+            if owner is None:
+                _merge_pending_into_committed()
+                comm_total += 1
+                if below_floor:
+                    comm_floor += 1
+                elif frame_lead is not None and frame_lead > comm_max_lead:
+                    comm_max_lead = frame_lead
+            cand = None
+    # 迴圈結束時 owner 還是 None:從沒確立過所有權,pending(如果有,代表
+    # 一個還在撐穩定時長、但沒撐到終點的候選人)理所當然屬於這段 None-run
+    # 的輸出範圍,併回 committed 才分類。
+    if owner is None:
+        _merge_pending_into_committed()
+    cause = (_uncertain_cause(comm_total, comm_floor, comm_max_lead, margin)
+             if owner is None else None)
+    runs.append((run_start * hop, i1 * hop, owner, cause))
+    return [(round(a, 6), round(b, 6), o, c) for a, b, o, c in runs
+            if b - a > 1e-9]
+
+
+def annotate_canonical(words: list[dict], block_text: str) -> list[dict]:
+    """給每個 word 掛上它在 **canonical block 文字** 裡對應的字(`ctext`)。
+
+    D1 說正式文字是 cutplan.json 的既有 block 文字,不是 words.json 重建的字。
+    兩者會不一樣 —— EP16 的 B0085,SRT 是人工校過的「只要」,words.json 還是
+    whisper 原本的「隻要」。拿 words 重建 phrase 文字,render 的防幻覺驗證
+    (「文字須逐字存在於來源 SRT」)就會直接 FAIL。
+
+    用 difflib 把「words 字元流」對齊到「canonical 字元流」,取單調遞增的
+    切點,所以所有 ctext 接起來**一定**等於 canonical 文字(去空白後),
+    多出來的字尾由最後一個 word 吸收,不會被丟掉。
+    """
+    flat = re.sub(r"\s+", "", block_text)
+    chars = [re.sub(r"\s+", "", w["word"]) for w in words]
+    wflat = "".join(chars)
+    pos = [0] * (len(wflat) + 1)
+    sm = difflib.SequenceMatcher(None, wflat, flat, autojunk=False)
+    for tag, i1, i2, j1, j2 in sm.get_opcodes():
+        for k in range(i1, i2):
+            if tag == "equal":
+                pos[k] = j1 + (k - i1)
+            else:
+                span = max(1, i2 - i1)
+                pos[k] = j1 + int(round((j2 - j1) * (k - i1) / span))
+    pos[len(wflat)] = len(flat)
+    out, at = [], 0
+    for w, c in zip(words, chars):
+        lo = pos[at] if at else 0
+        at += len(c)
+        hi = pos[at] if at < len(wflat) else len(flat)
+        out.append({**w, "ctext": flat[lo:hi]})
+    if out:
+        out[-1]["ctext"] = flat[pos[max(0, len(wflat) - len(chars[-1]))]:]
+    return out
+
+
+def split_phrase(words: list[dict], ref_text: str, runs, snap: float = 0.25):
+    """canonical phrase 依 owner 換手點切開,切點只落在 canonical word boundary。
+
+    附近 snap 秒內找不到字界 → **不切**,整句歸給佔時間最多的那位並標不確定
+    (D2:換手只能落在字界;硬切會把字切成兩半)。
+    回傳 [{start, end, text, owner, uncertain, reason, words}]。
+    文字一律由 canonical words 重建 —— 逐軌 ASR 不參與(D1)。
+
+    2026-08-14 #728:`runs` 是 owner_runs() 的 4-tuple
+    [(start, end, owner, cause), ...] —— owner=None 時按 `cause`(見
+    `pertrack_attrib._uncertain_cause`)分流成 `UNCERTAIN_REASON_TEXT` 裡
+    對應的文案,不再全部寫死同一句「三軌差距 <3dB」(#677 診斷:字面成立
+    的只有 0.3%)。一個 phrase 若跨了多個 owner=None 的 run(各自原因可能
+    不同),取重疊時長最長的那個原因當代表 —— 跟 owner 本身「佔多數的那
+    一位」用同一套邏輯,不是另外發明規則。
+    """
+    if not words:
+        return []
+    gaps = [( (words[k - 1]["end"] + words[k]["start"]) / 2.0, k)
+            for k in range(1, len(words))]
+    cuts: list[int] = []
+    dropped = False
+    for a, _b, _o, _c in runs[1:]:
+        best = min(gaps, key=lambda x: abs(x[0] - a), default=None)
+        if best is None or abs(best[0] - a) > snap or best[1] in cuts:
+            dropped = True
+            continue
+        cuts.append(best[1])
+    cuts = sorted(set(cuts))
+
+    def owner_of(a: float, b: float):
+        acc: dict[int | None, float] = {}
+        cause_acc: dict[str, float] = {}
+        for ra, rb, o, c in runs:
+            ov = min(b, rb) - max(a, ra)
+            if ov > 0:
+                acc[o] = acc.get(o, 0.0) + ov
+                if o is None and c:
+                    cause_acc[c] = cause_acc.get(c, 0.0) + ov
+        if not acc:
+            return None, None
+        winner = max(acc.items(), key=lambda kv: kv[1])[0]
+        cause = (max(cause_acc.items(), key=lambda kv: kv[1])[0]
+                 if winner is None and cause_acc else None)
+        return winner, cause
+
+    out = []
+    for lo, hi in zip([0] + cuts, cuts + [len(words)]):
+        ws = words[lo:hi]
+        if not ws:
+            continue
+        a, b = ws[0]["start"], ws[-1]["end"]
+        o, cause = owner_of(a, b)
+        reason = ""
+        if o is None:
+            reason = UNCERTAIN_REASON_TEXT.get(
+                cause, UNCERTAIN_REASON_TEXT["below_margin"])
+        elif dropped and len(cuts) < len(runs) - 1:
+            reason = "換手點附近 250ms 內沒有字界，未切開"
+        text = ("".join(x["ctext"] for x in ws) if "ctext" in ws[0]
+                else join_words(ws, ref_text))
+        out.append({"start": a, "end": b, "text": text,
+                    "owner": o, "uncertain": bool(reason), "reason": reason,
+                    "words": ws})
+    return out
+
+
+def cfar_percentile(xs, pct: float, default: float | None = None):
+    """樣本的第 pct 百分位;樣本為空回 default(CFAR 門檻算不出來時的退路)。"""
+    a = np.asarray(list(xs), dtype=float)
+    if a.size == 0:
+        return default
+    return float(np.percentile(a, pct))
+
+
+def find_events(hits, hop: float, gap_close: float = 0.08,
+                min_dur: float = 0.12):
+    """布林命中序列 → 事件區間:先合併 <gap_close 的空洞,再丟掉 <min_dur 的。"""
+    runs: list[list[int]] = []
+    for f, h in enumerate(hits):
+        if not h:
+            continue
+        if runs and runs[-1][1] == f:
+            runs[-1][1] = f + 1
+        else:
+            runs.append([f, f + 1])
+    merged: list[list[int]] = []
+    for r in runs:
+        if merged and (r[0] - merged[-1][1]) * hop < gap_close - 1e-9:
+            merged[-1][1] = r[1]
+        else:
+            merged.append(list(r))
+    return [(round(a * hop, 6), round(b * hop, 6)) for a, b in merged
+            if (b - a) * hop >= min_dur - 1e-9]
+
+
+def drop_self_adjacent(events, own_spans, guard: float = 0.25):
+    """丟掉緊貼「自己台詞」的出聲事件。
+
+    D3 講的是「壓在別人話底下、人審剪不掉的附和」。緊貼自己下一句開頭
+    (EP16 5:10 的 MR0109 距離自己開講只有 0.01 秒)的能量是自己的字頭、
+    吸氣、椅子聲 —— 這種列預設不勾 ＝ 靜音,留著等於把自己的字頭削掉。
+    """
+    out = []
+    for e in events:
+        a, b = e["start"], e["end"]
+        if any(a < y + guard and b > x - guard for x, y in own_spans):
+            continue
+        out.append(e)
+    return out

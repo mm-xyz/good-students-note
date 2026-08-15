@@ -97,3 +97,13 @@ MCP5/
 # 派生/執行期產物留本機(可由 master + scripts 重生;見 memory outward-docs 原則)
 build/
 .worktrees/
+
+# 輸入線 venv(重依賴隔離,不上推)。不帶尾斜線 ——
+# worktree 內常態是 symlink 到主樹 venv(`ln -s ../../.venv-doc .venv-doc`),
+# 尾斜線只匹配目錄不匹配 symlink,曾因此漏 ignore 造成 symlink 被誤 add。
+.venv-doc
+.venv-audio
+
+# 分軌 render 的中繼 speech bus(每次 render 重生,幾百 MB)
+.pertrack_bus.wav
+.claude/worktrees

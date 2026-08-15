@@ -18,17 +18,22 @@
 - **Python ≥ 3.10**(scripts 用了 PEP 604 `str | None` 語法)
 - **ffmpeg**:`brew install ffmpeg` / `apt install ffmpeg`
 - **Python packages**:`pip install requests`
-- **API Keys**:
-  - Groq(轉錄):[console.groq.com/keys](https://console.groq.com/keys)(免費)
-  - Gemini(校稿 + 筆記):[aistudio.google.com/apikey](https://aistudio.google.com/apikey)(免費)
+- **轉錄(2026-07-27 起預設本地,零雲端零 key)**:`--asr local` 用 mlx-whisper
+  (Apple Silicon;39.5 分鐘實測 84s),需 `.venv-audio`:
+  `python3.13 -m venv .venv-audio && .venv-audio/bin/pip install -r requirements-audio.txt`
+- **API Keys(視用途,皆可免)**:
+  - Groq(選配轉錄 `--asr groq`,非 Apple Silicon 機器用):[console.groq.com/keys](https://console.groq.com/keys)(免費)
+  - Gemini(校稿 + 筆記;**CLI 在 Claude Code 等 agent host 下不需要**,原則 5 走 agent 接手):[aistudio.google.com/apikey](https://aistudio.google.com/apikey)(免費)
+  - Hugging Face(`--diarize` 分 speaker 用,gated model 先[同意條款](https://hf.co/pyannote/speaker-diarization-community-1)):[hf.co/settings/tokens](https://hf.co/settings/tokens)(免費)
 
-### 2. 設定 API Key
+### 2. 設定 API Key(用到才設)
 
 CLI 使用者:
 ```bash
-# 在專案根建立 .env
-echo "GROQ_API_KEY=你的Groq_key" > .env
-echo "GEMINI_API_KEY=你的Gemini_key" >> .env
+# 在專案根建立 .env(全部選配:local ASR + agent host 校稿時一個都不用)
+echo "HF_TOKEN=你的HF_token" > .env          # --diarize 用
+echo "GROQ_API_KEY=你的Groq_key" >> .env     # --asr groq 用
+echo "GEMINI_API_KEY=你的Gemini_key" >> .env # 純 shell/cron 校稿用
 ```
 
 Web Studio 使用者:直接在瀏覽器 UI 輸入框貼上(只存在你的瀏覽器,不會上傳)。
@@ -63,6 +68,180 @@ python3 scripts/session.py new "諮詢錄音.m4a" \
 | 加專有名詞百科補充 | `enhance` | `enhanced.md` | 主題陌生的讀者 |
 | 以某立場(身份/角色)置入的好學生筆記 | `notes` | `notes_<立場>.md` | 學習者自用 |
 | 出版成可分享網頁 | (獨立指令 `publish_goodedunote.sh`,非 `--stop-at`) | `<slug>.html` + 線上網址 | 把筆記做成網頁分享(Step 5) |
+| 逐字稿分 speaker | (flag `--diarize`,非 `--stop-at`) | `speakers.json` + `transcript.speakers.srt` | 多人對談/訪談/Podcast 逐字稿 |
+| 聲音高昂精華段 | (flag `--prosody`) | `prosody.json` + `highlights.md` | 精華/預告/shorts 候選 |
+| 文字剪 Podcast | (flag `--cut`,隱含前兩者) | `cutplan.md` →(人審)→ `final_cut.mp3` | Descript 式剪輯,不進剪輯軟體 |
+| 影片抽幀→帶圖筆記 | (flag `--frames`,影片限定) | `sessions/<slug>/frames/` → Obsidian 逐字稿+筆記 | 演講/課程影片(invisible-context 併入,見下) |
+
+> **音訊分析線**(`--diarize` / `--prosody` / `--cut`)是與 Phase B 平行的加值線,
+> 全本地零雲端(pyannote + librosa)。完整操作見下方
+> [🎙 Podcast 文字剪輯 — 完整流程](#-podcast-文字剪輯--完整流程)。
+
+## 🎙 Podcast 文字剪輯 — 完整流程
+
+> 核心概念:**剪輯 = 改一份 markdown**。逐字稿變成 checkbox 清單(cutplan.md),
+> 勾選=句級剪、`~~刪除線~~`=字級剪、`## 標題`=章節;改完跑 render 一分鐘出 mp3。
+> 全程本地(mlx-whisper 轉錄、pyannote 分人、librosa 情緒、ffmpeg 出片),零雲端 token。
+
+### 0. 前置(一次性)
+
+```bash
+# 音訊分析線的獨立 venv(pyannote/torch/librosa/mlx-whisper,不污染主管線)
+python3.13 -m venv .venv-audio
+.venv-audio/bin/pip install -r requirements-audio.txt
+
+# 分 speaker 用的 HF token(pyannote gated model)
+# 1) 到 https://hf.co/pyannote/speaker-diarization-community-1 登入按同意
+# 2) 到 https://hf.co/settings/tokens 開 read token
+echo "HF_TOKEN=hf_你的token" >> .env
+```
+
+### 1. 開 session(轉錄 → 分人 → 情緒 → cutplan,一條指令)
+
+```bash
+python3 scripts/session.py new EP16.wav \
+    --context "水星貓的生活實驗室, Sarah, King, Mars" \
+    --stop-at phase-a --cut --num-speakers 3
+```
+
+- `--cut` 隱含 `--diarize --prosody`;`--num-speakers` 已知人數就鎖定(準確度最好)
+- `--context` **務必放每位講者人名**:轉錄的專名辨識 + speaker 命名都靠它
+- 音檔在 Apple Silicon 上約 2 分鐘處理完 40 分鐘節目(轉錄 ~85s + 分人 ~140s + 情緒 ~105s)
+
+### 2. Speaker 命名(第一次跑完)
+
+diarize 完 speaker 叫 S1/S2/S3(S1=講最多的)。對照逐字稿開頭確認誰是誰,寫對照表:
+
+```bash
+cat > sessions/<slug>/speakers_map.json <<'EOF'
+{"S1": "Mars", "S2": "King", "S3": "Sarah"}
+EOF
+python3 scripts/audio/diarize.py --session sessions/<slug> --apply-map
+python3 scripts/audio/cutplan.py prepare --session sessions/<slug>   # 重出帶人名的 cutplan
+```
+
+(在 Claude Code 裡開 session 的話,對話 agent 會照 `.speaker_naming_pending.json`
+marker 自動判斷人名給你確認,不用手動。)
+
+### 3. 人審 cutplan.md(這一步就是剪輯)
+
+打開 `sessions/<slug>/cutplan.md`,一行一句(依原 SRT 短句):
+
+```markdown
+## 開場與本週近況                                    ← 章節標題,render 轉 podcast chapters
+- [x] B0012 [0:56–0:59] [Sarah] 好那Mars你有沒有來分享一下   ← 保留
+- [ ] B0013 [0:59–1:03] [Mars] 沒有其實就 ← 假起頭          ← 剪掉(理由選寫)
+- [x] B0014 [1:03–1:09] [Mars] 我覺得~~就是~~這幾個月解了很多心結  ← 字級精剪:剪掉「就是」
+```
+
+規則:**只准翻勾選、加刪除線、加理由(` ← 文字`)、加章節** — 動到正文或時間碼
+render 會直接 FAIL(防手滑/防 AI 幻覺)。高昂精華段參考 `highlights.md`(建議保留)。
+
+### 4. 出片
+
+平常用這個(一行跑完 Drive 對照 → 驗證 → 出片 → 同步回 Drive):
+
+```bash
+python3 scripts/audio/cut.py --session sessions/<slug>          # 出片
+python3 scripts/audio/cut.py --session sessions/<slug> --check  # 只驗證不出片
+```
+
+人審是在 **Drive 副本**上改的,render 的真相源卻是 session 那份(ADR 0001)——
+`cut.py` 開頭就對照兩邊:內容一樣直接往下,不一樣就列出**語意差異**(哪些 block
+勾選翻了、刪除線增減、`✂`/`⚙` 改了什麼)再讓人選用哪一份,預設較新的那份。
+出片檔名自動遞增 `final_cut_vN.mp3`,不覆蓋既有成品。
+
+Drive 集數資料夾的結構(一版一個資料夾,連當次 cutplan 一起封存):
+
+```
+EP16_不要跟工作談戀愛_20260727-1/
+├── _meta/cutplan.md            ← **編輯這份**(跨版本的工作版)
+├── v1_20260810-1830-AI/        ← -AI 只在有 AI 介入剪輯決策時掛(cut.py --ai)
+│   ├── EP16_v1.mp3
+│   ├── cutplan.md              ← 這一版是照哪份剪的(快照,不要改它)
+│   └── render.txt              ← 這一版剪了什麼(刪除線/停頓/✂/語速/長度)
+└── v2_20260811-0930/
+```
+
+只想跑 render 本身:
+
+```bash
+python3 scripts/audio/render_cut.py --session sessions/<slug>
+```
+
+產出 `final_cut.mp3`(192k)+ `chapters.txt`(章節,新時間軸)+ `cut_map.json`(新舊
+時間對照,之後剪 shorts/影片用)。自動處理:
+
+- **剪點平滑**:滑到波形能量谷底下刀 + word 邊界保護(絕不切在字中間)+ 接縫 40ms crossfade
+- **停頓收緊**:>0.9s 的真停頓(與字區間求差,不會誤吃小聲字尾)自動壓到 0.6s
+- **語速**:`--tempo`/`⚙ tempo=` 只加速語音,配樂不變速也不變長
+- **音量一致化**:EBU R128 loudnorm 拉到 podcast 標準 -16 LUFS(多人麥距不同也拉齊)
+
+改完 cutplan 隨時重跑,一分鐘出新版。先 `--dry-run` 可只看剪輯範圍不出片。
+
+### 4.5 節目結構(選用):精華集錦 + 音樂床
+
+cutplan.md 的**播放順序 = 文件行序**,所以節目結構直接用排版表達:
+
+```markdown
+## 🎬 精華集錦
+- [x] B0512 [12:03–12:07] [Mars] (從正文複製貼上的行,可跨時間軸、順序自訂)
+- [x] B0231 [5:44–5:49] [Sarah] (每段自帶淡入淡出,--clip-fade 預設 0.25s)
+
+## 🎵 assets/opening.mp3 fadein=0.5 fadeout=2
+## 開場                       ← 一般章節照舊
+- [x] B0001 …(正文)
+## 🎵 assets/interlude.mp3 fadein=1 fadeout=1
+- [x] B0800 …(正文下半)
+## 🎵 assets/ending.mp3 fadein=1.5 fadeout=3
+```
+
+- 音樂檔放 session 目錄或 repo 根,相對路徑寫進 🎵 行;音樂與前後語音**交叉淡化**
+  (fadein/fadeout 秒數可逐行指定)
+- 同一個 block 行可同時出現在集錦與正文(集錦=複製,不影響正文)
+- `chapters.txt` 的章節時間會自動算入音樂長度;`cut_map.json` 另附 music 對照
+
+### 4.7 影片素材:frames 線(invisible-context 併入,2026-07-28)
+
+影片(演講/課程)除了上述音訊線,還可以走抽幀→帶圖筆記:
+
+```bash
+# 一條龍:本地轉錄 + 場景偵測抽幀
+python3 scripts/session.py new "<video.mp4>" --context "講者, 專名" --stop-at phase-a --frames
+
+# 後續逐步跑(原則 9;slug = session 目錄名)
+.venv-audio/bin/python scripts/frames/screen.py "<slug>"       # LM Studio VLM 篩圖寫圖說
+.venv-audio/bin/python scripts/frames/ocr.py "<slug>"          # macOS Vision OCR + QR
+.venv-audio/bin/python scripts/frames/diagram.py "<slug>"      # 流程圖 → mermaid(選)
+.venv-audio/bin/python scripts/frames/format_text.py "<slug>"  # VLM 重排版面(選)
+python3 scripts/frames/compose.py "<slug>" --course "<課程名>" # → Obsidian 逐字稿+筆記
+```
+
+- compose 會吸收音訊線圖層:跑過 `--prosody` 就用**真實聲學停頓**、高昂段標 🔥、
+  有 speakers SRT 段落自帶講者名
+- VLM 全走本地 LM Studio(零雲端 token;`LM_STUDIO_TOKEN` 住 mars-cc/.env)
+- 詳細操作與 gotchas:`.claude/skills/invisible-context/SKILL.md`(`/invisible-context` skill)
+
+### 5. 節奏/手感旋鈕(都有安全預設)
+
+| 旋鈕 | 預設 | 效果 |
+|---|---|---|
+| `--max-pause` | 0.9 | 超過此秒數的停頓才收緊;調小=節奏更緊(2026-08-10 由 1.5 降下來,見 ADR 0010) |
+| `--pause-keep` | 0.6 | 收緊後保留的留白;調大=呼吸感多一點 |
+| `--crossfade` | 0.04 | 接縫交疊秒數;調大=更滑順但吃一點字尾 |
+| `--clip-fade` | 0.25 | 🎬 集錦片段的淡入淡出秒數 |
+| `--loudnorm` | I=-16:TP=-1.5:LRA=11 | 響度目標;傳空字串停用 |
+| `--out` | final_cut.mp3 | 副檔名決定編碼(.mp3/.m4a/.wav) |
+
+### 產物一覽(全在 `sessions/<slug>/`,不進版控)
+
+| 檔案 | 是什麼 |
+|---|---|
+| `transcript.srt` / `words.json` | 轉錄(IMMUTABLE)/ word 級時間軸 |
+| `transcript.speakers.srt` / `speakers.json` | 帶講者標籤的逐字稿 / diarization 原始 turns |
+| `prosody.json` / `highlights.md` | 每句聲學特徵+高昂分 / 前 10% 精華段清單 |
+| `cutplan.md` / `cutplan.json` | **人審的剪輯真相源** / 機器可讀對照 |
+| `final_cut.mp3` / `chapters.txt` / `cut_map.json` | 成品 / 章節 / 新舊時間對照 |
 
 > **Phase C / Phase D(原 Step 2.2/2.5)= cleaned.md 出版前的強制門**(CLAUDE.md 原則 9):
 > 產出 cleaned.md 後,標點正規化(`scripts/normalize_punctuation.py`,§ R7)與通順/hook(§ R8)必須完成,
@@ -215,6 +394,8 @@ GitHub Pages 部署版:`https://shuotao.github.io/GENAI/web/studio.html`
 - **`compress_images.py`**: 出版前圖片壓縮 + EXIF 轉正
 - **`image_notes_session.py`** + **`md_to_a4_png.py`**: 好學生筆記**圖像版**兩階段工具(`/note` 生 A4 底稿 → `/好學生筆記` 逐頁生圖;僅 Web/Antigravity/Gemini CLI 可驅動)
 - **`lang/`**: 多語系轉錄/清理腳本(目前有 `it/` 義大利文、`en/` 英文、`ja/` 日文)
+- **`audio/`**(2026-07-27 新增,音訊分析線): `transcribe_local.py` 本地 mlx-whisper 轉錄(`--asr local` 預設,產 words.json,輸出 EP15 式短句 SRT)、`diarize.py` pyannote 分 speaker(+`--apply-map` 套人名/`--from-tracks` 分軌零模型對齊)、`prosody.py` 能量/音高/語速→高昂分+highlights、`cutplan.py` 文字剪輯 checkbox 產生器、`render_cut.py` ffmpeg 出片(字級精剪/停頓收緊/波形平滑/音樂床/loudnorm)、`resegment_srt.py` 既有 session 事後補切短句、`migrate_marks.py` cutplan 重生成後搬 ~~刪除線~~;重依賴住 `.venv-audio`
+- **`frames/`**(2026-07-28 併入 invisible-context): `extract.py` 場景偵測抽幀、`screen.py` LM Studio VLM 篩圖、`ocr.py` macOS Vision OCR+QR、`diagram.py` 圖→mermaid、`format_text.py` 版面重排、`compose.py` Obsidian 逐字稿+筆記(吸收音訊線的停頓/🔥/講者圖層);產物住 `sessions/<slug>/frames/`
 
 ### 5. `/dict` - 共用詞典(2026-04 新增)
 CLI 與 Web 使用同一份字典:
