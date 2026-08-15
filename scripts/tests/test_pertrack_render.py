@@ -197,7 +197,7 @@ class TestMixRanges(unittest.TestCase):
     def test_room_tone_bed_is_continuous_and_long_enough(self):
         """D5:從真靜音區取 room-tone 低量鋪底,避免關麥時噪聲地板抽動。
 
-        改成頻譜合成後(ADR 0017)沒有接縫可言,但「不得有 step」這條照舊
+        改成頻譜合成後(ADR-2026-08-11-672)沒有接縫可言,但「不得有 step」這條照舊
         鎖住 —— overlap-add 的窗若沒對齊,一樣會每 hop 爆一次。
         """
         d = Path(self.td.name)
@@ -248,7 +248,7 @@ class TestMixRanges(unittest.TestCase):
         self.assertGreater(20 * math.log10(floor), -60.0)
 
     def test_quiet_span_finder_rejects_windows_containing_events(self):
-        """取樣窗**能量低不等於乾淨**(EP18 事故,ADR 0017)。
+        """取樣窗**能量低不等於乾淨**(EP18 事故,ADR-2026-08-11-672)。
 
         EP18 挑出來的 8 段「最安靜」有 7 段含呼吸/衣物/微弱人聲(20ms 短窗
         峰谷差 15.7–25.7dB)。那些事件被鋪成每 7.84 秒重複一次的循環,整集
@@ -277,7 +277,7 @@ class TestMixRanges(unittest.TestCase):
                         "底噪從 −60.9 變 −42.1dBFS,比原本更吵)")
 
     def test_room_tone_has_no_audible_events_or_period(self):
-        """鋪底必須是**穩態**的:沒有事件、沒有可聽出的循環(ADR 0017)。
+        """鋪底必須是**穩態**的:沒有事件、沒有可聽出的循環(ADR-2026-08-11-672)。
 
         舊做法是把取樣段交叉淡接後循環,取樣段裡的呼吸/人聲就會變成整集
         每 N 秒重複一次的鬼影 —— MM 在 EP18 實聽抓到,0:36–0:38 一次。
