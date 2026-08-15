@@ -1378,7 +1378,7 @@ def main():
             tt = [(t.name, sdir / t.file) for t in tracks_plan]
             if not spans:
                 # 全片找不到夠平坦的窗 → 寧可不鋪,也不鋪一段帶事件的音訊
-                # (ADR 0017:EP18 的 8 段有 7 段含呼吸/人聲,鋪成 7.84 秒循環)
+                # (ADR-2026-08-11-672:EP18 的 8 段有 7 段含呼吸/人聲,鋪成 7.84 秒循環)
                 print("[render] ⚠ 找不到夠平坦的真靜音窗 — 不鋪 room-tone")
             else:
                 floor_db = ptr.measure_noise_floor(tt, spans, bus_sr)
