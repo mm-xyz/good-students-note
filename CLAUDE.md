@@ -295,6 +295,8 @@ CLI 與 Web 共用同一份資料來源:
 ### Docs (`/docs`)
 
 - **`origin-story.md`**: 專案緣起的好學生筆記,本工具的設計藍本
+- **`adr/`**: 決策紀錄(Architecture Decision Records)。撰寫慣例與識別碼
+  規則見 `docs/adr/README.md`(2026-08-15 起,卡 #673 跨 repo 統一)
 
 ### API Keys
 
