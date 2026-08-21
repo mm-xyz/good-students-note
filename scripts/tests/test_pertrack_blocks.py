@@ -108,6 +108,47 @@ class TestPhraseLength(unittest.TestCase):
         self.assertEqual(len(out), 1)
         self.assertEqual(out[0]["reason"].count("歸屬不確定"), 1)
 
+    def test_leading_fragment_forward_merge_keeps_reason_and_uncertain(self):
+        """#731:開頭那個碎片沒有前鄰可併(第一列本身太短、第二列本身不短,
+        第一輪 prev-merge 不會碰到它們)時走 138-144 的「往後併」分支——
+        舊版只搬 start/text/words,out[0] 被 pop 掉時它的 reason／uncertain
+        整個消失。改成比照 previous-branch 用 _merge_reasons＋uncertain OR。"""
+        a = ph(0.0, 0.2, "前", reason="開頭理由")
+        a["uncertain"] = True
+        b = ph(0.2, 0.9, "後", reason="後列理由")
+        b["uncertain"] = False
+        out = enforce_phrase_len([a, b], lo=0.4, hi=1.2)
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0]["start"], 0.0)
+        self.assertEqual(out[0]["end"], 0.9)
+        self.assertEqual(out[0]["text"], "前後")
+        self.assertTrue(out[0]["uncertain"])
+        self.assertIn("開頭理由", out[0]["reason"])
+        self.assertIn("後列理由", out[0]["reason"])
+
+    def test_leading_fragment_not_mergeable_keeps_metadata_on_both_rows(self):
+        """開頭碎片與下一列 owner 不同(或合併會超過 hi)時不能併——原樣保留
+        兩列各自的 reason／uncertain,不得消失。這裡同時涵蓋 owner 不同與
+        超過 hi 兩種擋下合併的路徑。"""
+        a = ph(0.0, 0.2, "前", reason="開頭理由")
+        a["uncertain"] = True
+        b = ph(0.2, 0.9, "後", reason="後列理由")
+        b["owner"] = 1
+        out = enforce_phrase_len([a, b], lo=0.4, hi=1.2)
+        self.assertEqual(len(out), 2)
+        self.assertTrue(out[0]["uncertain"])
+        self.assertEqual(out[0]["reason"], "開頭理由")
+        self.assertEqual(out[1]["reason"], "後列理由")
+
+        c = ph(0.0, 0.2, "前", reason="開頭理由2")
+        c["uncertain"] = True
+        d = ph(0.2, 1.3, "後", reason="後列理由2")
+        out2 = enforce_phrase_len([c, d], lo=0.4, hi=1.2)
+        self.assertEqual(len(out2), 2)
+        self.assertTrue(out2[0]["uncertain"])
+        self.assertEqual(out2[0]["reason"], "開頭理由2")
+        self.assertEqual(out2[1]["reason"], "後列理由2")
+
 
 CUTPLAN_MD = """# Cutplan — demo
 
