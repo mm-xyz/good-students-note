@@ -141,6 +141,8 @@ def enforce_phrase_len(parts: list[dict], lo: float = 0.4,
         out[1]["start"] = out[0]["start"]
         out[1]["text"] = out[0]["text"] + out[1]["text"]
         out[1]["words"] = out[0]["words"] + out[1]["words"]
+        out[1]["uncertain"] = out[0]["uncertain"] or out[1]["uncertain"]
+        out[1]["reason"] = _merge_reasons(out[0]["reason"], out[1]["reason"])
         out.pop(0)
     return out
 
