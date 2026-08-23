@@ -8,7 +8,6 @@
 直接渲染。流程：Pillow autocontrast 增強 → VLM 產 mermaid → 語法守門
 （flowchart/graph 開頭、節點數 ≥3）→ screen.text 換成 mermaid fence、
 text_source=mermaid（ocr.py/format_text.py 都不會再動它）。失敗保留原 text。
-跑完卸模型：lms unload <model>。
 """
 import argparse
 import re
@@ -58,8 +57,6 @@ def main():
     args = ap.parse_args()
 
     cfg = load_config()
-    if "LM_STUDIO_TOKEN" not in cfg:
-        sys.exit("mars-cc/.env 找不到 LM_STUDIO_TOKEN")
     kinds = set(args.kinds.split(","))
     manifest = load_manifest(args.slug)
     todo = [f for f in manifest["frames"]
@@ -67,7 +64,7 @@ def main():
             and (args.redo or f["screen"].get("text_source") != "mermaid")]
     if args.limit:
         todo = todo[: args.limit]
-    print(f"{args.slug}：待轉圖 {len(todo)} 張（model={cfg['LM_STUDIO_MODEL']}）")
+    print(f"{args.slug}：待轉圖 {len(todo)} 張（model={cfg['LLM_NODE_MODEL']}）")
 
     t0 = time.time()
     errors = 0
@@ -84,7 +81,6 @@ def main():
         save_manifest(args.slug, manifest)
 
     print(f"完成 {len(todo)} 張（{errors} 錯誤，{time.time()-t0:.0f}s）")
-    print("提醒：批次跑完卸載模型 → lms unload " + cfg["LM_STUDIO_MODEL"])
 
 
 if __name__ == "__main__":

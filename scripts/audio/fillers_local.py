@@ -4,7 +4,7 @@
     python3 scripts/audio/fillers_local.py --session sessions/<slug> \
         [--chunk 18] [--max-chunks 0] [--out cutplan.gemma-proposal.md]
 
-把 cutplan.md 的保留 block(- [x])分 chunk 送 LM Studio(gemma-4 系),
+把 cutplan.md 的保留 block(- [x])分 chunk 送 llm-node(gemma-12b),
 請模型在**原文字上**包 ~~贅字/口頭禪~~(嗯、啊、欸、就是、然後…),產出
 `cutplan.gemma-proposal.md` = 完整複製 cutplan.md + 通過驗證的刪除線標記。
 
@@ -99,8 +99,8 @@ def chat(cfg: dict, model: str, user_msg: str, max_tokens: int,
     if reasoning_effort:
         body["reasoning_effort"] = reasoning_effort
     req = urllib.request.Request(
-        f"{cfg['LM_STUDIO_URL']}/chat/completions",
-        headers={"Authorization": f"Bearer {cfg['LM_STUDIO_TOKEN']}",
+        f"{cfg['LLM_NODE_URL']}/chat/completions",
+        headers={"Authorization": f"Bearer {cfg.get('LLM_NODE_TOKEN', '')}",
                  "Content-Type": "application/json"},
         data=json.dumps(body).encode(),
     )
@@ -110,16 +110,16 @@ def chat(cfg: dict, model: str, user_msg: str, max_tokens: int,
 
 
 def pick_model(cfg: dict) -> str:
+    """設定說了算——llm-node 上有 4 個 gemma 變體，靠子字串猜會挑到 -think 版。"""
+    want = cfg["LLM_NODE_MODEL"]
     req = urllib.request.Request(
-        f"{cfg['LM_STUDIO_URL']}/models",
-        headers={"Authorization": f"Bearer {cfg['LM_STUDIO_TOKEN']}"})
+        f"{cfg['LLM_NODE_URL']}/models",
+        headers={"Authorization": f"Bearer {cfg.get('LLM_NODE_TOKEN', '')}"})
     with urllib.request.urlopen(req, timeout=10) as resp:
         ids = [m["id"] for m in json.load(resp)["data"]]
-    for pat in ("gemma-4-26b", "gemma"):
-        hit = [i for i in ids if pat in i]
-        if hit:
-            return hit[0]
-    sys.exit(f"[fillers] FAIL: LM Studio 沒有 gemma 系 model(現有:{ids})")
+    if want not in ids:
+        sys.exit(f"[fillers] FAIL: llm-node 沒有 {want}（現有:{ids}）")
+    return want
 
 
 def verify(marked: str, original: str) -> str | None:
@@ -183,7 +183,7 @@ def main() -> None:
     ap.add_argument("--max-chunks", type=int, default=0, help="只跑前 N chunk(0=全部)")
     ap.add_argument("--max-tokens", type=int, default=4096)
     ap.add_argument("--model", default="",
-                    help="LM Studio model id;不給則自動挑(偏好 gemma-4-26b,"
+                    help="llm-node model id;不給則用 .env 的 LLM_NODE_MODEL(gemma-12b,"
                          "但全檔跑批建議 google/gemma-4-e4b,見檔頭坑)")
     ap.add_argument("--reasoning-effort", default="low",
                     help="reasoning 模型的思考額度(low/medium/high;空字串=不送)")
@@ -195,8 +195,6 @@ def main() -> None:
     if not plan.is_file():
         sys.exit(f"[fillers] FAIL: 找不到 {plan}")
     cfg = load_config()
-    if "LM_STUDIO_TOKEN" not in cfg:
-        sys.exit("[fillers] FAIL: mars-cc/.env 找不到 LM_STUDIO_TOKEN")
     model = args.model or pick_model(cfg)
     lines, cands = parse_cutplan(plan)
     print(f"[fillers] {plan}: 候選 {len(cands)} block(已跳過 🎬 區與既有 ~~)"

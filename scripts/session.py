@@ -348,7 +348,7 @@ def new_session(args):
                         audio_stats["cutplan"] = {"status": "error", "error": str(e)}
 
         # 6.6 frames 線(影片抽幀;invisible-context 併入,--frames 才啟用)
-        # 抽幀後的 screen(LM Studio VLM)/ocr/compose 依原則 9 逐步執行,
+        # 抽幀後的 screen(llm-node VLM)/ocr/compose 依原則 9 逐步執行,
         # 由使用者或對話 agent 分階段跑(見 scripts/frames/ 各檔 docstring)。
         frames_stats = None
         if args.frames:

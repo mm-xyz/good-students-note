@@ -15,8 +15,8 @@ SESSIONS_DIR = REPO_DIR / "sessions"
 MARS_CC_ENV = Path.home() / "GithubRepo_mm-xyz" / "mars-cc" / ".env"
 
 DEFAULTS = {
-    "LM_STUDIO_URL": "http://localhost:1234/v1",
-    "LM_STUDIO_MODEL": "google/gemma-4-26b-a4b-qat",
+    "LLM_NODE_URL": "http://100.120.197.113:8080/v1",
+    "LLM_NODE_MODEL": "gemma-12b",
     "OUTPUT_ROOT": str(Path.home() / "MarsDots" / "source" / "course"),
     "SCENE_THRESHOLD": "0.06",
     "MIN_GAP_SEC": "1.5",

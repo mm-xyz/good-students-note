@@ -7,7 +7,7 @@
 針對 text_source=ocr 且字數 ≥ min-chars 的幀（多欄/表格版面 OCR 行序會交錯），
 把 OCR 逐行文字連同畫面丟給 VLM：字元以 OCR 為準（VLM 不用自己認字），
 版面由 VLM 對照畫面重排——是表格就排成 Markdown 表格。成功後 text_source=ocr+vlm。
-失敗保留 OCR 原文不動（資訊不丟，只是沒排版）。跑完記得卸模型：lms unload <model>。
+失敗保留 OCR 原文不動（資訊不丟，只是沒排版）。
 """
 import argparse
 import sys
@@ -40,8 +40,6 @@ def main():
     args = ap.parse_args()
 
     cfg = load_config()
-    if "LM_STUDIO_TOKEN" not in cfg:
-        sys.exit("mars-cc/.env 找不到 LM_STUDIO_TOKEN")
     manifest = load_manifest(args.slug)
     sources = ("ocr",) if not args.redo else ("ocr", "ocr+vlm")
     todo = [f for f in manifest["frames"]
@@ -49,7 +47,7 @@ def main():
             and f["screen"].get("ocr_chars", 0) >= args.min_chars]
     if args.limit:
         todo = todo[: args.limit]
-    print(f"{args.slug}：待排版 {len(todo)} 張（model={cfg['LM_STUDIO_MODEL']}）")
+    print(f"{args.slug}：待排版 {len(todo)} 張（model={cfg['LLM_NODE_MODEL']}）")
 
     t0 = time.time()
     done = errors = 0
@@ -74,7 +72,6 @@ def main():
         save_manifest(args.slug, manifest)
 
     print(f"完成 {done} 張（{errors} 錯誤，{time.time()-t0:.0f}s）")
-    print("提醒：批次跑完卸載模型 → lms unload " + cfg["LM_STUDIO_MODEL"])
 
 
 if __name__ == "__main__":

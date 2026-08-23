@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Stage 2 — screen：地端 VLM（LM Studio）逐張審幀：留不留、分類、圖說、畫面文字。
+"""Stage 2 — screen：地端 VLM（llm-node gemma-12b）逐張審幀：留不留、分類、圖說、畫面文字。
 
 用法：
   .venv/bin/python scripts/screen.py <slug> [--limit N] [--redo]
@@ -38,10 +38,10 @@ PROMPT = """你在審一場繁體中文技術演講影片抽出的畫面幀，�
 def call_vlm(cfg: dict, image_path: Path, prompt: str) -> dict:
     b64 = base64.b64encode(image_path.read_bytes()).decode()
     resp = requests.post(
-        f"{cfg['LM_STUDIO_URL']}/chat/completions",
-        headers={"Authorization": f"Bearer {cfg['LM_STUDIO_TOKEN']}"},
+        f"{cfg['LLM_NODE_URL']}/chat/completions",
+        headers={"Authorization": f"Bearer {cfg.get('LLM_NODE_TOKEN', '')}"},
         json={
-            "model": cfg["LM_STUDIO_MODEL"],
+            "model": cfg["LLM_NODE_MODEL"],
             "messages": [{
                 "role": "user",
                 "content": [
@@ -104,8 +104,6 @@ def main():
     args = ap.parse_args()
 
     cfg = load_config()
-    if "LM_STUDIO_TOKEN" not in cfg:
-        sys.exit("mars-cc/.env 找不到 LM_STUDIO_TOKEN")
     manifest = load_manifest(args.slug)
     frames = manifest["frames"]
     if args.enrich:
@@ -117,7 +115,7 @@ def main():
         verb = "待審"
     if args.limit:
         todo = todo[: args.limit]
-    print(f"{args.slug}：{verb} {len(todo)}/{len(frames)} 張（model={cfg['LM_STUDIO_MODEL']}）")
+    print(f"{args.slug}：{verb} {len(todo)}/{len(frames)} 張（model={cfg['LLM_NODE_MODEL']}）")
 
     t0 = time.time()
     done = errors = 0
