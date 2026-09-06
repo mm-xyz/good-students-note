@@ -64,6 +64,7 @@ DIARIZE_SCRIPT = PROJECT_ROOT / "scripts/audio/diarize.py"
 PROSODY_SCRIPT = PROJECT_ROOT / "scripts/audio/prosody.py"
 CUTPLAN_SCRIPT = PROJECT_ROOT / "scripts/audio/cutplan.py"
 LOCAL_ASR_SCRIPT = PROJECT_ROOT / "scripts/audio/transcribe_local.py"
+LLMNODE_ASR_SCRIPT = PROJECT_ROOT / "scripts/audio/transcribe_llmnode.py"
 
 # frames 線(invisible-context 併入):影片抽幀 → VLM 篩圖 → OCR → compose
 FRAMES_EXTRACT_SCRIPT = PROJECT_ROOT / "scripts/frames/extract.py"
@@ -255,6 +256,24 @@ def new_session(args):
                 cmd += ["--context", str(ctx_path)]
             run(cmd)
             asr_label = "mlx-whisper large-v3-turbo (local)"
+        elif asr_engine == "llm-node":
+            # 2026-09-06:推理搬到 llm-node(Intel Linux,14 核 CPU)。
+            # mlx-whisper 是 Apple Silicon 專用跑不了 Linux,所以走 whisper.cpp
+            # 的 -ml 1 -sow(每 segment 一個 word)拿等價的 word 級時間軸,
+            # 後製(OpenCC s2twp + EP15 短句切分)與 local 線共用 srt_utils。
+            # 用途:材料本來就在 llm-node,或 Mac 要留著做別的事。
+            if not AUDIO_VENV.exists():
+                print("[session] ERROR: --asr llm-node 需要 .venv-audio(opencc)。安裝:\n"
+                      "  python3.13 -m venv .venv-audio && "
+                      ".venv-audio/bin/pip install -r requirements-audio.txt",
+                      file=sys.stderr)
+                sys.exit(3)
+            cmd = [str(AUDIO_VENV), str(LLMNODE_ASR_SCRIPT), str(src_link),
+                   "-o", str(transcript)]
+            if ctx_text:
+                cmd += ["--context", str(ctx_path)]
+            run(cmd)
+            asr_label = "whisper.cpp large-v3-turbo-q8_0 (llm-node)"
         else:  # groq
             # groq_transcribe.py signature: <media> [output_dir] [context_file]
             # We want output to be named transcript.srt (not <stem>.srt), so we handle rename.
@@ -954,10 +973,11 @@ def main():
                      help="圖片資料夾:copy 進 sessions/<slug>/images/ 並啟用"
                           "圖片理解(describe_images.py)+ 自動插圖(insert_images.py)"
                           " stages(§ S4.5.11);marker 鏈 phase-d→images→image-insert")
-    new.add_argument("--asr", choices=["local", "groq"], default="local",
+    new.add_argument("--asr", choices=["local", "groq", "llm-node"], default="local",
                      help="轉錄引擎(僅音檔/影片線適用)。local(預設):mlx-whisper "
-                          "本地零雲端零 key,需 .venv-audio;groq:Groq API"
-                          "(需 .env GROQ_API_KEY)")
+                          "本地零雲端零 key,需 .venv-audio;llm-node:whisper.cpp "
+                          "跑在 llm-node(CPU,約 2.75x realtime),Mac 不占資源,"
+                          "同樣零雲端零 key;groq:Groq API(需 .env GROQ_API_KEY)")
     new.add_argument("--vlm", action="store_true",
                      help="文件線限定,僅對 .pdf 有意義:先跑 scripts/doc/figures.py "
                           "渲染圖表/掃描頁進 images/,再複用既有 --images 的 "
