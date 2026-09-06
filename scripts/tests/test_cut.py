@@ -18,7 +18,7 @@ import datetime as dt  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "audio"))
 from cut import (version_name, drive_cutplan, find_drive_dir, next_out_name,  # noqa: E402
-                 next_version_dir, semantic_diff)
+                 next_version_dir, route_label, semantic_diff)
 
 HEAD = "# Cutplan — test\n\n## ⚙ max-pause=1.5 tempo=1.0\n"
 ROWS = ("- [x] B0001 [0:02–0:05] [Sarah] 嗨大家好。\n"
@@ -235,6 +235,78 @@ class TestVersionName(unittest.TestCase):
             s.mkdir()
             n = version_name(s, None, True, dt.datetime(2026, 8, 11, 9, 5))
             self.assertEqual(n, "v1_20260811-0905-AI")
+
+
+PT_ROWS = ("- [x] MR0001 [0:02–0:05] [Mars] 嗨大家好。\n"
+           "- [ ] SR0001 [0:06–0:09] [Sarah] 呃這個。\n")
+
+
+class TestRouteLabel(unittest.TestCase):
+    """剪輯路線要從 ⚙ 讀,不能用檔名猜。
+
+    2026-09-06 實踩:EP18 v4–v7 的 render.txt 全寫「混音線」,因為舊判斷式是
+    `args.plan != "cutplan.md"` — 那份 cutplan.md 其實是分軌節目單、⚙ 寫
+    line=pertrack,四版出的都是分軌成品,MM 卻以為已經聽過混音線的版本,
+    還因此說「直接重跑不就好了」。標錯的紀錄比沒有紀錄更貴。
+    """
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.d = Path(self.tmp.name)
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def test_pertrack_plan_named_cutplan_md_is_not_mixdown(self) -> None:
+        p = write(self.d, "cutplan.md",
+                  "# t\n\n## ⚙ line=pertrack max-pause=0.9\n" + PT_ROWS)
+        self.assertEqual(route_label(p), "分軌")
+
+    def test_audio_mixdown_gets_its_own_label(self) -> None:
+        p = write(self.d, "cutplan.md",
+                  "# t\n\n## ⚙ line=pertrack audio=mixdown\n" + PT_ROWS)
+        self.assertEqual(route_label(p), "分軌決定＋合軌音源")
+
+    def test_mixdown_line_labelled_mixdown(self) -> None:
+        p = write(self.d, "cutplan.pertrack.md",
+                  "# t\n\n## ⚙ line=mixdown\n" + ROWS)
+        self.assertEqual(route_label(p), "混音")
+
+    def test_no_line_key_falls_back_to_block_prefix(self) -> None:
+        """⚙ 沒寫 line= 時照 block 前綴判:兩碼(MR/SR)=分軌、單碼(B)=混音。"""
+        self.assertEqual(
+            route_label(write(self.d, "x.md", HEAD + PT_ROWS)), "分軌")
+        self.assertEqual(
+            route_label(write(self.d, "y.md", HEAD + ROWS)), "混音")
+
+
+class TestRouteChangeVisibleInDiff(unittest.TestCase):
+    """line=/audio= 改動必須出現在人審 diff 裡。
+
+    semantic_diff 原本只比 `params`(值限數字),line=pertrack→mixdown 這種
+    「換一條剪輯路線」在 Drive↔session 對照時完全隱形,只會印「不影響剪輯」。
+    """
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.d = Path(self.tmp.name)
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def test_line_switch_is_reported(self) -> None:
+        a = write(self.d, "a.md", "# t\n\n## ⚙ line=pertrack\n" + PT_ROWS)
+        b = write(self.d, "b.md", "# t\n\n## ⚙ line=mixdown\n" + PT_ROWS)
+        out = "\n".join(semantic_diff(a, b))
+        self.assertIn("line: pertrack→mixdown", out)
+        self.assertNotIn("不影響剪輯", out)
+
+    def test_audio_key_added_is_reported(self) -> None:
+        a = write(self.d, "a.md", "# t\n\n## ⚙ line=pertrack\n" + PT_ROWS)
+        b = write(self.d, "b.md",
+                  "# t\n\n## ⚙ line=pertrack audio=mixdown\n" + PT_ROWS)
+        out = "\n".join(semantic_diff(a, b))
+        self.assertIn("audio: 無→mixdown", out)
 
 
 if __name__ == "__main__":

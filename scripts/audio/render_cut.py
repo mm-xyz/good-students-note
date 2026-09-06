@@ -875,6 +875,11 @@ def main():
                     help="分軌:等功率 pan 位置,如 Mars=-0.2,KIN=0.2"
                          "(預設全置中 —— 把三個人拉開是節目聲音的重大改動,"
                          "不該由 render 預設替 MM 決定)")
+    ap.add_argument("--mixdown-audio", action="store_true",
+                    help="分軌:剪輯決定照分軌人審,但音源用混音 source.wav"
+                         "(不混 speech bus)。分軌 bus 音質不理想時用;代價是"
+                         "「留住時間、只靜音某一軌」做不到,那些串音會回來。"
+                         "cutplan 裡寫 `## ⚙ audio=mixdown` 是同一件事")
     ap.add_argument("--dry-run", action="store_true", help="只印剪輯範圍,不跑 ffmpeg")
     ap.add_argument("--dump-ranges", type=Path,
                     help="把保留區間(原始時間軸,毫秒精度)寫成 JSON — "
@@ -910,6 +915,23 @@ def main():
                          "cutplan.json 沒有 tracks 區 — 先跑 pertrack_blocks.py")
             pertrack = (want == "pertrack")
             print(f"[render] ⚙ line={want}(cutplan 指定,覆蓋自動偵測)")
+
+    # `## ⚙ audio=mixdown` = 剪輯決定照分軌人審(勾選/刪除線/兩層模型),但**音源
+    # 走混音 source.wav**,不混 speech bus。2026-09-06 MM:「分軌的品質不是很
+    # 理想」——分軌 bus 要 gate、對齊、鋪 room-tone,任何一環沒調好都比錄音機
+    # 自己的合軌難聽,而人審的 1800 多個勾選只長在分軌節目單上,重做一份混音
+    # 節目單會把人審整批丟掉。代價寫明:分軌能做到的「留住時間、只靜音某一軌」
+    # 在合軌上做不到(EP18 實測 176 個 cell、31.8s,占保留 2.9%),那些串音會回來。
+    for it in program:
+        if it["kind"] != "config":
+            continue
+        want = it["params_raw"].get("audio") if "params_raw" in it else None
+        if want in ("pertrack", "mixdown"):
+            if want == "mixdown" and not pertrack:
+                sys.exit("[render] FAIL: ⚙ audio=mixdown 只在分軌決定層有意義,"
+                         "但這份節目單本來就是混音線 — 拿掉 audio= 這個鍵")
+            args.mixdown_audio = (want == "mixdown")
+            print(f"[render] ⚙ audio={want}(cutplan 指定)")
 
     # ── ⚙ config 區:cutplan 是參數真相源,覆蓋 CLI/預設 ──
     applied = {}
@@ -1344,7 +1366,14 @@ def main():
     src = next(p for p in sorted(sdir.glob("source.*"))
                if p.suffix.lower() not in (".srt", ".md", ".json", ".txt"))
 
-    if pertrack:
+    if pertrack and args.mixdown_audio:
+        # 決定層已經把時間算完(segments 的 a/b 就長在 source.wav 時間軸上),
+        # 混音線要的正好是「照這些區間去切 source.wav」——什麼都不用做。
+        n_sil_ev = sum(1 for c in kept_cells
+                       for v in c["state"].values() if v == "silent")
+        print(f"[render] ⚙ 音源=混音 source.wav(不混 speech bus);"
+              f"分軌的逐軌靜音無法套用,{n_sil_ev} 處靜音事件會以原始串音留在成品裡")
+    elif pertrack:
         from pertrack_cells import track_envelopes
         import wave as _wave
         sp = [s for s in segments if s["kind"] == "speech"]

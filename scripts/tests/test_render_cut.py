@@ -413,6 +413,23 @@ class TestDryRunE2E(unittest.TestCase):
         # B0001+B0002 併一個 unit,刪「二」切成兩段;B0003 沒勾不出現
         self.assertEqual(len(speech), 2)
 
+    def test_audio_mixdown_rejected_on_a_mixdown_line_plan(self):
+        """⚙ audio=mixdown 只在分軌決定層有意義,寫在混音線節目單上要擋下來。
+
+        它的語意是「剪輯決定照分軌人審、音源改用 source.wav」;混音線本來就
+        吃 source.wav,靜靜接受只會讓人以為自己切換了什麼。
+        """
+        with tempfile.TemporaryDirectory() as td:
+            sdir = self._make_session(td)
+            md = sdir / "cutplan.md"
+            md.write_text(md.read_text(encoding="utf-8").replace(
+                "## ⚙ max-pause=0", "## ⚙ audio=mixdown max-pause=0"),
+                encoding="utf-8")
+            proc = self._render(sdir)
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("audio=mixdown 只在分軌決定層有意義",
+                      proc.stdout + proc.stderr)
+
     def test_music_lead_clamped_so_it_cannot_bury_the_closing(self):
         """lead 是盲目秒數,不管那幾秒裡還有沒有話 — EP16 的 ending lead=13
         把整段結語壓在音樂底下。超過 --music-lead-max 要夾住並講出來。"""

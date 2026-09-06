@@ -86,7 +86,9 @@ def semantic_diff(a: Path, b: Path) -> list[str]:
             elif it["kind"] == "cut":
                 cuts.add((round(it["a"], 2), round(it["b"], 2)))
             elif it["kind"] == "config":
-                cfg.update(it["params"])
+                # params_raw 才含 line=/audio= 這種非數值鍵。用 params 會讓
+                # 「剪輯路線被改掉」在人審 diff 裡完全隱形(2026-09-06 實踩)。
+                cfg.update(it.get("params_raw") or it["params"])
             elif it["kind"] == "music":
                 mus[it["file"]] = {k: it[k] for k in
                                    ("start", "end", "fadein", "fadeout",
@@ -140,6 +142,28 @@ def ask(prompt: str, options: str, default: str) -> str:
             return default
         if a in options.upper().split("/"):
             return a
+
+
+def route_label(plan: Path) -> str:
+    """剪輯路線要**從 cutplan 的 ⚙ 讀**,不能用檔名猜。
+
+    2026-09-06 實踩:EP18 v4–v7 的 render.txt 全寫「混音線」,因為判斷式是
+    `args.plan != "cutplan.md"` —— 但那份 cutplan.md 其實是分軌節目單、⚙ 也
+    寫 line=pertrack,四版出的都是分軌成品,MM 卻以為早就聽過混音線的版本。
+    """
+    cfg, ids = {}, []
+    for it in parse_program(plan):
+        if it["kind"] == "config" and "params_raw" in it:
+            cfg.update(it["params_raw"])
+        elif it["kind"] == "block":
+            ids.append(it["id"])
+    line = cfg.get("line")
+    if line not in ("pertrack", "mixdown"):
+        # 兩碼前綴(MR/SR/KN)=逐軌 block,單碼(B/G/S/I)=混音線
+        line = "pertrack" if any(i[:2].isalpha() for i in ids) else "mixdown"
+    if line == "mixdown":
+        return "混音"
+    return "分軌決定＋合軌音源" if cfg.get("audio") == "mixdown" else "分軌"
 
 
 OUT_RE = re.compile(r"^final_cut_v(\d+)\.")
@@ -288,7 +312,7 @@ def main() -> None:
     ep = EP_RE.search(sdir.name)
     vname = version_name(sdir, ddir, args.ai, now)
     stem = (ep.group(1) if ep else "cut") + "_" + vname.split("_")[0]
-    line = "分軌" if args.plan != "cutplan.md" else "混音"
+    line = route_label(local)
     note = ("\n".join(summary)
             + f"\n\n剪輯路線:{line}線(--plan {args.plan})"
             + f"\n出片檔:{stem}.mp3\nsession:{sdir}\n")
