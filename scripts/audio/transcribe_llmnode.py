@@ -9,11 +9,11 @@ scripts/audio/transcribe_llmnode.py — 遠端 ASR stage(llm-node whisper.cpp)
 用途:材料本來就在 llm-node(如 pCloud 拉下來的課程影片),或 Mac 要留著做別的事。
 實測 llm-node 約 2.75x realtime(large-v3-turbo-q8_0,-t 12)。
 
-⚠️ 分段轉錄是必要的,不是效能優化(2026-09-07 MM 拍板):
-whisper 的 --prompt 只條件化第一個 30 秒窗口,之後每個窗口拿前一段輸出當脈絡。
-長音檔一旦滑進「不標點模式」就自我延續到結束,整份逐字稿零標點。實測 55 講裡
-21 講中招,而且是非黑即白(有標點的每 10–12 字一個,沒有的就是 0 個)。
-把音檔切成 ~7 分鐘的段落分別轉錄,每段重新套用 prompt,漂移就沒有累積的機會。
+⚠️ 分段是為了長檔跑得完,不是為了標點(2026-09-07 MM 拍板):
+長檔單次跑 whisper 會讓 ssh 連線撐不住(106 分鐘那集實測失敗),分段後每段獨立、
+失敗只賠一段。**零標點是另一件事,靠 --prompt 解,分段解決不了**——把中招的音檔
+單獨拉出來(390 秒)帶同一份長 prompt 跑,前 90 秒照樣 0 標點(見
+docs/adr/ADR-2026-09-07-asr-segmented-transcription.md)。兩件事不要混為一談。
 
 分段規則(--segment-seconds / --max-segment-seconds):
   切 420s 一段;尾巴併進最後一段避免孤兒段;併完超過 480s 就對半切。
@@ -119,8 +119,10 @@ def main():
         if ctx.exists():
             # whisper prompt 窗口有限,取前 200 字(人名/專名放 context 開頭最有效;
             # 與 transcribe_local.py 同一份 context.txt、同一個截斷長度)
-            # ⚠️ 內容要寫成「有標點的完整敘述」——prompt 的書寫風格會傳染給輸出,
-            #    餵沒有標點的專名清單會讓整份逐字稿零標點(2026-09-06 實測)。
+            # ⚠️ context.txt 控在 60 字上下、有標點的自然敘述,專名**嵌在句子裡**。
+            #    prompt 的書寫形式會傳染給輸出:同音檔同模型只換 prompt,21 字與
+            #    62 字的敘述都是每 ~11.7 字一個標點,147 字的敘述＋長串專名列舉
+            #    是 0 個(各跑兩次數字相同)。下面的 [:200] 是硬截斷不是安全額度。
             prompt = ctx.read_text(encoding="utf-8").strip()[:200]
 
     stem = f"gsn_{os.getpid()}"
@@ -155,7 +157,7 @@ def main():
     print(f"[transcribe-llmnode] {dur/60:.1f} 分鐘 → {len(segs)} 段 "
           f"({', '.join(f'{L/60:.1f}m' for _, L in segs)})")
 
-    # 3. 逐段轉錄。每段都重新套用 --prompt,不讓不標點模式跨段延續。
+    # 3. 逐段轉錄。每段都重新套用 --prompt(標點靠 prompt 寫法保證,不靠分段)。
     #    -ojf(output-json-full)= mlx-whisper word_timestamps=True 的對應物:
     #    給「句子級 segment」+ 每段內含 tokens[] 的 per-token 時間軸。
     #    ⚠️ 不要用 -ml 1 取代(會把句子邊界攤平成單層 token 流,下游切不開);
