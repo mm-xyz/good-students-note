@@ -9,6 +9,15 @@ scripts/audio/transcribe_llmnode.py — 遠端 ASR stage(llm-node whisper.cpp)
 用途:材料本來就在 llm-node(如 pCloud 拉下來的課程影片),或 Mac 要留著做別的事。
 實測 llm-node 約 2.75x realtime(large-v3-turbo-q8_0,-t 12)。
 
+⚠️ 分段轉錄是必要的,不是效能優化(2026-09-07 MM 拍板):
+whisper 的 --prompt 只條件化第一個 30 秒窗口,之後每個窗口拿前一段輸出當脈絡。
+長音檔一旦滑進「不標點模式」就自我延續到結束,整份逐字稿零標點。實測 55 講裡
+21 講中招,而且是非黑即白(有標點的每 10–12 字一個,沒有的就是 0 個)。
+把音檔切成 ~7 分鐘的段落分別轉錄,每段重新套用 prompt,漂移就沒有累積的機會。
+
+分段規則(--segment-seconds / --max-segment-seconds):
+  切 420s 一段;尾巴併進最後一段避免孤兒段;併完超過 480s 就對半切。
+
 用 .venv-audio 的 python 跑(要 opencc):
     .venv-audio/bin/python scripts/audio/transcribe_llmnode.py <media> -o transcript.srt \
         [--context context.txt] [--language zh] [--remote-media <llm-node 上的路徑>]
@@ -54,12 +63,30 @@ def sh(cmd: list[str], **kw) -> subprocess.CompletedProcess:
     return p
 
 
-def ssh_run(host: str, remote_cmd: str) -> subprocess.CompletedProcess:
-    return sh(["ssh", host, remote_cmd])
+def plan_segments(duration: float, seg: float, maxseg: float) -> list[tuple[float, float]]:
+    """把 duration 切成 (start, length) 段落清單。
+
+    切 seg 秒一段;尾巴併進最後一段(避免只有幾秒的孤兒段);
+    併完若超過 maxseg 就對半切。回傳的段落完整覆蓋 [0, duration) 不重疊。
+    """
+    if duration <= maxseg:
+        return [(0.0, duration)]
+    n = int(duration // seg)
+    rem = duration - n * seg
+    bounds = [(i * seg, seg) for i in range(n - 1)]
+    start = (n - 1) * seg
+    last = seg + rem          # 尾巴併進第 n 段
+    if last > maxseg:
+        half = last / 2.0
+        bounds.append((start, half))
+        bounds.append((start + half, last - half))
+    else:
+        bounds.append((start, last))
+    return bounds
 
 
 def main():
-    ap = argparse.ArgumentParser(description="llm-node whisper.cpp 轉錄 → SRT")
+    ap = argparse.ArgumentParser(description="llm-node whisper.cpp 分段轉錄 → SRT")
     ap.add_argument("media", help="音檔或影片路徑(--remote-media 時只當標識)")
     ap.add_argument("-o", "--output", required=True, help="輸出 SRT 路徑")
     ap.add_argument("--context", help="context 檔路徑,內容餵 whisper --prompt")
@@ -68,6 +95,10 @@ def main():
     ap.add_argument("--host", help="ssh host(預設 LLM_NODE_SSH)")
     ap.add_argument("--model", help="llm-node 上的 ggml 模型路徑")
     ap.add_argument("--threads", type=int, help="whisper 執行緒數")
+    ap.add_argument("--segment-seconds", type=float, default=420.0,
+                    help="分段長度秒數(預設 420=7 分鐘);設 0 關閉分段")
+    ap.add_argument("--max-segment-seconds", type=float, default=480.0,
+                    help="單段上限秒數(預設 480=8 分鐘),超過就對半切")
     ap.add_argument("--keep-remote", action="store_true", help="保留 llm-node 上的暫存檔")
     args = ap.parse_args()
 
@@ -88,17 +119,19 @@ def main():
         if ctx.exists():
             # whisper prompt 窗口有限,取前 200 字(人名/專名放 context 開頭最有效;
             # 與 transcribe_local.py 同一份 context.txt、同一個截斷長度)
+            # ⚠️ 內容要寫成「有標點的完整敘述」——prompt 的書寫風格會傳染給輸出,
+            #    餵沒有標點的專名清單會讓整份逐字稿零標點(2026-09-06 實測)。
             prompt = ctx.read_text(encoding="utf-8").strip()[:200]
 
     stem = f"gsn_{os.getpid()}"
     rwav = f"/tmp/{stem}.wav"
-    rjson = f"/tmp/{stem}.json"
 
-    # 1. 取得 llm-node 上的 16k 單聲道 wav
+    # 1. 在 llm-node 上取得完整的 16k 單聲道 wav
     if args.remote_media:
         print(f"[transcribe-llmnode] 遠端抽音軌:{Path(args.remote_media).name}")
-        ssh_run(host, f"ffmpeg -nostdin -loglevel error -y -i {shlex.quote(args.remote_media)} "
-                      f"-vn -ar 16000 -ac 1 -c:a pcm_s16le {shlex.quote(rwav)}")
+        sh(["ssh", host,
+            f"ffmpeg -nostdin -loglevel error -y -i {shlex.quote(args.remote_media)} "
+            f"-vn -ar 16000 -ac 1 -c:a pcm_s16le {shlex.quote(rwav)}"])
     else:
         media = Path(args.media)
         if not media.exists():
@@ -109,41 +142,73 @@ def main():
             print(f"[transcribe-llmnode] 本地抽音軌:{media.name}")
             sh(["ffmpeg", "-nostdin", "-loglevel", "error", "-y", "-i", str(media),
                 "-vn", "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", str(lwav)])
-            mb = lwav.stat().st_size / 1048576
-            print(f"[transcribe-llmnode] 上傳 {mb:.0f} MB → {host}")
+            print(f"[transcribe-llmnode] 上傳 {lwav.stat().st_size / 1048576:.0f} MB → {host}")
             sh(["scp", "-q", str(lwav), f"{host}:{rwav}"])
 
-    # 2. 遠端轉錄。-ojf(output-json-full)= mlx-whisper word_timestamps=True 的對應物:
-    #    給「句子級 segment」+ 每個 segment 內含 tokens[] 的 per-token 時間軸,
-    #    兩層結構讓下游能照 local 線逐 segment 切短句。
-    #    ⚠️ 不要用 -ml 1 取代:那會把句子邊界攤平成單層 token 流,
-    #    split_words_to_phrases 少了 segment 兜底,沒標點又沒 ≥0.5s 停頓時整段
-    #    切不開(實測 60s 中文只出 2 個 cue,每個 24–36 秒)。
-    #    ⚠️ 更不要加 -sow(split-on-word):它按空白分隔的詞切,中文沒有空白 ⇒
-    #    整句變成一個「word」(實測每段 4–22 字＝句子級,粒度直接失效)。
-    cmd = (f"{asr_bin} -m {model} -l {shlex.quote(args.language)} -t {threads} "
-           f"-ojf -of {shlex.quote('/tmp/' + stem)} {shlex.quote(rwav)}")
-    if prompt:
-        cmd += f" --prompt {shlex.quote(prompt)}"
-    print(f"[transcribe-llmnode] {host}: whisper.cpp -t {threads} …")
-    ssh_run(host, cmd)
+    # 2. 量長度、規劃分段
+    dur = float(sh(["ssh", host, f"ffprobe -v error -show_entries format=duration "
+                                 f"-of csv=p=0 {shlex.quote(rwav)}"]).stdout.strip())
+    if args.segment_seconds > 0:
+        segs = plan_segments(dur, args.segment_seconds, args.max_segment_seconds)
+    else:
+        segs = [(0.0, dur)]
+    print(f"[transcribe-llmnode] {dur/60:.1f} 分鐘 → {len(segs)} 段 "
+          f"({', '.join(f'{L/60:.1f}m' for _, L in segs)})")
 
-    # 3. 取回 JSON
+    # 3. 逐段轉錄。每段都重新套用 --prompt,不讓不標點模式跨段延續。
+    #    -ojf(output-json-full)= mlx-whisper word_timestamps=True 的對應物:
+    #    給「句子級 segment」+ 每段內含 tokens[] 的 per-token 時間軸。
+    #    ⚠️ 不要用 -ml 1 取代(會把句子邊界攤平成單層 token 流,下游切不開);
+    #    ⚠️ 更不要加 -sow(按空白分隔的詞切,中文沒空白 ⇒ 整句變一個 word)。
+    pflag = f"--prompt {shlex.quote(prompt)} " if prompt else ""
+    remote_cmds = []
+    for i, (start, length) in enumerate(segs):
+        sw = f"/tmp/{stem}_s{i}.wav"
+        remote_cmds.append(
+            f"ffmpeg -nostdin -loglevel error -y -ss {start:.3f} -t {length:.3f} "
+            f"-i {shlex.quote(rwav)} -ar 16000 -ac 1 -c:a pcm_s16le {shlex.quote(sw)} && "
+            f"{asr_bin} -m {model} -l {shlex.quote(args.language)} -t {threads} -ojf "
+            f"{pflag}-of {shlex.quote(f'/tmp/{stem}_s{i}')} {shlex.quote(sw)} >/dev/null 2>&1 ; "
+            f"rm -f {shlex.quote(sw)}")
+    print(f"[transcribe-llmnode] {host}: whisper.cpp -t {threads},逐段轉錄中 …")
+    sh(["ssh", host, " ; ".join(remote_cmds)])
+
+    # 4. 取回各段 JSON,並把時間軸平移回全域
+    entries = []
     with tempfile.TemporaryDirectory() as td:
-        ljson = Path(td) / "r.json"
-        sh(["scp", "-q", f"{host}:{rjson}", str(ljson)])
-        data = json.loads(ljson.read_text(encoding="utf-8"))
+        # 多來源 scp 一次收回;目的地給目錄,檔名維持 <stem>_sN.json
+        sh(["scp", "-q"] + [f"{host}:/tmp/{stem}_s{i}.json" for i in range(len(segs))]
+           + [td + "/"])
+        for i, (start, _) in enumerate(segs):
+            jp = Path(td) / f"{stem}_s{i}.json"
+            if not jp.exists():
+                print(f"[transcribe-llmnode] ERROR: 第 {i+1} 段沒有 JSON", file=sys.stderr)
+                sys.exit(2)
+            data = json.loads(jp.read_text(encoding="utf-8"))
+            off = int(round(start * 1000))
+            for seg in data.get("transcription", []):
+                for key in ("offsets",):
+                    o = seg.get(key)
+                    if o:
+                        o["from"] = o.get("from", 0) + off
+                        o["to"] = o.get("to", 0) + off
+                for tk in seg.get("tokens", []):
+                    o = tk.get("offsets")
+                    if o:
+                        o["from"] = o.get("from", 0) + off
+                        o["to"] = o.get("to", 0) + off
+                entries.append(seg)
 
     if not args.keep_remote:
-        subprocess.run(["ssh", host, f"rm -f {shlex.quote(rwav)} {shlex.quote(rjson)}"],
+        junk = [rwav] + [f"/tmp/{stem}_s{i}.json" for i in range(len(segs))]
+        subprocess.run(["ssh", host, "rm -f " + " ".join(shlex.quote(x) for x in junk)],
                        capture_output=True)
 
-    entries = data.get("transcription", [])
     if not entries:
         print("[transcribe-llmnode] ERROR: 零 segment 輸出", file=sys.stderr)
         sys.exit(1)
 
-    # 4. 後製與 local 線同步:OpenCC s2twp + 逐 segment 切 EP15 式短句。
+    # 5. 後製與 local 線同步:OpenCC s2twp + 逐 segment 切 EP15 式短句。
     #    迴圈結構刻意與 transcribe_local.py 一致(segment 外層、word 內層),
     #    ref_text 用該 segment 的原始 text,join_words 才判得出英數字之間
     #    該不該補空格(見 srt_utils.join_words)。
