@@ -1,0 +1,28 @@
+{
+  "_meta": {
+    "domain": "productivity",
+    "description": "數位工作術/生產力工具/一人公司領域的 Whisper 誤判字典。以工具名、人名與該領域高頻詞為主。",
+    "seeded_from": "sessions/2026-09-06_雷蒙超級個體工作術（55 講，llm-node whisper.cpp large-v3-turbo-q8_0）",
+    "contribution_guide": "新增條目前確認左側不是合法詞——左側若本身是真詞（如「經歷」「這場上」），全域替換會破壞正常句子，一律不收。跨 session 重複觀察到、且左側非真詞的通用錯字才往 typo_dict.json 提。"
+  },
+  "corrections": {
+    "Cleanout Share X": "CleanShot X",
+    "Cleanout ShareX": "CleanShot X",
+    "rewise reader": "Readwise Reader",
+    "Rewise Reader": "Readwise Reader",
+    "hetabest": "Heptabase",
+    "Hetabest": "Heptabase",
+    "TrapGPT": "ChatGPT",
+    "IFTTD": "IFTTT",
+    "Exail": "Excel",
+    "James Clare": "James Clear",
+    "Tapasco": "Tabasco",
+    "雷萌": "雷蒙",
+    "細谷": "矽谷",
+    "武功密集": "武功秘籍",
+    "生殖加薪": "升職加薪",
+    "生產利益": "生產力",
+    "嚴割": "閹割",
+    "慘出": "產出"
+  }
+}
