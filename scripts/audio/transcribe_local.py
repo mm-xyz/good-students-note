@@ -43,7 +43,13 @@ def main():
         if ctx.exists():
             text = ctx.read_text(encoding="utf-8").strip()
             if text:
-                # whisper prompt 窗口有限,取前 200 字(人名/專名放 context 開頭最有效)
+                # whisper prompt 窗口有限,取前 200 字。
+                # ⚠️ 200 不是安全額度,是硬截斷:prompt 的**書寫形式**會傳染給輸出,
+                #    「頓號分隔的專名列舉」會讓整份逐字稿零標點(2026-09-07 實測:
+                #    同音檔同模型,21 字/62 字的自然敘述都是每 ~11.7 字一個標點,
+                #    147 字的敘述＋長串列舉是 0 個,各跑兩次數字相同)。
+                #    context.txt 寫成 60 字上下的自然敘述、專名嵌在句子裡。
+                #    同一份 context.txt 也餵 transcribe_llmnode.py,那邊同一條規則。
                 kw["initial_prompt"] = text[:200]
 
     print(f"[transcribe-local] {args.model} language={args.language} …")
