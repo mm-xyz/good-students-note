@@ -117,9 +117,9 @@ def main():
     if args.context:
         ctx = Path(args.context)
         if ctx.exists():
-            # whisper prompt 窗口有限,取前 200 字(人名/專名放 context 開頭最有效;
-            # 與 transcribe_local.py 同一份 context.txt、同一個截斷長度)
+            # 與 transcribe_local.py 同一份 context.txt、同一個截斷長度。
             # ⚠️ context.txt 控在 60 字上下、有標點的自然敘述,專名**嵌在句子裡**。
+            #    不要寫成「專名放開頭」或頓號分隔的清單——那個形式會壓掉標點。
             #    prompt 的書寫形式會傳染給輸出:同音檔同模型只換 prompt,21 字與
             #    62 字的敘述都是每 ~11.7 字一個標點,147 字的敘述＋長串專名列舉
             #    是 0 個(各跑兩次數字相同)。下面的 [:200] 是硬截斷不是安全額度。
