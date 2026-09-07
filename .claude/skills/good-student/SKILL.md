@@ -271,6 +271,30 @@ python3 .claude/skills/good-student/scripts/build_canvas.py <輸出目錄> \
 - 語意改寫派 sonnet；不派 haiku（會照抄贅詞或腦補）。
 - 試切 5 張由主線自己做，不派工——gate 的意義是校準格式，派出去就校不到了。
 
+### 長工作一律用 orca-cli 派，不要用背景 shell（2026-09-07 MM 拍板）
+
+轉錄、批量切卡這種以「小時」計的工作，**不要**用 in-process 背景任務或 `setsid nohup … &`：
+
+- harness 的背景 bash 任務有 **10 分鐘上限**，到點就被收掉，長工作的完成通知永遠等不到。
+- `ssh host 'setsid nohup cmd &'` 在你這端的 ssh 被工具逾時砍掉時，**子行程一起死**，
+  而且是靜默的——你以為在跑，其實沒有。2026-09-07 為此連續浪費三次啟動。
+
+改用 orca 開真終端，它獨立於你的工具呼叫存活，而且狀態查得到：
+
+```bash
+orca terminal create --worktree path:/abs/repo --title "轉錄批次" \
+  --command "bash scripts/xxx.sh args" --json     # 拿 handle
+orca terminal read --terminal <handle>            # 看目前輸出
+orca terminal list --json                         # 對照還開著哪些
+```
+
+- 開了就**登記 handle**，收尾時逐一核對歸零，別留孤兒終端。
+- `terminal wait --for exit` 對長駐 shell 無效（指令跑完 shell 還在），判完成要看
+  產物或 log 的完成標記，不要靠 wait。
+- 遠端機器上的常駐服務型工作，另一個可靠選項是
+  `sudo systemd-run --uid=<user> --setenv=HOME=/home/<user> --unit=<name> --collect <cmd>`；
+  ⚠️ 不指定 `--uid`／`HOME` 會以 root 跑，腳本裡的 `$HOME` 路徑會全部失效。
+
 ## 參考實作
 
 - 占星版受控詞彙／目錄結構／ASR 錯字表：mars-cc `000_Agent/skills/astro-chunking/SKILL.md`
