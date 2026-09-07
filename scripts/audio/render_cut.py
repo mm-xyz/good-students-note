@@ -254,6 +254,41 @@ def parse_program(path: Path) -> list[dict]:
     return program
 
 
+def structure_anchors(program: list[dict], tk_prefix: set[str]
+                      ) -> tuple[list[tuple[float, dict]], list[tuple]]:
+    """分軌線:非 block 項目(🎵/🎬/章節/✂…)照文件順序取錨點 = 它後面第一個
+    逐軌 block 的來源時間;後面沒有 block 了就錨到片尾(inf)。
+
+    前提是「文件順序＝時間順序」。cutplan 尾端的低信心附錄(`<details>`
+    折疊區)會回頭重列早期 block,一旦時間往回跳,後面的 block 就不能當錨點
+    ——EP18 的 `## 🎵 ending` 排在附錄之前,錨到附錄首筆 MR0018(0:41),
+    片尾音樂被塞進節目中段。回跳＝離開時間軸,待錨的結構行一律歸片尾。
+    (用 max 而非「上一個 block」判回跳:附錄自己內部是遞增的,只看相鄰兩筆
+    會在附錄第二筆就以為又回到正軌。)
+
+    回傳 (anchors, rewinds);rewinds 是給呼叫端印警告的
+    (block_item, 該 block 起點, 目前為止最大時間, 受影響的結構行數)。
+    """
+    anchors, pend, rewinds, last_t = [], [], [], -math.inf
+    for it in program:
+        if it["kind"] == "block" and it["id"][:2] in tk_prefix:
+            t_blk = it["block"]["start"]
+            if pend:
+                if t_blk + 1e-6 < last_t:
+                    rewinds.append((it, t_blk, last_t, len(pend)))
+                    anchors += [(math.inf, q) for q in pend]
+                else:
+                    anchors += [(t_blk, q) for q in pend]
+                pend = []
+            last_t = max(last_t, t_blk)
+        elif it["kind"] == "block" and it["id"].startswith("G"):
+            continue                           # G 列已在 cell 模型裡消化掉
+        else:
+            pend.append(it)
+    anchors += [(math.inf, q) for q in pend]
+    return anchors, rewinds
+
+
 def parse_strikes(body: str) -> tuple[str, list[list[int]]]:
     """解析 `~~...~~` → (clean_text, 無空白座標區間)。未閉合的 ~~ 當字面文字。"""
     spans = []
@@ -1026,17 +1061,11 @@ def main():
         words_guard = [w for w in (words or [])
                        if any(x <= (w["start"] + w["end"]) / 2 < y
                               for x, y in keep_spans)] or words
-        # 非 block 項目照文件順序取錨點 = 它後面第一個逐軌 block 的來源時間
-        anchors, pend = [], []
-        for it in program:
-            if it["kind"] == "block" and it["id"][:2] in tk_prefix:
-                anchors += [(it["block"]["start"], q) for q in pend]
-                pend = []
-            elif it["kind"] == "block" and it["id"].startswith("G"):
-                continue                       # G 列已在 cell 模型裡消化掉
-            else:
-                pend.append(it)
-        anchors += [(math.inf, q) for q in pend]
+        anchors, rewinds = structure_anchors(program, tk_prefix)
+        for it, t_blk, last_t, n in rewinds:
+            print(f"[render] ⚠ cutplan 在 {it['id']}({fmt_mmss(t_blk)})往回跳"
+                  f"(前面已到 {fmt_mmss(last_t)})—— 之前 {n} 個結構行"
+                  f"(🎵/🎬/章節)改錨到片尾,不跟著附錄回到中段")
         rs = [list(r) for r in ranges0]
         synth, ri, k = [], 0, 0
 

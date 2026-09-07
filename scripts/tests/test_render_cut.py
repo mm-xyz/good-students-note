@@ -29,7 +29,7 @@ from render_cut import (parse_program, parse_strikes, strike_removals,  # noqa: 
                         pause_removals, word_guard, subtract, merge_ranges,
                         snap_boundaries, validate_program, bgm_envelope,
                         env_to_expr, resolve_music, extend_unit_edges,
-                        enforce_monotonic)
+                        enforce_monotonic, structure_anchors)
 
 
 class TestEnforceMonotonic(unittest.TestCase):
@@ -71,6 +71,66 @@ class TestEnforceMonotonic(unittest.TestCase):
                 self._seg(9.0, 20.0)]
         out = enforce_monotonic(segs)
         self.assertEqual(out[2]["a"], 10.0)
+
+
+def _blk(bid, start):
+    return {"kind": "block", "id": bid, "keep": True, "raw": "", "clip": False,
+            "insert": None, "block": {"id": bid, "start": start,
+                                      "end": start + 1.0, "text": ""}}
+
+
+class TestStructureAnchors(unittest.TestCase):
+    """分軌線的結構行(🎵/🎬/章節)靠「後面第一個逐軌 block 的時間」定位,前提是
+    文件順序＝時間順序。
+
+    2026-09-06 EP18 實測:cutplan 尾端有「低信心非詞彙出聲候選」的 `<details>`
+    附錄,回頭重列 0:41 起的早期 block,而 `## 🎵 ending` 排在附錄之前 ——
+    片尾音樂錨到 MR0018(0:41),被塞進節目中段變成一段 17s 的音樂插曲。
+    """
+
+    PREFIX = {"MR", "SR"}
+
+    def test_trailing_appendix_does_not_drag_ending_music_into_the_middle(self):
+        music = {"kind": "music", "file": "ending"}
+        program = [_blk("MR0001", 0.0), _blk("SR0630", 1220.0), music,
+                   _blk("MR0018", 41.0), _blk("MR0040", 139.0)]
+        anchors, rewinds = structure_anchors(program, self.PREFIX)
+        self.assertEqual([(t, q["file"]) for t, q in anchors],
+                         [(float("inf"), "ending")])
+        self.assertEqual(len(rewinds), 1)
+        self.assertEqual((rewinds[0][0]["id"], rewinds[0][1], rewinds[0][2],
+                          rewinds[0][3]), ("MR0018", 41.0, 1220.0, 1))
+
+    def test_appendix_second_row_does_not_look_like_back_on_track(self):
+        """附錄內部是遞增的:只比相鄰兩筆會在第二筆就以為回到正軌,要比最大值。"""
+        m1 = {"kind": "music", "file": "a"}
+        m2 = {"kind": "music", "file": "b"}
+        program = [_blk("MR0500", 1200.0), m1, _blk("MR0018", 41.0), m2,
+                   _blk("MR0040", 139.0)]
+        anchors, _ = structure_anchors(program, self.PREFIX)
+        self.assertEqual([t for t, _ in anchors],
+                         [float("inf"), float("inf")])
+
+    def test_forward_only_plan_still_anchors_to_the_next_block(self):
+        """正常(遞增)的節目單行為不變:錨到後面第一個 block,不受新守衛影響。"""
+        music = {"kind": "music", "file": "break"}
+        program = [_blk("MR0001", 0.0), music, _blk("SR0200", 600.0),
+                   _blk("MR0300", 900.0)]
+        anchors, rewinds = structure_anchors(program, self.PREFIX)
+        self.assertEqual([(t, q["file"]) for t, q in anchors], [(600.0, "break")])
+        self.assertEqual(rewinds, [])
+
+    def test_gap_rows_are_transparent(self):
+        """G 列已在 cell 模型裡消化掉,不當錨點也不當待錨項目。"""
+        music = {"kind": "music", "file": "opening"}
+        g = {"kind": "block", "id": "G0001", "keep": False, "raw": "",
+             "clip": False, "insert": None,
+             "block": {"id": "G0001", "start": 5.0, "end": 8.0, "text": ""}}
+        program = [music, g, _blk("MR0002", 10.0)]
+        anchors, _ = structure_anchors(program, self.PREFIX)
+        self.assertEqual([(t, q["file"]) for t, q in anchors],
+                         [(10.0, "opening")])
+
 
 
 def w(start, end, word):
