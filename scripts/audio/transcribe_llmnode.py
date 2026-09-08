@@ -192,7 +192,11 @@ def main():
             if not jp.exists():
                 print(f"[transcribe-llmnode] ERROR: 第 {i+1} 段沒有 JSON", file=sys.stderr)
                 sys.exit(2)
-            data = json.loads(jp.read_text(encoding="utf-8"))
+            # ⚠️ errors="replace" 是必要的：whisper.cpp 偶爾會把半個多位元組字元
+            # 寫進 JSON（2026-09-08 第 46 集實踩，position 990-991，重跑三次都同一處）。
+            # strict 解碼會讓整集轉錄失敗；replace 只讓那一個字變成 U+FFFD，
+            # 是看得見的損壞標記，比整集拿不到好。
+            data = json.loads(jp.read_text(encoding="utf-8", errors="replace"))
             off = int(round(start * 1000))
             for seg in data.get("transcription", []):
                 for key in ("offsets",):

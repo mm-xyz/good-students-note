@@ -203,9 +203,48 @@ def process(path: pathlib.Path, out_path: pathlib.Path, url: str, model: str,
     return ok_chunks > 0
 
 
+def merge_from(srt: pathlib.Path, punctuated_file: pathlib.Path, out: pathlib.Path) -> bool:
+    """把外部產生的「加好標點的整段文字」合併回 SRT，時間軸不動。
+
+    用途：標點由誰產生都可以（本地 LLM、雲端 agent、人工），但**驗證與合併一律
+    走這裡**——執行體換了，安全性保證不能跟著換掉。
+
+    兩道檢查與 process() 相同：
+    1. 剝掉標點與空白後，字元序列必須與原檔完全相同（證明只加標點沒改字）
+    2. 不得出現重複標點（剝標點比對看不出「，，」）
+    """
+    blocks = parse_srt(srt)
+    if not blocks:
+        print(f"  ❌ 解析不到 cue：{srt}", file=sys.stderr)
+        return False
+    cue_texts = ["".join(b[2]) for b in blocks]
+    orig = "".join(cue_texts)
+    got = unicodedata.normalize("NFC", punctuated_file.read_text(encoding="utf-8").strip())
+
+    a, b = strip_marks(orig), strip_marks(got)
+    if a != b:
+        diff = next((k for k in range(min(len(a), len(b))) if a[k] != b[k]), min(len(a), len(b)))
+        print(f"  ❌ 驗證失敗：字元被改動（{len(a)}→{len(b)} 字，首個差異在第 {diff} 字）")
+        print(f"     原文 …{a[max(0,diff-25):diff+25]}…")
+        print(f"     產出 …{b[max(0,diff-25):diff+25]}…")
+        return False
+    dbl = re.findall(r"[。，、！？；：]{2,}", got)
+    if dbl:
+        print(f"  ❌ 驗證失敗：{len(dbl)} 處重複標點（如 {dbl[0]}）")
+        return False
+
+    new_texts = redistribute(got, cue_texts)
+    d0, d1 = density(cue_texts), density(new_texts)
+    out.write_text("\n".join(f"{i}\n{t}\n{x}\n" for (i, t, _), x in zip(blocks, new_texts)) + "\n",
+                   encoding="utf-8")
+    print(f"  ✅ 驗證通過，已合併：標點密度 每 {d0:.0f} 字 → 每 {d1:.1f} 字（{len(blocks)} cue 不變）")
+    return True
+
+
 def main():
-    ap = argparse.ArgumentParser(description="用本地 LLM 補回逐字稿標點（字元不可變）")
+    ap = argparse.ArgumentParser(description="補回逐字稿標點（字元不可變；時間軸不動）")
     ap.add_argument("target", help="單一 transcript.srt，或 episodes 根目錄")
+    ap.add_argument("--merge-from", help="外部產生的加好標點文字檔，驗證後合併回 SRT")
     ap.add_argument("--from-list", help="重轉清單（一行一個子目錄名），配合 episodes 根目錄")
     ap.add_argument("-o", "--output", help="輸出路徑（單檔模式；預設原地覆寫）")
     ap.add_argument("--url", default=os.environ.get("LLM_NODE_URL", DEFAULT_URL))
@@ -216,6 +255,11 @@ def main():
     args = ap.parse_args()
 
     target = pathlib.Path(args.target)
+
+    if args.merge_from:
+        out = pathlib.Path(args.output) if args.output else target
+        return 0 if merge_from(target, pathlib.Path(args.merge_from), out) else 1
+
     targets = []
     if args.from_list:
         names = [l.strip() for l in pathlib.Path(args.from_list).read_text(encoding="utf-8").splitlines() if l.strip()]
