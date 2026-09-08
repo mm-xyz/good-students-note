@@ -30,7 +30,10 @@ SUFFIX = re.compile(r"(_完整知識庫|_視覺知識庫|_知識庫)?\.md$")
 def main():
     ap = argparse.ArgumentParser(description="把知識庫 md + assets 打包成可攜 zip（縮圖自動連結）")
     ap.add_argument("md", help="最終知識庫 md 路徑")
-    ap.add_argument("--assets", default=None, help="assets 目錄（預設：md 同層 assets/）")
+    ap.add_argument("--assets", default=None,
+                    help="圖片實際所在的目錄。md 裡的相對路徑先以 md 同層解析，"
+                         "找不到才回退到這裡（用檔名比對）。"
+                         "適用於 md 的連結寫 images/x.jpg 但圖其實在 assets/images/ 的情況。")
     ap.add_argument("-o", "--output", default=None, help="輸出 zip（預設：md 同層 {stem}_知識庫.zip）")
     args = ap.parse_args()
 
@@ -54,9 +57,19 @@ def main():
         os.remove(out_zip)
     with zipfile.ZipFile(out_zip, "w", zipfile.ZIP_DEFLATED) as zf:
         zf.write(md, f"{folder}/{md_name}")
+        # --assets 回退：2026-09-08 修。原本這個參數解析出來後從未被使用，
+        # 圖一律以 md 同層解析，連結寫 images/ 但圖在 assets/images/ 時必定斷鏈。
+        fallback = {}
+        if args.assets and os.path.isdir(args.assets):
+            for root, _, files in os.walk(args.assets):
+                for fn in files:
+                    fallback.setdefault(fn, os.path.join(root, fn))
         for rel in sorted(set(rels)):
             src = os.path.normpath(os.path.join(base, rel))
+            if not os.path.isfile(src):
+                src = fallback.get(os.path.basename(rel), src)
             if os.path.isfile(src):
+                # zip 內一律照 md 寫的相對路徑擺，這樣解壓後連結才對得上
                 zf.write(src, f"{folder}/{rel}")
                 packed += 1
             else:
@@ -68,7 +81,8 @@ def main():
         print(f"   ❌ 有 {len(missing)} 個圖片連結找不到實體檔（未打包，會斷鏈）：")
         for m in missing[:8]:
             print(f"        {m}")
-        print("   → 請確認 assets 在 md 同層，或把這些斷鏈的圖片行移除（只留 VLM 文字）後重打包。")
+        print("   → 圖若不在 md 同層，用 --assets <圖片根目錄> 指過去（會用檔名比對回退）；"
+              "或把這些斷鏈的圖片行移除（只留 VLM 文字）後重打包。")
         sys.exit(2)
     print(f"   📂 解壓後打開 {folder}/{md_name}（Typora 等）縮圖會自動顯示，0 斷鏈。")
 

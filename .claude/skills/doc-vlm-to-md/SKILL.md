@@ -72,6 +72,8 @@ python3 scripts/epub_images.py <file>   # EPUB：解 zip 數內嵌圖
 
 - 驗**數量**：十二宮就該是 12，數量不齊或跨圖重複＝邊界錯
 - 驗**互斥**：相鄰兩張圖的項目不該重疊
+- **有工具**：`python3 scripts/check_layout.py <cleaned.md> --unit 宮 --expect 12`
+  拿 2026-09-07 的事故檔實測，五張項數不齊、六組相鄰重疊 9–10 項全部抓出來
 - 覺得「內容特徵完全對得上」時**特別危險**——摻進來的內容本身都是真的
 
 ---
@@ -248,6 +250,26 @@ python3 scripts/sync_corpus.py ... --dry-run                     # 先看要做�
 
 ---
 
+## 只做一部分時怎麼收（smoke test 交付格式）
+
+試跑、抽樣、分批做時**不要跑完整交付流程**，否則會被誤認成已完工。
+2026-09-08 兩條試跑都卡在這裡：SKILL.md 沒說「只做 8/80 張時該在哪停」。
+
+| 做多少 | 跑哪些 | 不要跑 |
+| :--- | :--- | :--- |
+| **部分**（試跑／抽樣／分批） | 轉錄 → `merge_figures.py` → 核對落地率 | ❌ `sync_corpus.py`　❌ `package_kb.py` |
+| **全部** | 全流程到 `sync_corpus.py`／`package_kb.py` | — |
+
+部分完成時**一定要在 `metadata.json` 留記號**，否則下一個人看到 md 有圖說會以為做完了：
+
+```json
+{"figures_done": 8, "figures_total": 80, "note": "smoke test，非漏做"}
+```
+
+回報也要寫「N/M 張」，不要只說「完成」。
+
+---
+
 ## 圖片路徑約定（**不照做連結會斷**）
 
 `epub_images.py <epub> <outdir>` 把圖存到 **`<outdir>/images/`**；
@@ -276,7 +298,8 @@ python3 scripts/sync_corpus.py ... --dry-run                     # 先看要做�
 | `gen_prompts.py` | 為每張圖產 OCR-first 讀圖指示 | 派工前（⚠️ 吃 `t1_list.json` 格式的清單，即 `score_figures.py --out` 的產物） |
 | `merge_figures.py` | 圖說依錨點插回 md 原位（單本） | 轉錄後 |
 | `merge_all.py` | 跨 session 批次合併 | 轉錄後（多本；⚠️ 一次性腳本，路徑寫死在檔內，新批次要先改） |
-| `sync_corpus.py` | 倒進常設語料倉 | **收工前**（Step 3.5） |
+| `sync_corpus.py` | 倒進常設語料倉 | **收工前**（Step 3.5；只做部分時不要跑） |
+| `check_layout.py` | **版面層驗證**：項數齊不齊、相鄰圖有無重疊 | 轉錄後（Step 0-5 的配套工具） |
 | `vlm_ocr_first.py` | 走 llm-node 本地讀圖（零費用、不受 content filter 管） | 被擋或要省錢時 |
 | `package_kb.py` | 打包可攜 zip | 交付 |
 
