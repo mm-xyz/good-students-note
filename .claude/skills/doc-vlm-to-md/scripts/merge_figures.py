@@ -110,7 +110,14 @@ def main():
                 p = locate_fuzzy(body_norm, anc.get("before", ""))
                 if p != -1: break
         if p == -1: miss.append((name, f"{len(it['anchors'])} 個錨點在正文都找不到")); continue
-        real = pos_map[min(p, len(pos_map)-1)] + 1
+        # 2026-09-08 修：p 是「比對到的錨點後面那個非空白字元」在 body_norm 的索引，
+        # pos_map[p] 已經是該字元在原文的位置——插在這裡才會落在段落分界，
+        # 不吃掉下一段的第一個字。舊版無條件 +1，遇到「錨點恰好在段落結尾」
+        # （最常見的情況，圖本來就常夾在兩段之間）就會多跳一個字，
+        # 把下一段第一個字吞進插入區塊前面，例如「但是」被切成「但」+插入區塊+「是」。
+        # 只有比對落在全文最後（p 已經超出 pos_map 範圍，沒有下一個非空白字元）
+        # 才需要 +1，插在最後一個字「之後」。
+        real = pos_map[p] if p < len(pos_map) else pos_map[-1] + 1
         inserts.append((real, name, block))
 
     for real, name, block in sorted(inserts, reverse=True):
