@@ -12,6 +12,31 @@ allowed-tools: Bash, Read, Write, Glob, Grep, Edit, Agent
 概念級 chunk 檢索友善但如果只是內容轉述會**太籠統**。本線同時解兩件事：
 **切法承襲 domain-structure chunking，記憶點承襲好學生筆記的視角置入**。
 
+## 一次跑完的流程（`/good-student <path>`）
+
+**本 skill 是入口，`doc-vlm-to-md` 是它的子步驟。** 給一個路徑就從頭走到尾：
+
+```mermaid
+flowchart TD
+    A["/good-student &lt;path&gt;"] --> B{"Step 0-1<br/>count_figures.py<br/>實測數圖"}
+    B -- "有圖" --> C["Step 0-2<br/>呼叫 doc-vlm-to-md<br/>圖說轉錄＋錨點插回原位"]
+    B -- "實測 0 張" --> D["Step 0-3<br/>session.py 抽文字"]
+    C --> E{"核對落地率<br/>轉錄 N vs 插入 M"}
+    E -- "有落差" --> C
+    E -- "齊了" --> F["Step 0-4<br/>開切前自我確認三題"]
+    D --> F
+    F --> G["啟動儀式<br/>談定切分軸／視角／輸出位置"]
+    G --> H["試切 5 張 gate<br/>建 canvas 交使用者驗收"]
+    H -- "GO" --> I["批量切卡"]
+    H -- "要改" --> G
+    I --> J["驗收 checklist<br/>＋重跑 canvas"]
+```
+
+**兩道 gate 都是鐵門，auto mode 也不能跳**：
+Step 0 的圖片閘門（沒轉完不准切）、試切 5 張的驗收（沒 GO 不准批量）。
+
+---
+
 ## 定位（與既有產線的關係，先讀懂再動手）
 
 - **本線是「蒸餾產物」，與零省略產線平行、不取代。** CLAUDE.md 的零省略鐵律
