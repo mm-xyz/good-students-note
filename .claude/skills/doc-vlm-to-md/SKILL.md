@@ -54,6 +54,26 @@ python3 scripts/epub_images.py <file>   # EPUB：解 zip 數內嵌圖
 再逐張填內容。好處：中途中斷不會整批白做、可以核對落地率、
 補跑只補缺的。**不要最後才一次寫檔**（實測被中斷會整批損失）。
 
+### 0-3a　**clean 完先把所有圖 OCR 一遍**（標準步驟，0 雲端 token）
+
+```bash
+python3 scripts/ocr_figures.py <session 目錄>        # 或 --all <sessions 根>
+```
+
+結果寫回 `figures.json` 的 `ocr` 欄位。冪等、可中斷續跑、單張失敗不中斷整批。
+
+**OCR 一次、兩處受用**：
+
+1. **轉錄品質**：先 OCR 再讓模型讀，字形錯誤大幅下降（見 Step 2.5 實測）
+2. **版面結構自動偵測**：`check_layout.py --from-ocr <session>`
+   直接從 OCR 推單位與項數——**不必按書手設 `--unit`**，
+   而且**在轉錄之前就跑得了**，問題在花 token 前就抓到
+
+> 每本書的版面都不一樣，所以結構不該由人按書設定，該從資料推出來。
+> 實測《風水篇》：不給任何參數，它自己推出單位是「宮」、基準 12 項，
+> 並抓出 i-028～i-031 這四張跨頁分裂的圖——**正是當初害五張卡摻錯內容的那批**。
+> 它也會把命盤示意圖（只畫 3–4 格）跟殘缺的表分開，不製造誤報。
+
 ### 0-3b　**接手既有 session：只信檔案，不信 metadata**
 
 `metadata.json` 可能宣稱「N 張已完成」但檔案根本不存在（前一輪被清掉、
@@ -330,7 +350,8 @@ python3 scripts/sync_corpus.py ... --dry-run                     # 先看要做�
 | `merge_figures.py` | 圖說依錨點插回 md 原位（單本） | 轉錄後 |
 | `merge_all.py` | 跨 session 批次合併 | 轉錄後（多本；⚠️ 一次性腳本，路徑寫死在檔內，新批次要先改） |
 | `sync_corpus.py` | 倒進常設語料倉 | **收工前**（Step 3.5；只做部分時不要跑） |
-| `check_layout.py` | **版面層驗證**：`<md>` 零設定跑通用檢查（孤字／斷鏈／重複插入）；加 `--unit 宮` 才驗表格系列；`--all` 整批掃 | 轉錄後（Step 0-5 的配套工具） |
+| `ocr_figures.py` | **把每張圖 OCR 一遍存進 figures.json** | **clean 完就跑**（Step 0-3a） |
+| `check_layout.py` | **版面層驗證**：`--from-ocr <session>` 轉錄前就能驗且單位自動偵測；`<md>` 零設定跑通用檢查；`--unit` 驗表格系列；`--all` 整批掃 | 轉錄前／後 |
 | `vlm_ocr_first.py` | 走 llm-node 本地讀圖（零費用、不受 content filter 管） | 被擋或要省錢時 |
 | `package_kb.py` | 打包可攜 zip | 交付 |
 
