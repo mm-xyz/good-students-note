@@ -55,6 +55,17 @@ def main(argv):
             bad += 1
             print(f"  ❗ {n:<14}{'；'.join(flags)}")
 
+    # 插入點吃字：FIG 區塊前只剩孤零零一個漢字 → merge 的 off-by-one 指紋。
+    # 2026-09-08 第二次試跑抓到：853 張圖說有 407 處中招（「因為」被切成
+    # 「因」＋圖說＋「為」）。字沒少、順序沒亂，所以落地率、圖連結、項數檢查
+    # **全部放行**——這種錯只有專門找才看得到。
+    orphan = re.findall(r"(?:^|\n)([一-鿿])\n\n<!-- FIG:(\S+?) BEGIN", text)
+    if orphan:
+        bad += len(orphan)
+        print(f"  ❗ {len(orphan)} 處 FIG 區塊前有孤字（插入點 off-by-one，吃掉下一段第一個字）")
+        for ch, fig in orphan[:3]:
+            print(f"       {fig} 前面孤零零一個「{ch}」")
+
     # 相鄰圖重疊：同一份材料裡兩張圖的項目大量相同 → 邊界劃錯的指紋
     print()
     for (n1, r1), (n2, r2) in zip(figs, figs[1:]):
