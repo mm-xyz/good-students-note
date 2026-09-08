@@ -220,7 +220,8 @@ python3 scripts/frames/compose.py "<slug>" --course "<課程名>" # → Obsidian
 - compose 會吸收音訊線圖層:跑過 `--prosody` 就用**真實聲學停頓**、高昂段標 🔥、
   有 speakers SRT 段落自帶講者名
 - VLM 全走本地 llm-node(零雲端 token;`LLM_NODE_URL`/`LLM_NODE_MODEL` 住 mars-cc/.env,不驗 token)
-- 詳細操作與 gotchas:`.claude/skills/invisible-context/SKILL.md`(`/invisible-context` skill)
+- 詳細操作與 gotchas:`.claude/skills/video-to-md/SKILL.md`(`/video-to-md` skill,
+  2026-09-08 由 `invisible-context` 更名——原名沒有「video」害得人找不到)
 
 ### 5. 節奏/手感旋鈕(都有安全預設)
 

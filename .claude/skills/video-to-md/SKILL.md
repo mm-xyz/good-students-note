@@ -1,9 +1,13 @@
 ---
-name: invisible-context
-description: 影片 → 帶截圖與停頓標注的 Obsidian 逐字稿＋筆記。場景偵測抽幀、地端 VLM（LM Studio Gemma）篩圖寫圖說、SRT 合流成時間錨點逐字稿，Claude 收尾蒸餾筆記。觸發：「把這場演講做成筆記」「影片轉筆記」「/invisible-context」，或給出影片要筆記時。2026-07-28 起併入 good-students-note（frames 線），原獨立 repo 已封存。
+name: video-to-md
+description: 影片 → 帶截圖與停頓標注的 Obsidian 逐字稿＋筆記。**影片線的正式入口**：場景偵測抽幀、地端 VLM（llm-node）依「只聽逐字稿會漏掉」篩圖寫圖說、SRT 合流成時間錨點逐字稿，Claude 收尾蒸餾筆記。當需要：(1) 把演講／課程／Zoom 錄影做成筆記 (2) 影片裡的投影片、demo、圖表、程式碼也要進知識庫，不只抽音軌 (3) 為 RAG 補上「畫面」這一塊時使用。與 `audio-to-md`（只處理聲音）的分工：影片有畫面資訊就走本 skill。觸發：「把這場演講做成筆記」「影片轉筆記」「/video-to-md」，或給出影片要筆記時。舊名 invisible-context（2026-09-08 更名——名字沒有「video」害得使用者找不到）。
 ---
 
-# invisible-context — 影片演講 → 看得見畫面的筆記
+# video-to-md — 影片演講 → 看得見畫面的筆記
+
+> **2026-09-08 由 `invisible-context` 更名。** 原名沒有「video」字樣，
+> 連建立者自己都記成「video-to-md」卻搜不到——能力存在但不可發現，等同不存在。
+> 命名對齊 `doc-to-md`／`audio-to-md`／`doc-vlm-to-md` 這一家。
 
 把藏在**畫面**與**停頓時間點**裡的 invisible context 撈回筆記。
 Repo：`~/GithubRepo_mm-xyz/good-students-note/`（frames 線；本檔實體在該 repo，

@@ -525,7 +525,8 @@ Step 5 只在 `goodedunote` 專案的 hosting 上新增/更新該篇 `<slug>/`,�
 - **frames 線(2026-07-28 併入 invisible-context)**:`scripts/frames/`(extract/screen/
   ocr/diagram/format_text/compose),產物 `sessions/<slug>/frames/`;session.py `--frames`
   觸發抽幀,VLM 全走本地 llm-node;compose 吸收音訊線的停頓/🔥/講者圖層;skill
-  `/invisible-context` 實體在 `.claude/skills/invisible-context/`,原 repo 已封存。
+  `/video-to-md` 實體在 `.claude/skills/video-to-md/`,原 repo 已封存。
+  (2026-09-08 由 `invisible-context` 更名;命名對齊 doc-to-md／audio-to-md／doc-vlm-to-md)
 
 ### 原則 11 — BGM 疊軌感知、二段式音量包絡(2026-07-29 MM 拍板)
 
