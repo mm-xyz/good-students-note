@@ -1,7 +1,7 @@
 ---
 name: good-student
-description: 把任何長文本（cleaned.md／逐字稿／文章／書稿／課程材料）切成概念級、好記憶的知識點——一概念一檔、自足可檢索、帶視角類比與記憶鉤（RAG-ready 的 Obsidian 知識庫）。啟動時必先與使用者討論切分軸與視角，auto mode 也要先試切 5 張驗收後才可批量。Use when 使用者要把長文本變成知識點／知識庫／概念卡，或說「切知識點」「chunk 這份材料」「幫我把這課變成好記的筆記」。
-argument-hint: <長文本檔（建議先走 session.py new 產 cleaned.md）> [--out <輸出目錄>]
+description: 給一個路徑就一次跑完：原始檔（EPUB/PDF/音檔/影片/TXT）自動前置轉檔＋圖說入語料，再切成概念級、好記憶的知識點——一概念一檔、自足可檢索、帶視角類比與記憶鉤（RAG-ready 的 Obsidian 知識庫）。啟動時必先與使用者討論切分軸與視角，auto mode 也要先試切 5 張驗收後才可批量。**Step 0 圖片閘門是強制的**：先實測數圖，有圖一律先轉完再切卡（避免整批卡切在殘缺語料上）。Use when 使用者要把長文本或一本書變成知識點／知識庫／概念卡，或說「切知識點」「chunk 這份材料」「幫我把這課變成好記的筆記」。
+argument-hint: <原始檔或長文本（EPUB/PDF/音檔/影片/TXT 皆可，會自動前置轉檔）> [--out <輸出目錄>]
 allowed-tools: Bash, Read, Write, Glob, Grep, Edit, Agent
 ---
 
@@ -18,12 +18,53 @@ allowed-tools: Bash, Read, Write, Glob, Grep, Edit, Agent
   管的是 Step 2/3/4（cleaned.md／enhanced.md／notes 都必須 95–105% 保字數）；
   知識點是改寫濃縮（同 `confidence: distilled` 語意），兩者是不同產品，
   **絕不要拿零省略 checklist 驗知識點，也絕不要拿知識點取代 cleaned.md**。
-- **輸入介面＝任意乾淨長文本。** 首選 `sessions/<slug>/cleaned.md`
-  （音檔/影片/PDF/EPUB/TXT 一律先走 `python3 scripts/session.py new <file>`，
-  見 CLAUDE.md 原則 12——前段轉接、後段只認 cleaned.md）；
-  也接受使用者直接給的現成文本（貼文、講義、別處的逐字稿）。
+- **輸入介面＝原始檔路徑或乾淨長文本，兩種都收。**
+  給原始檔（EPUB/PDF/音檔/影片/TXT）就走下方 **Step 0 前置轉檔**，本 skill 自己接完；
+  給現成文本（貼文、講義、別處的逐字稿）就直接進啟動儀式。
+  **使用者不需要先手動跑 session.py**——`/good-student <path>` 一次跑完是預設行為。
 - 原始檔是 parent、知識點是 child：每檔 `source`（＋有時間軸時 `source_ts`）
   指回原文，不複製原文進知識庫、不維護雙索引。
+
+## Step 0 — 前置轉檔與圖片閘門（**強制，先過這關才准切卡**）
+
+給的是原始檔就先走這一步。**這關沒過不准開始切卡**——
+2026-09-07 大耕紫微線的事故：428 張卡全部切在殘缺語料上，因為
+EPUB 的 1,010 張內嵌圖從來沒進過管線，而 `session.py` 只抽文字層、不抽圖、不報錯。
+後果不只是少了圖：「原書沒寫」這類結論一路寫進缺口清單與檢索器，
+連**缺口的形狀**都判錯，補圖後回頭重驗的成本遠高於一開始先轉完。
+
+### 0-1　先數圖（不看副檔名推論）
+
+```bash
+python3 <mars-cc>/000_Agent/skills/doc-vlm-to-md/scripts/count_figures.py <檔案或目錄>
+```
+
+**實測 0 張才算沒有圖。** 不可以因為「這是 EPUB／這是純文字」就跳過。
+
+### 0-2　有圖就先轉完，再切卡
+
+有圖 → 走 `doc-vlm-to-md` skill 把圖說轉錄並用錨點插回 `cleaned.md` 原位，
+**整份轉完**才進啟動儀式。不要邊切卡邊補圖——
+圖沒進語料前切出來的卡會帶著「原書沒寫」這種錯誤結論，每一張都要回頭重驗。
+
+轉完**核對落地率**（轉錄 N 張 vs 實際插入 M 張）。merge 只會印「塞回 N 張」，
+N 少了看不出來；實測曾靜默丟失 74 張。
+
+### 0-3　沒有圖才可以直接抽文字
+
+```bash
+python3 <good-students-note>/scripts/session.py new <file> --engine=none
+```
+
+### 0-4　開切前的自我確認（三題都要能回答）
+
+1. 這份材料有幾張圖？**實測數字**是多少？
+2. 圖說進語料了嗎？落地率多少？位置不明的有幾張（在檔尾附錄）？
+3. 如果現在切出一張卡說「原書沒有提到 X」，我憑什麼確定不是圖裡有？
+
+第 3 題答不出來就是還沒準備好切卡。
+
+---
 
 ## 啟動儀式（強制，auto mode 也不可跳過）
 
