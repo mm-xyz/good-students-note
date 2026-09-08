@@ -1,0 +1,6 @@
+PyMuPDF>=1.23.0
+ebooklib>=0.18
+beautifulsoup4>=4.12.0
+chardet>=5.0.0
+opencc-python-reimplemented>=0.1.7
+lxml>=4.9.0

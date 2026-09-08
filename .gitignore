@@ -110,3 +110,7 @@ build/
 
 # clasp 本機專案綁定（含個人 scriptId），不進版控
 scripts/cutplan-editor/.clasp.json
+
+# installer 解壓產物（105 MB），只版控 install.sh／README 等本體
+.claude/skills/doc-to-md-installer/skill/
+.claude/skills/*/skill.zip
