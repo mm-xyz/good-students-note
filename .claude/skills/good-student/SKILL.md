@@ -20,7 +20,9 @@ allowed-tools: Bash, Read, Write, Glob, Grep, Edit, Agent
 flowchart TD
     A["/good-student &lt;path&gt;"] --> B{"Step 0-1<br/>count_figures.py<br/>實測數圖"}
     B -- "有圖" --> C["Step 0-2<br/>呼叫 doc-vlm-to-md<br/>圖說轉錄＋錨點插回原位"]
+    B -- "🎬 影片" --> C2["Step 0-2b<br/>/video-to-md<br/>抽幀＋VLM 篩圖＋併回逐字稿"]
     B -- "實測 0 張" --> D["Step 0-3<br/>session.py 抽文字"]
+    C2 --> E
     C --> E{"核對落地率<br/>轉錄 N vs 插入 M"}
     E -- "有落差" --> C
     E -- "齊了" --> F["Step 0-4<br/>開切前自我確認三題"]
@@ -66,6 +68,14 @@ python3 <mars-cc>/000_Agent/skills/doc-vlm-to-md/scripts/count_figures.py <檔�
 
 **實測 0 張才算沒有圖。** 不可以因為「這是 EPUB／這是純文字」就跳過。
 
+它會分三種回覆：
+
+| 回覆 | 意思 | 下一步 |
+| :--- | :--- | :--- |
+| `N 張` | 實測有 N 張圖 | N>0 → 0-2；N=0 → 0-3 |
+| 🎬 `影片` | **畫面資訊不在這支的統計裡** | → **0-2b 影片線** |
+| ❗ `格式不支援、未清點` | 它不會數這種檔 | **不可當作沒有圖**，人工確認 |
+
 ### 0-2　有圖就先轉完，再切卡
 
 有圖 → 走 `doc-vlm-to-md` skill 把圖說轉錄並用錨點插回 `cleaned.md` 原位，
@@ -74,6 +84,17 @@ python3 <mars-cc>/000_Agent/skills/doc-vlm-to-md/scripts/count_figures.py <檔�
 
 轉完**核對落地率**（轉錄 N 張 vs 實際插入 M 張）。merge 只會印「塞回 N 張」，
 N 少了看不出來；實測曾靜默丟失 74 張。
+
+### 0-2b　影片走 `/video-to-md`，不要只抽音軌
+
+影片的「圖」在畫面裡：投影片、demo、圖表、程式碼、白板。
+`/video-to-md` 會場景偵測抽幀，再用地端 VLM 依
+**「只聽逐字稿會漏掉」** 這個判準篩圖寫圖說，最後用時間戳併回逐字稿。
+
+⚠️ **只跑 `audio-to-md` 只會拿到聲音**——一場有投影片的演講等於丟掉一半資訊，
+而且會產生跟 EPUB 缺圖一樣的假象：「逐字稿裡沒提到 X」，其實 X 一直在投影片上。
+
+畫面確實沒有資訊（純談話、podcast 錄影）才回頭走 `audio-to-md`。
 
 ### 0-3　沒有圖才可以直接抽文字
 

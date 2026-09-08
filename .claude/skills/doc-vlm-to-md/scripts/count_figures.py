@@ -13,6 +13,7 @@
 import sys, zipfile, pathlib, re
 
 IMG_EXT = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".svg", ".webp", ".tif", ".tiff"}
+VIDEO_EXT = {".mp4", ".mov", ".mkv", ".webm", ".m4v", ".avi"}
 
 
 def count_epub(p):
@@ -42,6 +43,32 @@ def count_pdf(p):
         return -1, f"讀取失敗：{e}"
 
 
+def count_video(p):
+    """影片：圖不在檔案裡，在畫面裡——**不能回 0**。
+
+    2026-09-08 補：閘門原本只認 epub/pdf/md，給 .mp4 會歸到「格式不支援」，
+    於是 /good-student 的 Step 0 直接放行去切卡——跟「EPUB 沒有圖」同一種失效。
+    影片要走 /video-to-md（場景偵測抽幀＋VLM 篩圖），這裡回 -2 表示
+    「有畫面但要另一條線數」，並附時長讓人估規模。
+    """
+    import shutil, subprocess
+    if not shutil.which("ffprobe"):
+        return -2, "有畫面內容 → 走 /video-to-md（裝 ffprobe 可顯示時長）"
+    try:
+        out = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "format=duration:stream=width,height",
+             "-of", "default=nw=1:nk=1", str(p)],
+            capture_output=True, text=True, timeout=30).stdout.split()
+    except (subprocess.SubprocessError, OSError) as e:
+        return -2, f"有畫面內容 → 走 /video-to-md（ffprobe 失敗：{e}）"
+    dur = next((float(x) for x in out if "." in x), 0.0)
+    wh = [x for x in out if x.isdigit()][:2]
+    m, s = divmod(int(dur), 60)
+    size = f"{wh[0]}×{wh[1]}" if len(wh) == 2 else "尺寸未知"
+    return -2, f"{m}分{s:02d}秒 {size} → **走 /video-to-md**（場景偵測抽幀，不是這支能數的）"
+
+
 def count_md(p):
     """已轉好的 markdown：數圖片語法與 FIG 錨點，用來核對落地率。"""
     try:
@@ -54,6 +81,7 @@ def count_md(p):
 
 
 HANDLER = {".epub": count_epub, ".pdf": count_pdf, ".md": count_md, ".markdown": count_md}
+HANDLER.update({e: count_video for e in VIDEO_EXT})
 
 
 def walk(target):
@@ -81,10 +109,14 @@ def main(argv):
         print("找不到可清點的檔案（支援 .epub / .pdf / .md）"); return 1
     w = max((len(r[0].name) for r in rows), default=10)
     for f, n, note in rows:
-        mark = "❗" if n < 0 else ("　" if n else "⚠️")
-        cnt = "讀取失敗" if n < 0 else f"{n:>5} 張"
+        mark = "🎬" if n == -2 else ("❗" if n < 0 else ("　" if n else "⚠️"))
+        cnt = "  影片  " if n == -2 else ("讀取失敗" if n < 0 else f"{n:>5} 張")
         print(f"{mark} {f.name:<{w}}  {cnt}  {note}")
     print(f"\n合計 {total} 張圖，{len(rows)} 份文件")
+    vids = [f.name for f, n, _ in rows if n == -2]
+    if vids:
+        print(f"🎬 {len(vids)} 份是影片，**畫面資訊不在這支的統計裡**——"
+              f"走 `/video-to-md` 抽幀，不可當作沒有圖")
     zero = [f.name for f, n, _ in rows if n == 0]
     if zero:
         print(f"⚠️  這 {len(zero)} 份實測 0 張：{'、'.join(zero[:5])}"

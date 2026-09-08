@@ -16,8 +16,11 @@ MM 2026-09-08 拍板：以後 doc-vlm-to-md 的產出全部往一個地方倒，
 import argparse, os, pathlib, shutil, sys
 
 # 進版控：可 diff、校正時要用
+# 2026-09-08 補 GLOB：kb_prep.py 產出的檔名是 <書名>_完整知識庫.md，
+# 不叫 cleaned.md——原本只認固定檔名，害試跑的 agent 得先改名才能同步。
 TRACKED = ["cleaned.md", "extracted.md", "figures.json",
            "metadata.json", "context.txt", "corrections.txt", "corrections.json"]
+TRACKED_GLOB = ["*_完整知識庫.md", "*_with_figs.md", "cleaned_with_figs.md"]
 # 不進版控但要留本機：核對版面用
 UNTRACKED_DIRS = ["images"]
 
@@ -40,13 +43,13 @@ def corpus_root(explicit=None):
 def sync_one(src: pathlib.Path, root: pathlib.Path, dry=False):
     dst = root / src.name
     files = imgs = 0
-    for f in TRACKED:
-        s = src / f
-        if not s.exists():
-            continue
+    picked = [src / f for f in TRACKED if (src / f).exists()]
+    for pat in TRACKED_GLOB:
+        picked += [q for q in sorted(src.glob(pat)) if q.is_file() and q not in picked]
+    for s in picked:
         if not dry:
             dst.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(s, dst / f)
+            shutil.copy2(s, dst / s.name)
         files += 1
     for d in UNTRACKED_DIRS:
         s = src / d
@@ -84,7 +87,9 @@ def main(argv):
         else:
             sessions.append(p)
     # 沒有語料檔的目錄不是 session，跳過但要說出來
-    real = [s for s in sessions if any((s / f).exists() for f in TRACKED)]
+    real = [s for s in sessions
+            if any((s / f).exists() for f in TRACKED)
+            or any(s.glob(pat) for pat in TRACKED_GLOB)]
     skipped = [s for s in sessions if s not in real]
 
     print(f"語料倉：{root}{'　（--dry-run，不會真的寫）' if a.dry_run else ''}\n")
