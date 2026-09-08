@@ -54,8 +54,14 @@ ASR_DEFAULTS = {
 
 
 def sh(cmd: list[str], **kw) -> subprocess.CompletedProcess:
-    """跑一個指令,失敗就帶 stderr 中止。"""
-    p = subprocess.run(cmd, capture_output=True, text=True, **kw)
+    """跑一個指令,失敗就帶 stderr 中止。
+
+    ⚠️ errors="replace" 是必要的,不是保險:whisper.cpp 會在緩衝邊界吐出半個
+    多位元組字元,text=True 的預設 strict 解碼會直接 UnicodeDecodeError,
+    讓整集轉錄失敗(2026-09-08 第 46 集實踩,重跑兩次都同一個位置)。
+    轉錄結果本身走 JSON 檔不走 stdout,所以這裡替換掉壞位元組不影響產物。
+    """
+    p = subprocess.run(cmd, capture_output=True, text=True, errors="replace", **kw)
     if p.returncode != 0:
         print(f"[transcribe-llmnode] FAILED: {' '.join(cmd[:3])}…\n{p.stderr[-2000:]}",
               file=sys.stderr)

@@ -104,13 +104,30 @@ def redistribute(punctuated: str, cue_texts: list[str]) -> list[str]:
     return out
 
 
+def density(texts: list[str]) -> float:
+    """每 N 字一個標點；N 越小標點越密。無標點時回傳很大的數。"""
+    flat = "".join(texts)
+    n = len([c for c in flat if c not in PUNCT and c not in WS])
+    p = len([c for c in flat if c in PUNCT])
+    return n / p if p else float("inf")
+
+
 def process(path: pathlib.Path, out_path: pathlib.Path, url: str, model: str,
-            token: str, chunk_chars: int, dry: bool) -> bool:
+            token: str, chunk_chars: int, dry: bool, threshold: float = 60.0) -> bool:
     blocks = parse_srt(path)
     if not blocks:
         print(f"  ❌ 解析不到 cue：{path}", file=sys.stderr)
         return False
     cue_texts = ["".join(b[2]) for b in blocks]
+
+    # ⚠️ 已經有標點的檔案一律跳過,不要重跑。
+    # 硬檢查（剝掉標點後字元序列相同）擋得住「改字」,但擋不住「重複標點」——
+    # 「，，」剝掉之後與「，」相同,會通過驗證。所以重跑已補好的檔案是有風險的,
+    # 唯一安全的做法是不要重跑（2026-09-08 差點實踩）。
+    d0 = density(cue_texts)
+    if d0 <= threshold:
+        print(f"  ⏭  已達標（每 {d0:.1f} 字一個標點），跳過")
+        return True
 
     # 以 cue 為單位切 chunk，不切在句子中間
     chunks, cur, cur_len = [], [], 0
@@ -141,6 +158,12 @@ def process(path: pathlib.Path, out_path: pathlib.Path, url: str, model: str,
             return
         a, b = strip_marks(flat), strip_marks(got)
         if a == b:
+            # 剝標點比對擋不住「重複標點」（「，，」剝完與「，」相同），單獨擋一次
+            dbl = re.findall(r"[。，、！？；：]{2,}", got)
+            if dbl:
+                print(f"  ⚠️  輸出有 {len(dbl)} 處重複標點（如 {dbl[0]}），保留原文", flush=True)
+                stats["failed"] += 1
+                return
             for j, t in zip(idxs, redistribute(got, [cue_texts[i] for i in idxs])):
                 new_texts[j] = t
             stats["ok"] += 1
