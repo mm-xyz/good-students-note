@@ -235,6 +235,7 @@ def write_cutplan_md(blocks: list[dict], path: Path, slug: str, srt_name: str,
         "> block 行**複製貼上**進來(可重複、順序自訂,每段自帶淡入淡出);",
         "> `## ➕ 檔名 gain=auto start= end= fade= tempo=`=插入外部補錄語音"
         "(事後補錄、不在 source 時間軸上;gain=auto 自動對齊電平,ADR 0011);",
+        "> `## 🔇 秒數  說明`=從 source.wav 自動挑合格室噪窗插入(不使用數位靜音);",
         "> `## 🎵 檔名 fadein= fadeout= lead= tail= start= end=`=BGM overlay 疊接",
         "> (檔名可只寫 opening/break/ending 前綴,共用素材庫自動匹配;二段式 ducking",
         "> 包絡見 CLAUDE.md 原則 11)。典型結構:🎬集錦 → 🎵opening → 正文 → 🎵break",

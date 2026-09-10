@@ -29,7 +29,8 @@ from render_cut import (parse_program, parse_strikes, strike_removals,  # noqa: 
                         pause_removals, word_guard, subtract, merge_ranges,
                         snap_boundaries, validate_program, bgm_envelope,
                         env_to_expr, resolve_music, extend_unit_edges,
-                        enforce_monotonic, structure_anchors)
+                        enforce_monotonic, structure_anchors, choose_roomtone,
+                        RoomtoneError)
 
 
 class TestEnforceMonotonic(unittest.TestCase):
@@ -183,6 +184,98 @@ class TestParseProgram(unittest.TestCase):
     def test_cutplan_heading_not_a_chapter(self):
         prog = self._parse("## Cutplan 說明\n- [x] B0001 [0:00–0:01] [S] 句\n")
         self.assertEqual([it["kind"] for it in prog], ["block"])
+
+    def test_roomtone_line_keeps_duration_and_note(self):
+        prog = self._parse("## 🔇 1.0  開場→正題留白\n")
+        self.assertEqual(prog, [{"kind": "roomtone", "duration": 1.0,
+                                "note": "開場→正題留白"}])
+
+    def test_roomtone_missing_or_invalid_duration_fails_loudly(self):
+        for line in ("## 🔇  說明沒有秒數\n", "## 🔇 nope  說明\n",
+                     "## 🔇 0  不可為零\n"):
+            with self.subTest(line=line), self.assertRaises(ValueError) as ctx:
+                self._parse(line)
+            self.assertIn("## 🔇", str(ctx.exception))
+
+    def test_roomtone_config_accepts_negative_absolute_dbfs_values(self):
+        prog = self._parse("## ⚙ roomtone-max-db=-55 roomtone-voice-db=-60 "
+                           "roomtone-track-db=-45 roomtone-word-margin=0.3\n")
+        self.assertEqual(prog[0]["params"], {"roomtone-max-db": "-55",
+                                             "roomtone-voice-db": "-60",
+                                             "roomtone-track-db": "-45",
+                                             "roomtone-word-margin": "0.3"})
+
+
+class TestRoomtoneSelection(unittest.TestCase):
+    def _candidate(self, start=10.0, end=12.0, full=-63.5, voice=-69.1,
+                   track=-50.8):
+        return {"start": start, "end": end, "full_db": full,
+                "voice_db": voice, "track_max_db": track}
+
+    def test_qualified_window_is_selected(self):
+        chosen = choose_roomtone([self._candidate()], [], 1.0)
+        self.assertEqual(chosen["start"], 10.0)
+        self.assertAlmostEqual(chosen["end"], 11.0)
+
+    def test_voice_band_over_threshold_is_rejected(self):
+        bad = self._candidate(voice=-43.5)
+        with self.assertRaises(RoomtoneError) as ctx:
+            choose_roomtone([bad], [], 1.0)
+        self.assertIn("人聲帶", str(ctx.exception))
+        self.assertIn("-43.5", str(ctx.exception))
+
+    def test_quiet_mixdown_but_loud_track_is_rejected(self):
+        # 回歸 EP18 事故:混音看似安靜,但單支麥 max 已經有小聲人聲。
+        bad = self._candidate(full=-63.5, voice=-69.1, track=-30.1)
+        with self.assertRaises(RoomtoneError) as ctx:
+            choose_roomtone([bad], [], 1.0)
+        self.assertIn("分軌", str(ctx.exception))
+        self.assertIn("-30.1", str(ctx.exception))
+
+    def test_word_margin_is_required_on_both_sides(self):
+        words = [{"start": 0.0, "end": 0.8, "word": "前句"},
+                 {"start": 2.2, "end": 2.8, "word": "後句"}]
+        bad = self._candidate(start=1.0, end=2.0)
+        with self.assertRaises(RoomtoneError) as ctx:
+            choose_roomtone([bad], words, 1.0, word_margin=0.3)
+        self.assertIn("words.json", str(ctx.exception))
+
+    def test_all_candidates_fail_report_measurements_and_reasons(self):
+        candidates = [
+            self._candidate(full=-40.0, voice=-50.0, track=-30.0),
+            self._candidate(start=20.0, end=22.0, full=-60.0,
+                           voice=-59.0, track=-50.0),
+            self._candidate(start=30.0, end=31.0, full=-63.0,
+                           voice=-69.0, track=-50.0),
+        ]
+        with self.assertRaises(RoomtoneError) as ctx:
+            choose_roomtone(candidates, [], 1.5)
+        msg = str(ctx.exception)
+        self.assertIn("候選", msg)
+        self.assertIn("-40.0", msg)
+        self.assertIn("-50.0", msg)
+        self.assertIn("最長只有 1.0 秒", msg)
+
+    def test_present_track_that_cannot_be_measured_is_rejected(self):
+        """有 tracks/ 但某一支量不到 → 不可默認放行。
+
+        這是 EP18 事故的同一類失效:檢查看起來在跑,實際上靜默通過。量不到
+        (檔案壞掉/窗超出該軌長度)時,我們對「那支麥當下有沒有人聲」一無所知,
+        必須當成不合格,不是當成安靜。
+        """
+        bad = dict(self._candidate())
+        bad["tracks_present"] = True
+        bad["track_values"] = [("Mars.WAV", -57.1), ("KIN.WAV", None)]
+        bad["track_max_db"] = -57.1
+        with self.assertRaises(RoomtoneError) as ctx:
+            choose_roomtone([bad], [], 1.0)
+        msg = str(ctx.exception)
+        self.assertIn("分軌量不到", msg)
+        self.assertIn("KIN.WAV", msg)
+
+    def test_no_track_metric_is_explicitly_skipped(self):
+        chosen = choose_roomtone([self._candidate(track=None)], [], 1.0)
+        self.assertIsNone(chosen["track_max_db"])
 
 
 class TestParseStrikes(unittest.TestCase):
@@ -472,6 +565,49 @@ class TestDryRunE2E(unittest.TestCase):
                   if l.strip().startswith("speech")]
         # B0001+B0002 併一個 unit,刪「二」切成兩段;B0003 沒勾不出現
         self.assertEqual(len(speech), 2)
+
+    def test_roomtone_follows_document_order_and_reuses_source_window(self):
+        with tempfile.TemporaryDirectory() as td:
+            sdir = self._make_session(td)
+            # source 軸 2.0–5.0 是室噪候選；前後 words 留白剛好足夠。
+            write_wav(sdir / "source.wav", 6.0,
+                      bursts=[(0.0, 2.0), (5.0, 6.0)], amp=12000)
+            md = sdir / "cutplan.md"
+            md.write_text(md.read_text(encoding="utf-8").replace(
+                "- [x] B0002", "## 🔇 1.0  開場→正題留白\n- [x] B0002"),
+                encoding="utf-8")
+            proc = self._render(sdir)
+        self.assertEqual(proc.returncode, 0, proc.stderr or proc.stdout)
+        self.assertIn("無分軌，跳過分軌檢查", proc.stdout)
+        lines = [l.strip() for l in proc.stdout.splitlines()
+                 if l.strip().startswith(("speech", "🔇 室噪"))]
+        room_i = next(i for i, line in enumerate(lines)
+                      if line.startswith("🔇 室噪 1.0s"))
+        self.assertGreater(room_i, 0, lines)
+        self.assertLess(room_i, len(lines) - 1, lines)
+        self.assertTrue(all(line.startswith("speech")
+                            for line in lines[:room_i] + lines[room_i + 1:]),
+                        lines)
+
+    def test_roomtone_rejects_loud_track_even_when_source_is_quiet(self):
+        with tempfile.TemporaryDirectory() as td:
+            sdir = self._make_session(td)
+            write_wav(sdir / "source.wav", 6.0,
+                      bursts=[(0.0, 2.0), (5.0, 6.0)], amp=12000)
+            tracks = sdir / "tracks"
+            tracks.mkdir()
+            # 真正建立 tracks/，在合格的 source 室噪窗內放一個單軌事件。
+            write_wav(tracks / "Mars.WAV", 6.0,
+                      bursts=[(2.3, 3.3)], amp=12000)
+            md = sdir / "cutplan.md"
+            md.write_text(md.read_text(encoding="utf-8").replace(
+                "- [x] B0002", "## 🔇 1.0  應被分軌證據擋下\n- [x] B0002"),
+                encoding="utf-8")
+            proc = self._render(sdir)
+        self.assertNotEqual(proc.returncode, 0)
+        msg = proc.stdout + proc.stderr
+        self.assertIn("分軌 max", msg)
+        self.assertIn("Mars.WAV", msg)
 
     def test_audio_mixdown_rejected_on_a_mixdown_line_plan(self):
         """⚙ audio=mixdown 只在分軌決定層有意義,寫在混音線節目單上要擋下來。
