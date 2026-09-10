@@ -41,6 +41,12 @@ ARTIFACT_PHRASE_LENS = (2, 3, 4, 5, 6)  # 掃描的短語(n-gram)長度
 ARTIFACT_PHRASE_REPEAT_MIN = 4          # 同一短語連續出現幾次算迴圈
 
 
+# 新節目單預設掛的 show-kit(shared-material 底下的目錄名);樣板內容見
+# 該 kit 的 template.json。剪輯旋鈕不再寫死在這裡 —— 由樣板供,
+# 需要逐集微調時再在 ⚙ 那一行補上該鍵(明寫的贏過樣板)。
+DEFAULT_TEMPLATE = "水星貓的生活實驗室_v1"
+
+
 def detect_asr_artifact(text: str) -> str | None:
     """whisper 重複迴圈/亂碼偵測。回傳觸發原因,正常文字回傳 None。
 
@@ -242,9 +248,13 @@ def write_cutplan_md(blocks: list[dict], path: Path, slug: str, srt_name: str,
         "> → 正文 → 🎵ending。",
         "> **⚙ config 區**(下一行):render 參數住這裡,吃鍵值覆蓋 CLI 預設,",
         "> 可用鍵=render_cut.py 的數值型旋鈕(dash 寫法)。",
+        "> `template=<kit>`=節目樣板(shared-material 底下的 show-kit 名),決定素材庫,",
+        "> 並提供**省略時**的預設值:`## 🎵 break` 不帶參數就全取樣板、",
+        "> `## 🎵 break end=20` 只覆蓋 end、`## 🔇` 不帶秒數就取樣板秒數;",
+        "> ⚙ 這一行明寫的旋鈕一律贏過樣板。",
         "> 出片:`python3 scripts/audio/render_cut.py --session sessions/<slug>`",
         "",
-        "## ⚙ clip-gap=0.5 bgm-duck=0.15 bgm-solo=0.55 max-pause=0.9",
+        f"## ⚙ template={DEFAULT_TEMPLATE}",
         "",
     ]
     gap_before: dict[str, list] = {}

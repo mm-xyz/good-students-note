@@ -30,7 +30,17 @@ from render_cut import (parse_program, parse_strikes, strike_removals,  # noqa: 
                         snap_boundaries, validate_program, bgm_envelope,
                         env_to_expr, resolve_music, extend_unit_edges,
                         enforce_monotonic, structure_anchors, choose_roomtone,
-                        RoomtoneError)
+                        RoomtoneError, load_template, apply_template,
+                        TemplateError)
+
+
+
+def parse_program_text(text: str) -> list[dict]:
+    """把一段 cutplan 文字丟進 parse_program(它吃 Path,測試常常只想給幾行)。"""
+    with tempfile.TemporaryDirectory() as td:
+        f = Path(td) / "cutplan.md"
+        f.write_text(text, encoding="utf-8")
+        return parse_program(f)
 
 
 class TestEnforceMonotonic(unittest.TestCase):
@@ -190,12 +200,26 @@ class TestParseProgram(unittest.TestCase):
         self.assertEqual(prog, [{"kind": "roomtone", "duration": 1.0,
                                 "note": "開場→正題留白"}])
 
-    def test_roomtone_missing_or_invalid_duration_fails_loudly(self):
-        for line in ("## 🔇  說明沒有秒數\n", "## 🔇 nope  說明\n",
-                     "## 🔇 0  不可為零\n"):
+    def test_roomtone_zero_or_negative_duration_fails_loudly(self):
+        for line in ("## 🔇 0  不可為零\n", "## 🔇 -1  不可為負\n"):
             with self.subTest(line=line), self.assertRaises(ValueError) as ctx:
                 self._parse(line)
             self.assertIn("## 🔇", str(ctx.exception))
+
+    def test_roomtone_without_seconds_parses_as_pending(self):
+        """秒數省略不是錯 —— 2026-09-10 起由 `## ⚙ template=` 的樣板補。
+
+        解析階段只留 duration=None;兩條路都沒有時,由 apply_template 丟
+        TemplateError(見 TestTemplate)。這裡守的是「不可以在解析就炸掉」,
+        否則帶 template 的節目單根本走不到補值那一步。
+        """
+        for line, note in (("## 🔇  回正題留白\n", "回正題留白"),
+                           ("## 🔇\n", "")):
+            with self.subTest(line=line):
+                it = self._parse(line)[0]
+                self.assertEqual(it["kind"], "roomtone")
+                self.assertIsNone(it["duration"])
+                self.assertEqual(it["note"], note)
 
     def test_roomtone_config_accepts_negative_absolute_dbfs_values(self):
         prog = self._parse("## ⚙ roomtone-max-db=-55 roomtone-voice-db=-60 "
@@ -947,6 +971,111 @@ class TestInsertRender(TestDryRunE2E):
             proc = self._render(self._make_session(td))
         self.assertEqual(proc.returncode, 0, proc.stderr or proc.stdout)
         self.assertNotIn("➕", proc.stdout)
+
+
+class TestTemplate(unittest.TestCase):
+    """`## ⚙ template=<kit>` — 節目樣板提供「省略時的預設參數」。
+
+    刻意不是產生器硬塞行:break 要插在哪一段之後是人審的編輯決定,產生器猜不到。
+    樣板只供參數,MM 把 `## 🎵 break` 放對位置就好。
+    """
+
+    def _kit(self, root: Path, name: str, **over) -> Path:
+        body = {
+            "config": {"clip-gap": 0.5, "bgm-duck": 0.15,
+                       "bgm-solo": 0.55, "max-pause": 0.9},
+            "music": {
+                "opening": {"start": 0, "end": 10, "fadein": 2,
+                            "fadeout": 3, "lead": 3, "tail": 3},
+                "break": {"start": 0, "end": 14, "fadein": 2,
+                          "fadeout": 2.5, "lead": 3, "tail": 2.5},
+                "ending": {"end": 20, "fadein": 2, "fadeout": 3, "lead": 3},
+            },
+            "roomtone": {"seconds": 1.0},
+        }
+        body.update(over)
+        d = root / name
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "template.json").write_text(json.dumps(body, ensure_ascii=False),
+                                         encoding="utf-8")
+        return d
+
+    def test_cjk_kit_name_parses_out_of_config_line(self):
+        prog = parse_program_text(
+            "## ⚙ template=水星貓的生活實驗室_v1 line=pertrack audio=mixdown\n")
+        cfg = [it for it in prog if it["kind"] == "config"][0]
+        self.assertEqual(cfg["params_raw"]["template"], "水星貓的生活實驗室_v1")
+
+    def test_bare_music_line_takes_every_template_param(self):
+        prog = parse_program_text("## 🎵 break\n")
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td); self._kit(root, "kit")
+            apply_template(prog, load_template(root, "kit"))
+        m = [it for it in prog if it["kind"] == "music"][0]
+        self.assertEqual(m["end"], 14)
+        self.assertEqual(m["tail"], 2.5)
+        self.assertEqual(m["fadeout"], 2.5)
+
+    def test_inline_param_overrides_only_itself(self):
+        """行內寫的只覆蓋自己那一項,其餘仍取樣板 —— 不是整組取代。"""
+        prog = parse_program_text("## 🎵 break end=20\n")
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td); self._kit(root, "kit")
+            apply_template(prog, load_template(root, "kit"))
+        m = [it for it in prog if it["kind"] == "music"][0]
+        self.assertEqual(m["end"], 20)          # 行內贏
+        self.assertEqual(m["tail"], 2.5)        # 其餘仍取樣板
+        self.assertEqual(m["lead"], 3)
+
+    def test_bare_roomtone_takes_template_seconds(self):
+        prog = parse_program_text("## 🔇  回正題留白\n")
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td); self._kit(root, "kit")
+            apply_template(prog, load_template(root, "kit"))
+        r = [it for it in prog if it["kind"] == "roomtone"][0]
+        self.assertEqual(r["duration"], 1.0)
+        self.assertEqual(r["note"], "回正題留白")
+
+    def test_roomtone_without_seconds_and_without_template_fails(self):
+        prog = parse_program_text("## 🔇\n")
+        with self.assertRaises(TemplateError) as ctx:
+            apply_template(prog, None)
+        msg = str(ctx.exception)
+        self.assertIn("秒數", msg)
+        self.assertIn("template", msg)      # 兩條路都要講出來
+
+    def test_unknown_kit_lists_available_kits(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            self._kit(root, "水星貓的生活實驗室_v1")
+            self._kit(root, "水星貓的生活實驗室_v2")
+            with self.assertRaises(TemplateError) as ctx:
+                load_template(root, "不存在的_v9")
+        msg = str(ctx.exception)
+        self.assertIn("不存在的_v9", msg)
+        self.assertIn("水星貓的生活實驗室_v1", msg)
+        self.assertIn("水星貓的生活實驗室_v2", msg)
+
+    def test_template_fills_only_omitted_config_knobs(self):
+        prog = parse_program_text("## ⚙ template=kit max-pause=0.2\n")
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td); self._kit(root, "kit")
+            filled = apply_template(prog, load_template(root, "kit"))
+        # 回傳的只該是「樣板有、cutplan 沒寫」的鍵 —— cutplan 明寫的不在裡面,
+        # 呼叫端才不可能不小心用樣板值蓋掉人審寫死的參數。
+        self.assertNotIn("max-pause", filled)
+        self.assertEqual(filled["clip-gap"], 0.5)
+        self.assertEqual(filled["bgm-duck"], 0.15)
+
+    def test_no_template_line_keeps_legacy_behaviour(self):
+        """既有 session 沒有 template= —— 行為必須一個字都不變。"""
+        prog = parse_program_text(
+            "## 🎵 break start=0 end=8 fadein=2 fadeout=3 lead=3 tail=3\n")
+        filled = apply_template(prog, None)
+        m = [it for it in prog if it["kind"] == "music"][0]
+        self.assertEqual(m["end"], 8)
+        self.assertEqual(m["tail"], 3)
+        self.assertEqual(filled, {})
 
 
 if __name__ == "__main__":

@@ -25,7 +25,8 @@ REPO_ROOT = AUDIO_DIR.parent.parent
 sys.path.insert(0, str(AUDIO_DIR))
 
 from cutplan import (build_blocks, build_gaps, refine_gaps, gap_line,  # noqa: E402
-                     detect_asr_artifact, flag_artifacts)
+                     detect_asr_artifact, flag_artifacts, write_cutplan_md,
+                     DEFAULT_TEMPLATE)
 from fixtures.ep16_artifact_samples import (  # noqa: E402
     B0068_ARTIFACT_TEXT, B0067_CLEAN_TEXT, B0001_CLEAN_TEXT)
 
@@ -349,6 +350,30 @@ class TestPrepareE2EArtifact(unittest.TestCase):
                 lines[m.group(1)] = l
         self.assertNotIn("⚠ASR-artifact", lines["B0001"])
         self.assertIn("⚠ASR-artifact", lines["B0002"])
+
+
+class TestGeneratedHeaderCarriesTemplate(unittest.TestCase):
+    """新節目單要自帶 `## ⚙ template=` —— 否則 render 用不到樣板,
+    每一集又要手抄一次 🎵/🔇 的參數(這正是 EP18 手抄手抄抄出事故的起點)。
+    """
+
+    def _header(self) -> str:
+        blocks = [{"id": "B0001", "start": 0.0, "end": 1.0, "speaker": "Sarah",
+                   "text": "第一句。", "keep": True, "reason": "", "cue_idx": [1]}]
+        with tempfile.TemporaryDirectory() as td:
+            f = Path(td) / "cutplan.md"
+            write_cutplan_md(blocks, f, "ep-test", "transcript.srt")
+            return f.read_text(encoding="utf-8")
+
+    def test_config_line_declares_the_default_template(self):
+        cfg = [l for l in self._header().splitlines() if l.startswith("## ⚙")]
+        self.assertEqual(len(cfg), 1, cfg)
+        self.assertIn(f"template={DEFAULT_TEMPLATE}", cfg[0])
+
+    def test_legend_explains_omit_means_take_template(self):
+        head = self._header()
+        self.assertIn("template=<kit>", head)
+        self.assertIn("不帶秒數", head)      # 🔇 省略秒數的語意要寫出來
 
 
 if __name__ == "__main__":

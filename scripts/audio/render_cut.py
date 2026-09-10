@@ -35,7 +35,8 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 # 2026-08-10 MM:節目音樂用 v1(三首各自的正式曲——開場 Park Avenue、
 # 中場 just fun、片尾 to many mind);v2 的三個檔其實是同一首複製三份的佔位。
 # 檔名尾巴標了建議取用區間(`M開_00：00-00：10`),cutplan 的 start=/end= 照它設。
-MATERIAL_DIR = PROJECT_ROOT / "shared-material" / "水星貓的生活實驗室_v1"
+MATERIAL_ROOT = PROJECT_ROOT / "shared-material"
+MATERIAL_DIR = MATERIAL_ROOT / "水星貓的生活實驗室_v1"
 # 兩碼前綴 = 分軌 block(MR/SR/KN…);單碼 B/G = 混音線;單碼 S = 補錄插入。
 # Sarah 的軌前綴不能只用「S」——會跟 insert_prepare 產的 S0001 撞號。
 LINE_RE = re.compile(r"^- \[( |x|X)\] ([A-Z]{1,2}\d{3,5}) \[([^\]]+)\] (.*)$")
@@ -64,6 +65,62 @@ def resolve_music(token: str, sdir: Path, material_dir: Path) -> Path | None:
         if hits:
             return hits[0]
     return None
+
+
+class TemplateError(Exception):
+    """`## ⚙ template=` 的樣板問題(找不到 kit、樣板沒給該補的值)。"""
+
+
+def load_template(root: Path, kit: str) -> dict:
+    """讀 `<root>/<kit>/template.json`。找不到就 FAIL 並列出有哪些 kit。"""
+    f = root / kit / "template.json"
+    if not f.is_file():
+        avail = sorted(d.name for d in root.iterdir()
+                       if d.is_dir() and (d / "template.json").is_file()) \
+            if root.is_dir() else []
+        raise TemplateError(
+            f"template=「{kit}」找不到樣板({f});"
+            + (f"可用的 kit:{'、'.join(avail)}" if avail
+               else f"{root} 底下沒有任何帶 template.json 的 kit"))
+    try:
+        return json.loads(f.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as e:
+        raise TemplateError(f"template=「{kit}」的 template.json 壞掉:{e}") from e
+
+
+def apply_template(program: list[dict], tpl: dict | None) -> dict:
+    """把樣板值補進**省略了該參數**的結構行,回傳補進 ⚙ 的旋鈕。
+
+    核心語意:樣板是「省略時的預設」,不是整組取代 ——
+    `## 🎵 break` 全取樣板;`## 🎵 break end=20` 只有 end 用行內值,其餘仍取樣板。
+    這樣「break 插在哪一段之後」仍然是人審的編輯決定,產生器不必猜。
+    """
+    music_tpl = (tpl or {}).get("music", {})
+    filled_config: dict = {}
+    for it in program:
+        if it["kind"] == "music":
+            defaults = music_tpl.get(it["file"], {})
+            for key, value in defaults.items():
+                if key in it.get("explicit", ()):    # 行內寫了就不動
+                    continue
+                if key in ("start", "end", "fadein", "fadeout", "lead", "tail"):
+                    it[key] = value
+        elif it["kind"] == "roomtone" and it.get("duration") is None:
+            secs = (tpl or {}).get("roomtone", {}).get("seconds")
+            if secs is None:
+                raise TemplateError(
+                    "## 🔇 沒寫秒數,而且也沒有可用的樣板秒數 —— "
+                    "要嘛寫成 `## 🔇 1.0`,要嘛在 ⚙ 加 template=<kit> "
+                    "且該 kit 的 template.json 有 roomtone.seconds")
+            it["duration"] = float(secs)
+    # ⚙ 旋鈕:**只回傳樣板有、而 cutplan 沒寫**的那些(優先序規則住這裡,
+    # 不住呼叫端 —— 住這裡才測得到)。
+    written = {k for it in program if it["kind"] == "config"
+               for k in it["params"]}
+    for key, value in (tpl or {}).get("config", {}).items():
+        if key not in written:
+            filled_config[key] = value
+    return filled_config
 
 
 MUSIC_RE = re.compile(r"^##\s*🎵\s*(\S+)((?:\s+\w+=[\d.]+)*)\s*$")
@@ -444,6 +501,7 @@ def parse_program(path: Path) -> list[dict]:
         if mm_:
             params = dict(re.findall(r"(\w+)=([\d.]+)", mm_.group(2) or ""))
             program.append({"kind": "music", "file": mm_.group(1),
+                            "explicit": set(params),
                             "fadein": float(params.get("fadein", 1.0)),
                             "fadeout": float(params.get("fadeout", 1.5)),
                             "lead": float(params.get("lead", 0.0)),
@@ -470,18 +528,25 @@ def parse_program(path: Path) -> list[dict]:
         mr = ROOMTONE_RE.match(s)
         if mr:
             body = mr.group(1).strip()
-            if not body:
-                raise ValueError("## 🔇 缺少秒數；格式是 `## 🔇 <秒數> <說明>`")
-            parts = body.split(None, 1)
-            try:
-                duration = float(parts[0])
-            except ValueError as e:
-                raise ValueError(f"## 🔇 秒數不合法「{parts[0]}」；"
-                                 "格式是 `## 🔇 <秒數> <說明>`") from e
-            if not math.isfinite(duration) or duration <= 0:
-                raise ValueError(f"## 🔇 秒數必須是大於 0 的數字，不是「{parts[0]}」")
+            # 秒數可省略 —— 省略時由 `## ⚙ template=` 的樣板補(apply_template)。
+            # 兩條路都沒有才 FAIL,訊息要把兩條路都講出來。
+            parts = body.split(None, 1) if body else []
+            duration = None
+            note = ""
+            if parts:
+                try:
+                    duration = float(parts[0])
+                except ValueError:
+                    duration = None          # 第一個 token 不是數字 → 整串當說明
+                if duration is None:
+                    note = body
+                else:
+                    if not math.isfinite(duration) or duration <= 0:
+                        raise ValueError(
+                            f"## 🔇 秒數必須是大於 0 的數字，不是「{parts[0]}」")
+                    note = parts[1].strip() if len(parts) > 1 else ""
             program.append({"kind": "roomtone", "duration": duration,
-                            "note": parts[1].strip() if len(parts) > 1 else ""})
+                            "note": note})
             clip_mode = False
             cur_insert = None
             continue
@@ -1114,6 +1179,9 @@ def main():
                     help="人聲進場前幾秒開始把 solo 降回 duck(預設 2.0)")
     ap.add_argument("--bgm-rise", type=float, default=1.5,
                     help="人聲結束後 BGM 從 duck 升到 solo 的秒數(預設 1.5)")
+    ap.add_argument("--material-root", type=Path, default=MATERIAL_ROOT,
+                    help="show-kit 根目錄(`## ⚙ template=<kit>` 在這底下找;"
+                         "預設 shared-material/)")
     ap.add_argument("--material-dir", type=Path, default=MATERIAL_DIR,
                     help="共用素材庫(🎵 檔名找不到時在此做前綴匹配;"
                          "預設 shared-material/水星貓的生活實驗室_v1)")
@@ -1237,8 +1305,35 @@ def main():
             args.mixdown_audio = (want == "mixdown")
             print(f"[render] ⚙ audio={want}(cutplan 指定)")
 
+    # ── ⚙ template=<kit>:節目樣板 ──
+    # 樣板只供「省略時的預設」——素材庫位置、🎵 各段參數、🔇 秒數、⚙ 旋鈕。
+    # cutplan 沒寫 template= 就完全走舊路(既有 session 行為一個字都不變)。
+    kit = None
+    for it in program:
+        if it["kind"] == "config" and "template" in it.get("params_raw", {}):
+            kit = it["params_raw"]["template"]
+    tpl = None
+    if kit:
+        try:
+            tpl = load_template(args.material_root, kit)
+        except TemplateError as e:
+            sys.exit(f"[render] FAIL: {e}")
+        # cutplan 是參數真相源:template 指定的素材庫蓋過 CLI/預設
+        args.material_dir = args.material_root / kit
+        print(f"[render] ⚙ template={kit}(素材庫 {args.material_dir.name})")
+    try:
+        tpl_config = apply_template(program, tpl)
+    except TemplateError as e:
+        sys.exit(f"[render] FAIL: {e}")
+
     # ── ⚙ config 區:cutplan 是參數真相源,覆蓋 CLI/預設 ──
     applied = {}
+    # tpl_config 已經只剩「樣板有、cutplan 沒寫」的鍵(優先序在 apply_template)
+    for k, v in tpl_config.items():
+        attr = k.replace("-", "_")
+        if attr in CONFIG_KEYS:
+            setattr(args, attr, float(v))
+            applied[f"{k}(樣板)"] = v
     for it in program:
         if it["kind"] != "config":
             continue
