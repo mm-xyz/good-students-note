@@ -118,6 +118,21 @@ node --test "scripts/cutplan-editor/tests/**/*.test.js"
    之後更新:`clasp push --force && clasp deploy -i <deployment id> -d "vN"`
    ——同一個 deployment id 重部署,網址不變。
 
+   **`.clasp.json` 掉了怎麼救**(它含個人 scriptId、刻意不進版控,換機／重 clone
+   之後就會不見):**不要跑 `clasp create`** —— 那會新建一個專案、拿到新網址,
+   手機上的舊書籤還指著舊部署,兩邊靜默分岔。改用兩個唯讀指令撈回來:
+
+   ```
+   clasp list-scripts        # 找 "cutplan editor" 那一行的 scriptId
+   clasp list-deployments    # 固定網址是 @N 那個(不是 @HEAD),記下它的 id
+   ```
+
+   然後手寫回 `.clasp.json`:`{"scriptId": "...", "rootDir": "."}`。
+
+   **`clasp push --force` 會用本機檔覆蓋線上專案**,推之前先確認沒有人直接在
+   Apps Script 網頁編輯器改過:把 `.clasp.json` 複製到一個暫存空目錄跑
+   `clasp pull`,再跟本機／git 版本逐檔 diff。相同才推。
+
    **2026-08-11 clasp 3.3.0 實測踩到的三個坑**(照上面的指令就避開了):
    1. **`--type webapp` 已不存在**。clasp 3.x 的 `--type` 只收
       `docs`/`forms`/`sheets`/`slides`/`standalone`(見 clasp 安裝目錄的
