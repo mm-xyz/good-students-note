@@ -73,11 +73,248 @@ CUT_RE = re.compile(r"^##\s*✂\s*([\d:.]+)\s*[-–~]\s*([\d:.]+)\s*(.*)$")
 # `## ➕ 檔案 [gain=auto|±dB start= end= fade= tempo=0|1]  說明` — 插入外部語音檔
 # (補錄)。檔案不在 source 的時間軸上,所以走自己的 ffmpeg input,不吃 atrim 主軌。
 INSERT_RE = re.compile(r"^##\s*➕\s*(\S+)((?:\s+\w+=[\w.+-]+)*)\s*(.*)$")
+# `## 🔇 秒數  說明` — 從 source.wav 複用同一場錄音的室噪,不是數位靜音。
+ROOMTONE_RE = re.compile(r"^##\s*🔇\s*(.*)$")
 # cutplan ⚙ config 區可覆蓋的數值旋鈕(dash 寫法;config > CLI/預設)
 CONFIG_KEYS = {"clip_gap", "clip_fade_in", "clip_fade_out", "music_speech_fade",
                "bgm_duck", "bgm_solo", "bgm_predrop", "bgm_rise",
                "max_pause", "pause_keep", "crossfade", "snap_window", "fade",
-               "tempo", "music_lead_max"}
+               "tempo", "music_lead_max", "roomtone_word_margin",
+               "roomtone_max_db", "roomtone_voice_db", "roomtone_track_db"}
+
+
+class RoomtoneError(ValueError):
+    """室噪候選沒有任何一個同時通過全部判準。"""
+
+
+def _db_text(value: float | None) -> str:
+    if value is None:
+        return "量不到"
+    if math.isinf(value) and value < 0:
+        return "-inf"
+    return f"{value:.1f}"
+
+
+def _fmt_roomtone_ts(sec: float) -> str:
+    """室噪證據用到百分之一秒，避免 fmt_mmss 丟掉來源窗的精度。"""
+    minutes, seconds = divmod(max(0.0, sec), 60.0)
+    if minutes >= 60:
+        hours, minutes = divmod(int(minutes), 60)
+        return f"{hours}:{minutes:02d}:{seconds:05.2f}"
+    return f"{int(minutes)}:{seconds:05.2f}"
+
+
+def _roomtone_word_failures(start: float, end: float, words: list[dict] | None,
+                            margin: float) -> list[str]:
+    if words is None:
+        return ["缺 words.json，無法證明窗前後留白"]
+    failures = []
+    inside = [w for w in words
+              if float(w["end"]) > start + 1e-6
+              and float(w["start"]) < end - 1e-6]
+    if inside:
+        failures.append("窗內有 words.json 字詞")
+    previous = [float(w["end"]) for w in words if float(w["end"]) <= start]
+    following = [float(w["start"]) for w in words if float(w["start"]) >= end]
+    if previous and start - max(previous) < margin - 1e-6:
+        failures.append(f"words.json 窗前留白 {start - max(previous):.2f}s "
+                        f"< {margin:.2f}s")
+    if following and min(following) - end < margin - 1e-6:
+        failures.append(f"words.json 窗後留白 {min(following) - end:.2f}s "
+                        f"< {margin:.2f}s")
+    return failures
+
+
+def _roomtone_candidate_failures(candidate: dict, words: list[dict] | None,
+                                 duration: float, word_margin: float,
+                                 max_db: float, voice_db: float,
+                                 track_db: float) -> list[str]:
+    start = float(candidate["start"])
+    available = max(0.0, float(candidate["end"]) - start)
+    end = min(float(candidate["end"]), start + duration)
+    failures = []
+    if available + 1e-6 < duration:
+        failures.append(f"長度不足(最長只有 {available:.1f} 秒)")
+    failures.extend(_roomtone_word_failures(start, end, words, word_margin))
+    full = candidate.get("full_db")
+    voice = candidate.get("voice_db")
+    track = candidate.get("track_max_db")
+    if full is None or full > max_db:
+        failures.append(f"全頻 {_db_text(full)} > {max_db:.1f} dBFS")
+    if voice is None or voice > voice_db:
+        failures.append(f"人聲帶 {_db_text(voice)} > {voice_db:.1f} dBFS")
+    # 沒有 tracks/ 才跳過第 5 條；有分軌但某支量不到不能默認放行。
+    missing_tracks = [name for name, value in candidate.get("track_values", [])
+                      if value is None]
+    if candidate.get("tracks_present") and missing_tracks:
+        failures.append("分軌量不到: " + "、".join(missing_tracks))
+    if track is not None and track > track_db:
+        failures.append(f"分軌 max {_db_text(track)} > {track_db:.1f} dBFS")
+    return failures
+
+
+def choose_roomtone(candidates: list[dict], words: list[dict] | None,
+                    duration: float, word_margin: float = 0.3,
+                    max_db: float = -55.0, voice_db: float = -60.0,
+                    track_db: float = -45.0) -> dict:
+    """依人聲帶 mean_volume 最低優先,挑一個通過全部室噪判準的窗。
+
+    candidates 的 start/end 已是 silencedetect 候選往內縮 0.3s 後的可用窗,
+    full_db/voice_db/track_max_db 是該窗(最長需求秒數)的實測 dBFS。這個
+    純函式讓候選排序與拒絕理由可以不依賴 ffmpeg 做回歸測試。
+    """
+    ordered = sorted(candidates,
+                     key=lambda c: (float("inf")
+                                    if c.get("voice_db") is None
+                                    else c["voice_db"]))
+    report = []
+    for c in ordered:
+        failures = _roomtone_candidate_failures(
+            c, words, duration, word_margin, max_db, voice_db, track_db)
+        report.append((c, failures))
+        if not failures:
+            chosen = dict(c)
+            chosen["end"] = float(c["start"]) + duration
+            chosen["duration"] = duration
+            return chosen
+
+    lines = ["沒有任何候選室噪窗通過全部判準"]
+    if not report:
+        lines.append("silencedetect 沒找到候選")
+    else:
+        lines.append("最佳 3 個候選的實測值與未過項目:")
+        for c, failures in report[:3]:
+            track = ("無分軌，跳過分軌檢查"
+                     if not c.get("tracks_present")
+                     else f"分軌 max {_db_text(c.get('track_max_db'))} dBFS"
+                          + (f" ({c['track_max_name']})"
+                             if c.get("track_max_name") else ""))
+            if c.get("tracks_present") and c.get("track_max_db") is None:
+                track = "分軌量不到"
+            lines.append(
+                f"  source {c['start']:.2f}–{c['end']:.2f}s: "
+                f"全頻 {_db_text(c.get('full_db'))} / "
+                f"人聲帶 {_db_text(c.get('voice_db'))} / {track}; "
+                f"未過: {'、'.join(failures)}")
+    raise RoomtoneError("; ".join(lines))
+
+
+def _parse_volumedetect(stderr: str, field: str) -> float | None:
+    m = re.findall(rf"{field}:\s*(-?(?:\d+(?:\.\d+)?|inf))\s*dB", stderr)
+    if not m:
+        return None
+    return float("-inf") if m[-1] == "-inf" else float(m[-1])
+
+
+def measure_roomtone_window(path: Path, start: float, end: float,
+                            voice_band: bool = False,
+                            peak: bool = False) -> float | None:
+    """以 volumedetect 量指定 source 窗的絕對 dBFS(mean 或 max)。"""
+    af = f"atrim=start={start:.3f}:end={end:.3f},asetpts=PTS-STARTPTS"
+    if voice_band:
+        af += ",highpass=f=300,lowpass=f=3400"
+    af += ",volumedetect"
+    try:
+        proc = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-loglevel", "info", "-nostats",
+             "-i", str(path), "-af", af, "-f", "null", "-"],
+            capture_output=True, text=True, check=True)
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return None
+    return _parse_volumedetect(proc.stderr, "max_volume" if peak
+                               else "mean_volume")
+
+
+def _silencedetect(path: Path, min_duration: float) -> list[tuple[float, float]]:
+    duration = ffprobe_duration(path)
+    try:
+        proc = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-loglevel", "info", "-i", str(path),
+             "-af", f"silencedetect=noise=-45dB:d={min_duration:.3f}",
+             "-f", "null", "-"], capture_output=True, text=True, check=True)
+    except (subprocess.CalledProcessError, FileNotFoundError) as e:
+        raise RoomtoneError(f"silencedetect 讀取 source.wav 失敗: {e}") from e
+    starts = re.findall(r"silence_start:\s*(-?[\d.]+)", proc.stderr)
+    ends = re.findall(r"silence_end:\s*(-?[\d.]+)", proc.stderr)
+    spans = []
+    for i, raw_start in enumerate(starts):
+        start = float(raw_start)
+        end = float(ends[i]) if i < len(ends) else duration
+        if end > start:
+            spans.append((start, min(end, duration)))
+    return spans
+
+
+def _roomtone_candidates(source: Path, duration: float,
+                         tracks: list[Path]) -> list[dict]:
+    """找候選並量測；所有座標都刻意來自 source.wav。
+
+    **不能改成 .pertrack_bus.wav**：那是已剪過的輸出時間軸，而 words.json
+    與 cutplan 都在 source.wav 原始時間軸；混用會把「無字窗」切到另一段聲音。
+    """
+    spans = _silencedetect(source, duration + 0.6)
+    # 長度不足時再以較短探針收集候選，讓 FAIL 能明確說「最長只有 N 秒」。
+    if not spans:
+        spans = _silencedetect(source, 0.6)
+    candidates = []
+    for raw_start, raw_end in spans:
+        start, end = raw_start + 0.3, raw_end - 0.3
+        if end <= start:
+            continue
+        full = measure_roomtone_window(source, start, min(end, start + duration))
+        voice = measure_roomtone_window(source, start, min(end, start + duration),
+                                        voice_band=True)
+        track_values = [
+            (p.name, measure_roomtone_window(p, start,
+                                              min(end, start + duration), peak=True))
+            for p in tracks]
+        measured = [v for _name, v in track_values if v is not None]
+        max_track = max(((name, value) for name, value in track_values
+                         if value is not None), key=lambda pair: pair[1],
+                        default=(None, None))
+        candidates.append({
+            "start": start, "end": end,
+            "raw_start": raw_start, "raw_end": raw_end,
+            "full_db": full, "voice_db": voice,
+            "track_max_db": max(measured) if measured else None,
+            "track_max_name": max_track[0],
+            "track_values": track_values,
+            "tracks_present": bool(tracks),
+        })
+    return candidates
+
+
+def resolve_roomtone(source: Path, roomtones: list[dict], words: list[dict] | None,
+                     args: argparse.Namespace, tracks: list[Path]) -> dict:
+    """同一次 render 只挑一次,所有 🔇 標記重用同一個最長需求窗。"""
+    if not source.is_file():
+        sys.exit("[render] FAIL: ## 🔇 只允許從 session/source.wav 取室噪，"
+                 "找不到 source.wav；嚴禁使用 .pertrack_bus.wav")
+    if words is None:
+        sys.exit("[render] FAIL: ## 🔇 需要 session/words.json 才能檢查窗前後 "
+                 "至少 0.3s 無字")
+    longest = max(it["duration"] for it in roomtones)
+    if not tracks:
+        print("[render] 🔇 無分軌，跳過分軌檢查")
+    candidates = _roomtone_candidates(source, longest, tracks)
+    try:
+        chosen = choose_roomtone(
+            candidates, words, longest,
+            word_margin=args.roomtone_word_margin,
+            max_db=args.roomtone_max_db,
+            voice_db=args.roomtone_voice_db,
+            track_db=args.roomtone_track_db)
+    except RoomtoneError as e:
+        sys.exit(f"[render] FAIL: {e}")
+    chosen["source"] = source
+    chosen["longest"] = longest
+    track = ("無分軌" if chosen.get("track_max_db") is None
+             else f"{_db_text(chosen['track_max_db'])} dBFS")
+    print(f"[render] 🔇 選定室噪窗 ← source "
+          f"{_fmt_roomtone_ts(chosen['start'])}–{_fmt_roomtone_ts(chosen['end'])}"
+          f"(全頻 {_db_text(chosen['full_db'])} / 人聲帶 "
+          f"{_db_text(chosen['voice_db'])} / 分軌 max {track})")
+    return chosen
 
 
 def parse_ts(tok: str) -> float:
@@ -186,6 +423,8 @@ def parse_program(path: Path) -> list[dict]:
           時間戳把停頓吃進字的時長時,自動停頓收緊會被 word 保護擋下(EP16 12:00
           「臨時 任務」中間的 1.3s),這時直接標區間,不受 word_guard 攔阻。
       {"kind":"chapter", "title"}                    — 其他 `## 標題`
+      {"kind":"roomtone", "duration", "note"}       — `## 🔇 秒數 說明`,
+                                                          從 source.wav 取室噪
     raw = 去掉 speaker 前綴/行尾理由的正文,可能含 `~~刪除線~~`(對照 json 後才解析)。
     """
     program = []
@@ -195,7 +434,8 @@ def parse_program(path: Path) -> list[dict]:
         s = line.strip()
         mcfg = CONFIG_RE.match(s)
         if mcfg:
-            params = dict(re.findall(r"([\w-]+)=([\d.]+)", mcfg.group(1)))
+            numeric = r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)"
+            params = dict(re.findall(rf"([\w-]+)=({numeric})", mcfg.group(1)))
             raw = dict(re.findall(r"([\w-]+)=([\w.-]+)", mcfg.group(1)))
             program.append({"kind": "config", "params": params,
                             "params_raw": raw})
@@ -226,6 +466,24 @@ def parse_program(path: Path) -> list[dict]:
                             "tempo": float(params.get("tempo", 1.0)),
                             "note": mi.group(3).strip()})
             clip_mode = False
+            continue
+        mr = ROOMTONE_RE.match(s)
+        if mr:
+            body = mr.group(1).strip()
+            if not body:
+                raise ValueError("## 🔇 缺少秒數；格式是 `## 🔇 <秒數> <說明>`")
+            parts = body.split(None, 1)
+            try:
+                duration = float(parts[0])
+            except ValueError as e:
+                raise ValueError(f"## 🔇 秒數不合法「{parts[0]}」；"
+                                 "格式是 `## 🔇 <秒數> <說明>`") from e
+            if not math.isfinite(duration) or duration <= 0:
+                raise ValueError(f"## 🔇 秒數必須是大於 0 的數字，不是「{parts[0]}」")
+            program.append({"kind": "roomtone", "duration": duration,
+                            "note": parts[1].strip() if len(parts) > 1 else ""})
+            clip_mode = False
+            cur_insert = None
             continue
         mx = CUT_RE.match(s)
         if mx:
@@ -900,6 +1158,14 @@ def main():
     ap.add_argument("--room-tone-db", type=float, default=0.0,
                     help="分軌:room-tone 鋪底相對真實底噪的增益(dB)。"
                          "0=照真實電平鋪,底噪整集連續;停用用 --no-room-tone")
+    ap.add_argument("--roomtone-word-margin", type=float, default=0.3,
+                    help="🔇 室噪窗前後 words.json 留白門檻(秒;預設 0.3)")
+    ap.add_argument("--roomtone-max-db", type=float, default=-55.0,
+                    help="🔇 source.wav 全頻 mean_volume 上限(dBFS;預設 -55)")
+    ap.add_argument("--roomtone-voice-db", type=float, default=-60.0,
+                    help="🔇 300–3400Hz mean_volume 上限(dBFS;預設 -60)")
+    ap.add_argument("--roomtone-track-db", type=float, default=-45.0,
+                    help="🔇 每支分軌 max_volume 上限(dBFS;預設 -45)")
     ap.add_argument("--no-room-tone", action="store_true",
                     help="停用 room-tone 鋪底(全軌被 duck 的區間會掉到近數位靜音)")
     ap.add_argument("--track-offset", default="auto",
@@ -932,7 +1198,10 @@ def main():
     plan_path = sdir / args.plan
     if not plan_path.exists():
         sys.exit(f"[render] FAIL: 找不到節目單 {plan_path}")
-    program = parse_program(plan_path)
+    try:
+        program = parse_program(plan_path)
+    except ValueError as e:
+        sys.exit(f"[render] FAIL: {e}")
     # 分軌模式 = cutplan.json 有 tracks 區,而且節目單用的是逐軌 block(兩碼前綴)
     tk_prefix = {t["prefix"] for t in cp.get("tracks", [])}
     pertrack = bool(tk_prefix) and any(
@@ -1011,6 +1280,9 @@ def main():
 
     wp = sdir / "words.json"
     words = json.loads(wp.read_text(encoding="utf-8")) if wp.exists() else None
+    # 室噪的「窗內無字／前後留白」要對原始 words.json 做證據檢查；後面
+    # 為一般剪點丟棄 >3s 的 whisper artifact，不能讓那個方便措施放寬 🔇。
+    roomtone_words = words
     if words:
         # whisper 字級時間戳 artifact:單字橫跨十幾秒(EP15 的「好」718→735s),
         # 會讓 word_guard 把兩側剪點各推到假字頭尾 → 音訊重複;一律丟棄
@@ -1021,6 +1293,22 @@ def main():
                              for w in bad[:5])
                   + (f" …共 {len(bad)} 個" if len(bad) > 5 else ""))
             words = [w for w in words if w["end"] - w["start"] <= 3.0]
+
+    roomtone_items = [it for it in program if it["kind"] == "roomtone"]
+    roomtone_choice = None
+    if roomtone_items:
+        # 室噪只准從 source.wav 取。絕不能改用 .pertrack_bus.wav：後者是已剪過
+        # 的輸出時間軸，而 words.json/cutplan 的座標是 source.wav 原始時間軸。
+        roomtone_source = sdir / "source.wav"
+        track_dir = sdir / "tracks"
+        track_paths = sorted(set(track_dir.glob("*.WAV"))
+                             | set(track_dir.glob("*.wav")))
+        roomtone_choice = resolve_roomtone(
+            roomtone_source, roomtone_items, roomtone_words, args, track_paths)
+        for it in roomtone_items:
+            it["source"] = roomtone_choice["source"]
+            it["source_start"] = roomtone_choice["start"]
+            it["source_end"] = roomtone_choice["start"] + it["duration"]
     silences = []
     pj = sdir / "prosody.json"
     if pj.exists():
@@ -1106,6 +1394,18 @@ def main():
             continue
         if it["kind"] == "chapter":
             chapters.append({"title": it["title"], "anchor": len(units)})
+        elif it["kind"] == "roomtone":
+            # 🔇 重用既有 insert unit 的單一 input + atrim 路徑；不產 pad 檔，
+            # 也不走 insert_words_candidates，因為室噪沒有 block 子行。
+            units.append({"kind": "insert", "a": it["source_start"],
+                          "b": it["source_end"], "items": [],
+                          "path": it["source"].resolve(),
+                          "logical_path": it["source"], "gain": "0",
+                          "gain_db": 0.0, "fade": 0.0, "tempo": 1.0,
+                          "note": it["note"], "file": "source.wav",
+                          "roomtone": True,
+                          "roomtone_start": it["source_start"],
+                          "roomtone_end": it["source_end"]})
         elif it["kind"] == "music":
             path = resolve_music(it["file"], sdir, args.material_dir)
             if not path:
@@ -1362,6 +1662,12 @@ def main():
           f"{len(musics)} 首;語音 {fmt_mmss(speech_secs)}"
           f"(原始 {fmt_mmss(total_src)})")
     for s in ins_segs:
+        if s.get("roomtone"):
+            note = f"  {s['note']}" if s.get("note") else ""
+            print(f"[render] 🔇 室噪 {s['b'] - s['a']:.1f}s ← source "
+                  f"{_fmt_roomtone_ts(s['a'])}–{_fmt_roomtone_ts(s['b'])}"
+                  f"{note}")
+            continue
         n_kept = len(s.get("items") or [])
         how = f"{n_kept} 個 S block" if n_kept else "整段"
         note = f"  {s['note']}" if s.get("note") else ""
@@ -1376,8 +1682,13 @@ def main():
                                 for k in ("fade_in", "fade_out") if s.get(k))
                 print(f"  speech {fmt_mmss(s['a'])}–{fmt_mmss(s['b'])}{tag}{fades}")
             elif s["kind"] == "insert":
-                print(f"  ➕ 補錄 {s['path'].name} "
-                      f"{fmt_mmss(s['a'])}–{fmt_mmss(s['b'])}")
+                if s.get("roomtone"):
+                    print(f"  🔇 室噪 {s['b'] - s['a']:.1f}s ← source "
+                          f"{_fmt_roomtone_ts(s['a'])}–"
+                          f"{_fmt_roomtone_ts(s['b'])}")
+                else:
+                    print(f"  ➕ 補錄 {s['path'].name} "
+                          f"{fmt_mmss(s['a'])}–{fmt_mmss(s['b'])}")
             else:
                 print(f"  silence {s['dur']:.1f}s")
         for m in musics:
