@@ -69,6 +69,23 @@
 // 任何非標準排版(縮排、額外空白)一律落回唯讀,寧可少開放也不誤判可編輯。
 const BLOCK_LINE_RE = /^- \[( |x|X)\] ([A-Z]{1,2}\d{3,5}) \[([^\]]+)\] (.*)$/;
 
+// `## <emoji>` 結構行的標記清單 —— 對齊 scripts/audio/render_cut.py 的
+// CONFIG_RE/CUT_RE/MUSIC_RE/INSERT_RE/TEASER_RE/ROOMTONE_RE。這些行是 render
+// 的參數,對人審沒有意義,不當章節分隔線顯示(仍原封不動保留在 doc 裡)。
+// **新增 render 端結構行時一定要同步加進來**,否則編輯器會把它畫成章節標題
+// —— 清單放這裡而不是 Index.html,是因為只有這裡有測試守著。
+const STRUCTURE_MARKERS = ['⚙', '✂', '🎵', '➕', '🎬', '🔇'];
+
+// 只有這種 `## 標題` 才算章節分隔線;結構行一律不是。
+function isChapterDivider(raw) {
+  const m = /^## (.+)$/.exec(raw || '');
+  if (!m) return null;
+  for (const marker of STRUCTURE_MARKERS) {
+    if (m[1].startsWith(marker)) return null;
+  }
+  return m[1];
+}
+
 // speaker 前綴,如 `[KIN] `——對齊 render_cut.py `re.sub(r"^\[[^\]]{1,20}\]\s*", "", body)`
 const SPEAKER_PREFIX_RE = /^\[[^\]]{1,20}\]\s*/;
 
@@ -383,6 +400,8 @@ const api = {
   applyStrikeWithHistory,
   undo,
   BLOCK_LINE_RE,
+  STRUCTURE_MARKERS,
+  isChapterDivider,
   SPEAKER_PREFIX_RE,
   REASON_SEP,
 };

@@ -291,10 +291,10 @@
 
   // ── 渲染 ──────────────────────────────────────────────────────────────
 
-  // 只有這種 `## 標題` 才當「章節分隔線」顯示;⚙/✂/🎵/➕/🎬 這些結構行
-  // 是 render 用的參數,對人審沒有意義,不顯示(仍然完整保留在 doc 裡,
-  // 只是不在畫面上占位置——存檔時原封不動寫回去)。
-  var CHAPTER_DIVIDER_RE = /^## (?!⚙|✂|🎵|➕|🎬)(.+)$/;
+  // 章節分隔線的判定住 CutplanCore.isChapterDivider() —— 結構行(⚙/✂/🎵/➕/
+  // 🎬/🔇)是 render 用的參數,對人審沒有意義,不顯示(仍然完整保留在 doc 裡,
+  // 只是不在畫面上占位置——存檔時原封不動寫回去)。清單放 core 是因為那裡
+  // 有測試守著;放這裡的話新增標記時沒有任何東西會叫。
 
   function render() {
     els.blockList.innerHTML = '';
@@ -306,11 +306,11 @@
         shown++;
         return;
       }
-      var m = CHAPTER_DIVIDER_RE.exec(line.raw);
-      if (m) {
+      var chapterTitle = Core.isChapterDivider(line.raw);
+      if (chapterTitle) {
         var div = document.createElement('div');
         div.className = 'chapter-divider';
-        div.textContent = '▸ ' + m[1].trim();
+        div.textContent = '▸ ' + chapterTitle.trim();
         els.blockList.appendChild(div);
       }
     });

@@ -25,6 +25,8 @@ const {
   peekHistory,
   applyStrikeWithHistory,
   undo,
+  STRUCTURE_MARKERS,
+  isChapterDivider,
 } = require('../cutplan-core.js');
 
 // ── fixtures ──────────────────────────────────────────────────────────────
@@ -43,6 +45,8 @@ const FIXTURE_LF = [
   '',
   '- [ ] G0001 [0:00–0:02] ⬜ 空白/非語音 2.0s(靜音;勾選=保留原聲)',
   '## 🎵 opening start=0 end=10 fadein=2 fadeout=3 lead=3 tail=3',
+  '## ➕ 假的補錄.wav gain=auto  測試用補錄插入',
+  '## 🔇 1.0  測試用乾淨室噪留白',
   '- [x] B0001 [0:02–0:05] [Alice] 大家好我是愛麗絲。',
   '- [ ] B0002 [0:05–0:08] [Bob] 呃這個那個其實我覺得很好。',
   '- [x] B0003 [0:08–0:12] [Alice] ~~嗯~~今天要聊的主題是假資料。',
@@ -212,6 +216,8 @@ for (const [label, prefix] of [
   ['⚙ config', '## ⚙'],
   ['✂ 手動剪除', '## ✂'],
   ['🎵 BGM', '## 🎵'],
+  ['➕ 補錄插入', '## ➕'],
+  ['🔇 室噪留白', '## 🔇'],
   ['章節', '## 休息一下'],
   ['空白行', ''],
 ]) {
@@ -227,6 +233,34 @@ for (const [label, prefix] of [
     assert.throws(() => toggleCheckbox(doc, idx));
   });
 }
+
+// ── (e2) 章節分隔線 vs 結構行 ────────────────────────────────────────────
+// 這條規則的失效方式很安靜:新增一個 render 端結構行卻忘了同步,編輯器不會
+// 報錯,只會把 `## 🔇 1.0` 之類畫成章節標題。所以逐個標記都要測。
+
+test('isChapterDivider: 真正的章節標題回傳標題文字', () => {
+  assert.equal(isChapterDivider('## 休息一下章節標題'), '休息一下章節標題');
+});
+
+for (const marker of STRUCTURE_MARKERS) {
+  test(`isChapterDivider: \`## ${marker}\` 結構行不是章節分隔線`, () => {
+    assert.equal(isChapterDivider(`## ${marker} 隨便什麼參數`), null);
+  });
+}
+
+test('STRUCTURE_MARKERS: 涵蓋 render_cut.py 目前全部結構行標記', () => {
+  // render 端新增標記時,這裡會先紅 —— 逼人同步,不讓編輯器默默畫錯。
+  assert.deepEqual(
+    [...STRUCTURE_MARKERS].sort(),
+    ['⚙', '✂', '🎵', '➕', '🎬', '🔇'].sort(),
+  );
+});
+
+test('isChapterDivider: 非 `## ` 開頭一律不是章節', () => {
+  assert.equal(isChapterDivider('# Cutplan'), null);
+  assert.equal(isChapterDivider('- [x] B0001 [0:02–0:05] [Alice] 嗨。'), null);
+  assert.equal(isChapterDivider(''), null);
+});
 
 test('isEditableLine: block 行(B/G)標記為可編輯', () => {
   const doc = parseCutplan(FIXTURE_LF);
