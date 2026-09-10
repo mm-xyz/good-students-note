@@ -383,6 +383,85 @@ function undo(doc, history) {
   return { doc: popped.entry.doc, history: popped.history, undone: true };
 }
 
+
+// ── 室噪留白(`## 🔇`)──────────────────────────────────────────────────
+//
+// **這是編輯器裡唯一可新增／可刪除的結構行**,其餘結構行(⚙ ✂ 🎵 ➕ 🎬)維持
+// 完全唯讀。這是刻意開的一個口,不是放寬整體護欄 —— 開它的理由:「哪裡該留白」
+// 只有人審聽得出來,而且既然人可以插,就必須看得到、也刪得掉,否則在手機上插錯
+// 沒有退路。要再開第二個口請先想清楚同樣的兩個條件成不成立。
+//
+// 行格式對齊 render_cut.py 的 ROOMTONE_RE(`^##\s*🔇\s*(.*)$`,第一個 token
+// 要 float 得動;秒數省略時由 `## ⚙ template=` 的樣板補)。
+const ROOMTONE_LINE_RE = /^##\s*🔇(\s|$)/;
+
+// 手機上不做自由輸入框 —— 打錯的成本(整段留白長度不對)遠高於少幾個選項。
+const ROOMTONE_SECONDS = [0.5, 1.0, 1.5, 2.0];
+
+function isRoomtoneLine(doc, lineIndex) {
+  const line = doc.lines[lineIndex];
+  return !!(line && !line.editable && ROOMTONE_LINE_RE.test(line.raw || ''));
+}
+
+// 文件慣用的行尾。插入的新行要跟著它,不能寫死 '\n' —— 否則一份 CRLF 的節目單
+// 會被插出一行落單的 LF。
+function dominantTerm(doc) {
+  for (const line of doc.lines) {
+    if (line.term) return line.term;
+  }
+  return '\n';
+}
+
+function insertRoomtone(doc, lineIndex, seconds) {
+  requireEditableLine(doc, lineIndex, 'insertRoomtone');
+  if (typeof seconds !== 'number' || !Number.isFinite(seconds) || seconds <= 0) {
+    throw new Error(
+      `cutplan-core: insertRoomtone — 秒數必須是大於 0 的數字,拿到「${seconds}」`,
+    );
+  }
+  const term = dominantTerm(doc);
+  const anchor = doc.lines[lineIndex];
+  const lines = doc.lines.slice();
+  // 錨點若是最後一行且沒有結尾換行,先把換行補給它,新行才不會黏在同一行上。
+  if (!anchor.term) {
+    lines[lineIndex] = { ...anchor, term };
+  }
+  lines.splice(lineIndex + 1, 0, {
+    editable: false,
+    raw: `## 🔇 ${seconds.toFixed(1)}  留白`,
+    term: anchor.term ? anchor.term : '',
+  });
+  return { ...doc, lines };
+}
+
+function removeRoomtone(doc, lineIndex) {
+  if (!isRoomtoneLine(doc, lineIndex)) {
+    throw new Error(
+      `cutplan-core: removeRoomtone — 第 ${lineIndex} 行不是 \`## 🔇\` 室噪行,` +
+      '只有室噪行可以在編輯器裡刪除',
+    );
+  }
+  const lines = doc.lines.slice();
+  lines.splice(lineIndex, 1);
+  return { ...doc, lines };
+}
+
+function insertRoomtoneWithHistory(doc, history, lineIndex, seconds) {
+  const nextDoc = insertRoomtone(doc, lineIndex, seconds);
+  return {
+    doc: nextDoc,
+    history: pushHistory(history, { doc, lineIndex, start: 0, end: 0 }),
+  };
+}
+
+function removeRoomtoneWithHistory(doc, history, lineIndex) {
+  const nextDoc = removeRoomtone(doc, lineIndex);
+  return {
+    doc: nextDoc,
+    history: pushHistory(history, { doc, lineIndex, start: 0, end: 0 }),
+  };
+}
+
 const api = {
   parseCutplan,
   serializeCutplan,
@@ -402,6 +481,12 @@ const api = {
   BLOCK_LINE_RE,
   STRUCTURE_MARKERS,
   isChapterDivider,
+  ROOMTONE_SECONDS,
+  isRoomtoneLine,
+  insertRoomtone,
+  removeRoomtone,
+  insertRoomtoneWithHistory,
+  removeRoomtoneWithHistory,
   SPEAKER_PREFIX_RE,
   REASON_SEP,
 };

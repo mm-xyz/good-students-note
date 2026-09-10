@@ -27,6 +27,12 @@ const {
   undo,
   STRUCTURE_MARKERS,
   isChapterDivider,
+  ROOMTONE_SECONDS,
+  isRoomtoneLine,
+  insertRoomtone,
+  removeRoomtone,
+  insertRoomtoneWithHistory,
+  removeRoomtoneWithHistory,
 } = require('../cutplan-core.js');
 
 // ── fixtures ──────────────────────────────────────────────────────────────
@@ -56,6 +62,9 @@ const FIXTURE_LF = [
   '- [x] B0006 [0:23–0:25] [Bob] 好的沒問題。',
   '',
 ].join('\n') + '\n';
+
+// CRLF 版:同一份 fixture 換行尾,用來守「插入／刪除不可污染換行風格」。
+const FIXTURE_CRLF = FIXTURE_LF.split('\n').join('\r\n');
 
 // 找 fixture 裡某行的 0-based index(依內容前綴比對,避免每個測試手數行號)
 function lineIndexOf(text, startsWith) {
@@ -261,6 +270,132 @@ test('isChapterDivider: 非 `## ` 開頭一律不是章節', () => {
   assert.equal(isChapterDivider('- [x] B0001 [0:02–0:05] [Alice] 嗨。'), null);
   assert.equal(isChapterDivider(''), null);
 });
+
+
+// ── (f) 室噪留白:編輯器裡唯一可新增／可刪除的結構行 ──────────────────────
+// 其他結構行(⚙ ✂ 🎵 ➕ 🎬)維持完全唯讀。這是刻意開的一個口,不是放寬整體
+// 護欄 —— 因為「哪裡該留白」只有人審聽得出來,而且插了就必須看得到、刪得掉。
+
+test('insertRoomtone: 插在指定 block 之後,其他行逐字不動', () => {
+  const doc = parseCutplan(FIXTURE_LF);
+  const idx = lineIndexOf(FIXTURE_LF, '- [x] B0001');
+  const next = insertRoomtone(doc, idx, 1.0);
+  const before = serializeCutplan(doc).split('\n');
+  const after = serializeCutplan(next).split('\n');
+  assert.equal(after.length, before.length + 1);
+  assert.equal(after[idx], before[idx]);
+  assert.equal(after[idx + 1], '## 🔇 1.0  留白');
+  assert.deepEqual(after.slice(idx + 2), before.slice(idx + 1));
+});
+
+test('insertRoomtone: 原 doc 不被改動(不可變)', () => {
+  const doc = parseCutplan(FIXTURE_LF);
+  const idx = lineIndexOf(FIXTURE_LF, '- [x] B0001');
+  const snapshot = serializeCutplan(doc);
+  insertRoomtone(doc, idx, 1.0);
+  assert.equal(serializeCutplan(doc), snapshot);
+});
+
+test('insertRoomtone: 新行是唯讀的、也不是章節分隔線', () => {
+  const doc = parseCutplan(FIXTURE_LF);
+  const idx = lineIndexOf(FIXTURE_LF, '- [x] B0001');
+  const next = insertRoomtone(doc, idx, 1.0);
+  assert.equal(isEditableLine(next, idx + 1), false);
+  assert.equal(isChapterDivider(next.lines[idx + 1].raw), null);
+  assert.equal(isRoomtoneLine(next, idx + 1), true);
+});
+
+test('insertRoomtone: 錨點不是 block 行要丟錯,不可靜默插進去', () => {
+  const doc = parseCutplan(FIXTURE_LF);
+  for (const prefix of ['## ⚙', '## 🎵', '## 休息一下', '# Cutplan']) {
+    const idx = lineIndexOf(FIXTURE_LF, prefix);
+    assert.throws(() => insertRoomtone(doc, idx, 1.0), undefined, prefix);
+  }
+});
+
+test('insertRoomtone: 秒數不合法要丟錯', () => {
+  const doc = parseCutplan(FIXTURE_LF);
+  const idx = lineIndexOf(FIXTURE_LF, '- [x] B0001');
+  for (const bad of [0, -1, NaN, Infinity, '1.0', null, undefined]) {
+    assert.throws(() => insertRoomtone(doc, idx, bad), undefined, String(bad));
+  }
+});
+
+test('insertRoomtone: CRLF 節目單插入後換行風格不變', () => {
+  const doc = parseCutplan(FIXTURE_CRLF);
+  const idx = lineIndexOf(FIXTURE_CRLF, '- [x] B0001');
+  const out = serializeCutplan(insertRoomtone(doc, idx, 0.5));
+  assert.ok(out.includes('## 🔇 0.5  留白\r\n'));
+  assert.equal(out.includes('## 🔇 0.5  留白\n\r'), false);
+  assert.equal((out.match(/[^\r]\n/g) || []).length, 0);  // 沒有落單的 LF
+});
+
+test('insertRoomtone: 錨點是「最後一行且沒有結尾換行」時,換行要補得對', () => {
+  // 這是最容易生出壞檔案的分支:錨點沒有 term,新行若直接接上去會黏成同一行。
+  for (const eol of ['\n', '\r\n']) {
+    const text = `# T${eol}${eol}- [x] B0001 [0:00–0:01] [Alice] 哈囉`;  // 尾端沒換行
+    const doc = parseCutplan(text);
+    const idx = lineIndexOf(text.split('\r\n').join('\n'), '- [x] B0001');
+    const out = serializeCutplan(insertRoomtone(doc, idx, 1.0));
+    assert.equal(out, `${text}${eol}## 🔇 1.0  留白`, JSON.stringify(eol));
+    // 再 parse 回來,兩行都還在、且第二行認得出是室噪行
+    const back = parseCutplan(out);
+    assert.equal(isRoomtoneLine(back, back.lines.length - 1), true);
+  }
+});
+
+test('removeRoomtone: 刪掉指定的 🔇 行,其他行逐字不動', () => {
+  const doc = parseCutplan(FIXTURE_LF);
+  const idx = lineIndexOf(FIXTURE_LF, '- [x] B0001');
+  const inserted = insertRoomtone(doc, idx, 1.0);
+  const removed = removeRoomtone(inserted, idx + 1);
+  assert.equal(serializeCutplan(removed), serializeCutplan(doc));
+});
+
+test('removeRoomtone: 指到 block／章節／其他結構行一律丟錯', () => {
+  const doc = parseCutplan(FIXTURE_LF);
+  for (const prefix of ['- [x] B0001', '## ⚙', '## 🎵', '## ➕', '## 休息一下']) {
+    const idx = lineIndexOf(FIXTURE_LF, prefix);
+    assert.throws(() => removeRoomtone(doc, idx), undefined, prefix);
+  }
+});
+
+test('insertRoomtoneWithHistory → undo 回到逐字相同的原文', () => {
+  const doc = parseCutplan(FIXTURE_LF);
+  const idx = lineIndexOf(FIXTURE_LF, '- [x] B0001');
+  const h0 = createHistory();
+  const step = insertRoomtoneWithHistory(doc, h0, idx, 1.5);
+  assert.equal(canUndo(step.history), true);
+  const back = undo(step.doc, step.history);
+  assert.equal(back.undone, true);
+  assert.equal(serializeCutplan(back.doc), FIXTURE_LF);
+});
+
+test('removeRoomtoneWithHistory → undo 把刪掉的那行放回原位', () => {
+  const doc = parseCutplan(FIXTURE_LF);
+  const idx = lineIndexOf(FIXTURE_LF, '- [x] B0001');
+  const inserted = insertRoomtone(doc, idx, 2.0);
+  const withRt = serializeCutplan(inserted);
+  const step = removeRoomtoneWithHistory(inserted, createHistory(), idx + 1);
+  const back = undo(step.doc, step.history);
+  assert.equal(serializeCutplan(back.doc), withRt);
+});
+
+test('ROOMTONE_SECONDS: 手機上只給固定檔位,不做自由輸入', () => {
+  assert.deepEqual(ROOMTONE_SECONDS, [0.5, 1.0, 1.5, 2.0]);
+});
+
+test('插入的行 render 端讀得回來(格式對齊 ROOMTONE_RE)', () => {
+  const doc = parseCutplan(FIXTURE_LF);
+  const idx = lineIndexOf(FIXTURE_LF, '- [x] B0001');
+  const raw = insertRoomtone(doc, idx, 1.0).lines[idx + 1].raw;
+  // render_cut.py: ROOMTONE_RE = ^##\s*🔇\s*(.*)$ → 第一個 token 要能 float()
+  const m = /^##\s*🔇\s*(.*)$/.exec(raw);
+  assert.ok(m);
+  assert.equal(Number.isFinite(parseFloat(m[1].split(/\s+/)[0])), true);
+});
+
+
 
 test('isEditableLine: block 行(B/G)標記為可編輯', () => {
   const doc = parseCutplan(FIXTURE_LF);

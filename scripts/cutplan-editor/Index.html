@@ -86,6 +86,36 @@
     border-top: 1px dashed var(--border);
     padding-top: 10px;
   }
+  .roomtone-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 6px 0;
+    padding: 6px 10px;
+    font-size: 13px;
+    color: var(--accent);
+    background: rgba(127, 127, 127, 0.08);
+    border-left: 3px solid var(--accent);
+    border-radius: 4px;
+  }
+  .roomtone-row .grow { flex: 1; }
+  .roomtone-row button,
+  .roomtone-add button {
+    font-size: 12px;
+    padding: 4px 8px;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    background: transparent;
+    color: inherit;
+  }
+  .roomtone-add {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+    padding: 2px 0 8px 30px;
+    font-size: 12px;
+    opacity: 0.75;
+  }
   .block-card {
     display: flex;
     gap: 10px;
@@ -306,6 +336,10 @@
         shown++;
         return;
       }
+      if (Core.isRoomtoneLine(state.doc, idx)) {
+        els.blockList.appendChild(renderRoomtoneRow(line, idx));
+        return;
+      }
       var chapterTitle = Core.isChapterDivider(line.raw);
       if (chapterTitle) {
         var div = document.createElement('div');
@@ -371,8 +405,54 @@
       }
     });
     main.appendChild(body);
+
+    // 「在這一句之後留白」—— `## 🔇` 是編輯器裡唯一可新增的結構行(見 core 註解)。
+    // 秒數只給固定檔位:手機上打錯的成本遠高於少幾個選項。
+    var add = document.createElement('div');
+    add.className = 'roomtone-add';
+    var addLabel = document.createElement('span');
+    addLabel.textContent = '＋ 之後留白';
+    add.appendChild(addLabel);
+    Core.ROOMTONE_SECONDS.forEach(function (secs) {
+      var b = document.createElement('button');
+      b.type = 'button';
+      b.textContent = secs.toFixed(1) + 's';
+      b.addEventListener('click', function () {
+        var r = Core.insertRoomtoneWithHistory(state.doc, state.history, idx, secs);
+        state.doc = r.doc;
+        state.history = r.history;
+        setDirty(true);
+        render();
+      });
+      add.appendChild(b);
+    });
+    main.appendChild(add);
+
     card.appendChild(main);
     return card;
+  }
+
+  // `## 🔇` 要**顯示**出來(其他結構行不顯示)——既然人可以插,就必須看得到、
+  // 也刪得掉,否則在手機上插錯沒有退路。
+  function renderRoomtoneRow(line, idx) {
+    var row = document.createElement('div');
+    row.className = 'roomtone-row';
+    var label = document.createElement('span');
+    label.className = 'grow';
+    label.textContent = '⏸ ' + line.raw.replace(/^##\s*🔇\s*/, '').trim() + ' 留白';
+    row.appendChild(label);
+    var del = document.createElement('button');
+    del.type = 'button';
+    del.textContent = '刪除';
+    del.addEventListener('click', function () {
+      var r = Core.removeRoomtoneWithHistory(state.doc, state.history, idx);
+      state.doc = r.doc;
+      state.history = r.history;
+      setDirty(true);
+      render();
+    });
+    row.appendChild(del);
+    return row;
   }
 
   // ── 反白 → 選取穩定後自動套用刪除線 ─────────────────────────────────
