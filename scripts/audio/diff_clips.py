@@ -6,6 +6,9 @@ scripts/audio/diff_clips.py — 只切出「這次改動的地方」給人審聽
         --old <上一版 cutplan.md> [--plan cutplan.md] [--render <成品.mp3>] \
         [--pad 5] [--out-dir <目錄>]
 
+片段預設落在**成品所屬的版本目錄**底下 `vN_<時戳>/diff/`,並鏡像到 Drive 上
+同名的版本目錄(2026-09-11 MM 拍板:diff 要住那一版裡面)。
+
 2026-08-11 MM 拍板:「diff:節錄調整過的地方就好,＋− 5sec,不必出文檔」。
 
 動機:改一次 cutplan 就要重聽 30 分鐘才知道改對沒——實際變動可能只有幾處。
@@ -28,6 +31,7 @@ import argparse
 import bisect
 import json
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -105,6 +109,49 @@ def merge(points: list[tuple[float, float, str]], pad: float, dur: float):
     return out
 
 
+VER_DIR_RE = re.compile(r"^v\d+_")
+
+
+def resolve_out_dir(sdir: Path, render: Path, override: str | None) -> Path:
+    """diff 片段住哪:預設跟著**它所屬的那一版**(2026-09-11 MM 拍板)。
+
+    diff 本來就是「這一版 vs 前一版」的產物,跟 mp3、cutplan 快照、render.txt
+    綁在同一個 vN_<時戳>/ 裡才找得回來。原本一律摔在 session 根,EP18 就散出
+    diff_clips / _v5 / _v6 / _v10 / _v11 五堆,誰對誰全靠人記。
+
+    成品還在 session 根(工作檔、或 --render 指了別處)時沒有版本目錄可掛,
+    退回舊的 diff_clips/。明寫 --out-dir 永遠贏。
+    """
+    if override:
+        return sdir / override
+    if VER_DIR_RE.match(render.parent.name) and render.parent.parent == sdir:
+        return render.parent / "diff"
+    return sdir / "diff_clips"
+
+
+def mirror_to_drive(out: Path, sdir: Path) -> Path | None:
+    """把 diff 片段鏡像到 Drive 上**同名的**版本目錄,讓人用手機就能聽。
+
+    cut.py 出片當下就把版本目錄推上 Drive 了,而 diff 是出片之後才跑的——
+    不補這一步,Drive 那份版本目錄永遠沒有 diff。
+
+    沒有 .drive_dir、或 Drive 上沒有這一版(例如當初 --no-push)就安靜跳過:
+    這裡只鏡像既有的版本目錄,不替 Drive 造目錄。
+    """
+    memo = sdir / ".drive_dir"
+    if not memo.exists():
+        return None
+    ddir = Path(memo.read_text(encoding="utf-8").strip())
+    dst_parent = ddir / out.parent.name
+    if not dst_parent.is_dir():
+        return None
+    dst = dst_parent / out.name
+    if dst.exists():
+        shutil.rmtree(dst)
+    shutil.copytree(out, dst)
+    return dst
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="只切出這次改動的地方給人審聽")
     ap.add_argument("--session", required=True)
@@ -113,7 +160,7 @@ def main() -> int:
     ap.add_argument("--render", help="成品檔(預設取 session 內最新的 mp3)")
     ap.add_argument("--cut-map", default="cut_map.json")
     ap.add_argument("--pad", type=float, default=5.0, help="前後各留幾秒 context")
-    ap.add_argument("--out-dir", default="diff_clips")
+    ap.add_argument("--out-dir", help="覆寫落點(預設跟著成品所屬的版本目錄)")
     args = ap.parse_args()
 
     sdir = Path(args.session)
@@ -183,7 +230,7 @@ def main() -> int:
         return 1
 
     regions = merge(pts, args.pad, dur)
-    out = sdir / args.out_dir
+    out = resolve_out_dir(sdir, render, args.out_dir)
     out.mkdir(parents=True, exist_ok=True)
     for f in out.glob("*.mp3"):
         f.unlink()
@@ -200,6 +247,9 @@ def main() -> int:
         print(f"    {name}  ←  {'、'.join(labels[:3])}"
               + (f" 等 {len(labels)} 處" if len(labels) > 3 else ""))
     print(f"[diff] ✓ → {out}")
+    pushed = mirror_to_drive(out, sdir)
+    if pushed:
+        print(f"[diff] ☑️ Drive:{pushed.parent.name}/{pushed.name}/")
     return 0
 
 

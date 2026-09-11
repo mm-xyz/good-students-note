@@ -264,6 +264,40 @@ class TestFindDriveDir(unittest.TestCase):
 
 
 
+class TestNextOutNameSurvivesPrunedWorkfiles(unittest.TestCase):
+    """根的 final_cut_vN.mp3 被清掉後,版本號不可以往回跳(2026-09-11)。
+
+    MM 拍板清掉 session 根那一堆與版本目錄重複的成品(EP18 有 13 個、約 300MB),
+    但 next_out_name 原本只掃根的檔名——清乾淨之後 default=1 會讓下一版又叫
+    final_cut_v2.mp3,檔名先後順序不再等於出片先後順序,正是這支函式 docstring
+    要避免的事。改成也看版本目錄 vN_<時戳>/,兩邊取最大。
+    """
+
+    def test_pruned_root_falls_back_to_version_dirs(self) -> None:
+        with tempfile.TemporaryDirectory() as t:
+            sdir = Path(t)
+            (sdir / "v14_20260910-0033").mkdir()
+            (sdir / "v9_20260909-1155-AI").mkdir()
+            self.assertEqual(next_out_name(sdir, None), "final_cut_v15.mp3")
+
+    def test_root_workfile_still_wins_when_larger(self) -> None:
+        with tempfile.TemporaryDirectory() as t:
+            sdir = Path(t)
+            (sdir / "v1_20260911-0816-AI").mkdir()
+            (sdir / "final_cut_v3.mp3").write_bytes(b"")
+            self.assertEqual(next_out_name(sdir, None), "final_cut_v4.mp3")
+
+    def test_empty_session_unchanged(self) -> None:
+        with tempfile.TemporaryDirectory() as t:
+            self.assertEqual(next_out_name(Path(t), None), "final_cut_v2.mp3")
+
+    def test_given_name_still_wins(self) -> None:
+        with tempfile.TemporaryDirectory() as t:
+            sdir = Path(t)
+            (sdir / "v14_20260910-0033").mkdir()
+            self.assertEqual(next_out_name(sdir, "custom.mp3"), "custom.mp3")
+
+
 class TestVersionName(unittest.TestCase):
     """版本號取 local 與 Drive 兩邊的最大號 +1（2026-08-11）。
 

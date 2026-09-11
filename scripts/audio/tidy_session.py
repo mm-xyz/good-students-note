@@ -70,9 +70,32 @@ def stamp(p: Path) -> str:
     return dt.datetime.fromtimestamp(p.stat().st_mtime).strftime("%Y%m%d-%H%M")
 
 
+VER_DIR_RE = re.compile(r"^v(\d+)_")
+
+
+def snapshotted(p: Path, vdirs: list[Path]) -> bool:
+    """這支成品是不是已經被 cut.py 複製進某個版本目錄了(只是改了名)?
+
+    cut.py 出片會把 session 根的工作檔複製成 `vN_<時戳>/EP19_vN.mp3`,根那份
+    就成了重複檔。檔名對不上(改過名),所以比內容:先比 size 篩掉絕大多數,
+    size 相同才真的讀 bytes 比對。
+    """
+    size = p.stat().st_size
+    for v in vdirs:
+        for q in v.iterdir():
+            if q.is_file() and q.stat().st_size == size \
+                    and q.read_bytes() == p.read_bytes():
+                return True
+    return False
+
+
 def plan(sdir: Path, labels: dict[str, str]) -> list[tuple[Path, Path]]:
     moves: list[tuple[Path, Path]] = []
     renders: list[Path] = []
+    existing_vdirs = [d for d in sdir.iterdir()
+                      if d.is_dir() and VER_DIR_RE.match(d.name)]
+    next_v = max((int(VER_DIR_RE.match(d.name).group(1))
+                  for d in existing_vdirs), default=0) + 1
 
     for p in sorted(sdir.iterdir()):
         if p.name.startswith("."):
@@ -99,9 +122,14 @@ def plan(sdir: Path, labels: dict[str, str]) -> list[tuple[Path, Path]]:
     renders.sort(key=lambda x: x.stat().st_mtime)
     vdirs: dict[str, Path] = {}
     for p in renders:
+        # 已經有版本目錄快照的工作檔不再歸位——那會讓同一份音訊在兩個版本編號
+        # 下各存一份(2026-09-11 EP19-0 實踩:v1_ 已存在,tidy 仍要造 v00_)。
+        # 要不要清掉根那份是另一個決定,tidy「只搬不刪」不越線。
+        if snapshotted(p, existing_vdirs):
+            continue
         label = labels.get(p.name, p.stem)
         if label not in vdirs:
-            vdirs[label] = sdir / f"v{len(vdirs):02d}_{stamp(p)}_{label}"
+            vdirs[label] = sdir / f"v{next_v + len(vdirs)}_{stamp(p)}_{label}"
         moves.append((p, vdirs[label] / p.name))
     return moves
 

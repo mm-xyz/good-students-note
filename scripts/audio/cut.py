@@ -207,9 +207,13 @@ def next_out_name(sdir: Path, given: str | None) -> str:
     """
     if given:
         return given
-    n = max((int(m.group(1)) for p in sdir.iterdir()
-             for m in [OUT_RE.match(p.name)] if m), default=1) + 1
-    return f"final_cut_v{n}.mp3"
+    # 也看版本目錄:session 根的工作檔可以被清掉(與 vN_ 目錄裡的快照重複,
+    # EP18 一集 13 個約 300MB),清掉之後只掃檔名會 default 回 1、版本號往回
+    # 跳——正是上面要避免的事。兩邊取最大(2026-09-11 MM 拍板清根)。
+    seen = [int(m.group(1)) for p in sdir.iterdir()
+            for m in [OUT_RE.match(p.name) or (VER_RE.match(p.name)
+                                               if p.is_dir() else None)] if m]
+    return f"final_cut_v{max(seen, default=1) + 1}.mp3"
 
 
 # 版本目錄:`v3_20260810-1830`,但**人手取的名字常常沒有 -HHMM**
