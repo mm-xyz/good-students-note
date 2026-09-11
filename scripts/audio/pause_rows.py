@@ -62,7 +62,7 @@ def main() -> int:
     args = ap.parse_args()
 
     sdir = Path(args.session)
-    plan = sdir / args.plan
+    plan = work_dir(sdir) / args.plan
     cp = json.loads((work_dir(sdir) / "cutplan.json").read_text(encoding="utf-8"))
     by_id = {b["id"]: b for b in cp.get("blocks", [])}
     for t in cp.get("tracks", []):

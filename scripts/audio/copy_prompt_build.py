@@ -208,7 +208,7 @@ def main():
     sdir = Path(args.session).resolve()
     need_all = ("cutplan.md", "cutplan.json", "cut_map.json", "copy_material.md")
     for need in (need_all[:2] + need_all[3:] if args.final_srt else need_all):
-        if not (sdir / need).exists():
+        if not (work_dir(sdir) / need).exists():
             sys.exit(f"[copy-prompt] FAIL: 缺 {need}"
                      + ("(先跑 render_cut.py)" if need == "cut_map.json" else
                         "(先寫該集素材)" if need == "copy_material.md" else ""))

@@ -90,7 +90,7 @@ def run(cmd: list[str], **kw) -> subprocess.CompletedProcess:
 
 def step_render(sdir: Path, plan: str, mp3: Path | None) -> Path:
     """cutplan 比成品新才重出;已經最新就跳過(不製造重複的版本目錄)。"""
-    cutplan = sdir / plan
+    cutplan = work_dir(sdir) / plan
     if mp3 and mp3.stat().st_mtime >= cutplan.stat().st_mtime:
         print(f"[finalize] ☑️ 成品已是最新({mp3.parent.name}/{mp3.name}),跳過 render")
         return mp3

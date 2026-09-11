@@ -165,8 +165,8 @@ def main() -> int:
     args = ap.parse_args()
 
     sdir = Path(args.session)
-    new_plan, old_plan = sdir / args.plan, Path(args.old)
-    for p in (new_plan, old_plan, sdir / args.cut_map):
+    new_plan, old_plan = work_dir(sdir) / args.plan, Path(args.old)
+    for p in (new_plan, old_plan, work_dir(sdir) / args.cut_map):
         if not p.exists():
             print(f"[diff] ✗ 找不到 {p}", file=sys.stderr)
             return 2
@@ -207,7 +207,8 @@ def main() -> int:
                 anchor[it["id"]] = last_regular
         else:
             last_regular = it["id"]
-    cut_map = json.loads((sdir / args.cut_map).read_text(encoding="utf-8"))
+    cut_map = json.loads((work_dir(sdir) / args.cut_map)
+                         .read_text(encoding="utf-8"))
     dur = float(cut_map.get("final_duration_secs") or 0) or 10 ** 9
 
     pts, miss = [], 0

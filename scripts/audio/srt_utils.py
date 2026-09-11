@@ -1,3 +1,4 @@
+import sys
 #!/usr/bin/env python3
 """
 scripts/audio/srt_utils.py — 音訊分析線共用的 SRT 解析/輸出工具
@@ -8,6 +9,9 @@ scripts/audio/srt_utils.py — 音訊分析線共用的 SRT 解析/輸出工具
 
 import re
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from session_paths import work_dir  # noqa: E402
 
 _TS_RE = re.compile(r"(\d+):(\d\d):(\d\d)[,.](\d{1,3})")
 # speaker 前綴慣例:[S1] 或 [語嫣](diarize 對齊後的 transcript.speakers.srt 用)
@@ -95,7 +99,7 @@ def pick_transcript(session_dir: Path) -> Path:
     """分析線的逐字稿來源:優先 Phase A 的 cleaned.srt(時間碼與 transcript.srt
     一致、錯字已修),沒有才退回 IMMUTABLE 的 transcript.srt。"""
     for name in ("cleaned.srt", "transcript.srt"):
-        p = session_dir / name
+        p = work_dir(session_dir) / name
         if p.exists():
             return p
     raise FileNotFoundError(f"no SRT found in {session_dir} (need cleaned.srt or transcript.srt)")

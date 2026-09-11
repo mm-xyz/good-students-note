@@ -208,7 +208,9 @@ def main():
     if not track_files:
         die(f"{tracks_dir} 存在但沒有 .wav 軌(檔名慣例:tracks/<Speaker>.wav)")
 
-    existing = [n for n in OUTPUTS if (session_dir / n).exists()]
+    existing = [n for n in OUTPUTS
+                if ((session_dir if n == "source.wav" else work_dir(session_dir))
+                    / n).exists()]
     if existing and not args.force:
         die(f"已存在 {', '.join(existing)};要覆蓋請加 --force")
 

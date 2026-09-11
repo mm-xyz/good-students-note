@@ -35,7 +35,7 @@ from pathlib import Path
 from typing import Callable
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from session_paths import work_dir  # noqa: E402
+from session_paths import meta_dir, work_dir  # noqa: E402
 from srt_utils import find_source_media  # noqa: E402
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -98,8 +98,9 @@ def plan_stages(session_dir: Path, args: argparse.Namespace) -> tuple[str, list[
         stages.append(Stage(
             name="ingest（多軌驗證 + mixdown + 逐軌 VAD）",
             cmd=ingest_cmd,
-            done=lambda: all((session_dir / n).exists()
-                             for n in ("source.wav", "audio16k.wav", "speakers.json")),
+            done=lambda: (session_dir / "source.wav").exists() and all(
+                (work_dir(session_dir) / n).exists()
+                for n in ("audio16k.wav", "speakers.json")),
         ))
         media = session_dir / "source.wav"
     else:
@@ -137,7 +138,7 @@ def plan_stages(session_dir: Path, args: argparse.Namespace) -> tuple[str, list[
         name="prosody（高昂度 + 靜音偵測）",
         cmd=[str(AUDIO_VENV), str(PROSODY_SCRIPT), "--session", str(session_dir)],
         done=lambda: (work_dir(session_dir) / "prosody.json").exists()
-        and (session_dir / "highlights.md").exists(),
+        and (meta_dir(session_dir) / "highlights.md").exists(),
     ))
 
     stages.append(Stage(

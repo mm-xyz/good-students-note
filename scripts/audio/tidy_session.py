@@ -43,6 +43,11 @@ PIPELINE_KEEP = {
     # 人看的**產出**(copy_draft_*/ig_copy_*/cover_*)才歸 _meta/。
     "copy_material.md", "copy_prompt.md",
 }
+# 這些名字雖然在 PIPELINE_KEEP,但**不搬進 WORK_SUBDIR**:它們是人要讀的產物,
+# 不是中間工作檔。cleaned.md 是文件線(PDF/EPUB/TXT)的交付物——一本書轉成的
+# markdown 知識庫,藏起來等於把成品藏起來。
+STAYS_VISIBLE = {"cleaned.md"}
+
 # 管線子目錄:不動
 KEEP_DIRS = {"tracks", "images", "note", "frames", "raw", "_meta", "_bak"}
 
@@ -135,10 +140,31 @@ def plan(sdir: Path, labels: dict[str, str]) -> list[tuple[Path, Path]]:
     return moves
 
 
+def plan_migrate_work(sdir: Path) -> list[tuple[Path, Path]]:
+    """把散在 session 根的管線工作檔搬進 WORK_SUBDIR(見 session_paths)。
+
+    work_dir() 的 fallback 只保證「子資料夾不存在時讀得到舊位置」,**不會自己
+    搬**——所以改了 WORK_SUBDIR 之後要跑這個,否則等於什麼都沒發生。
+
+    source.* 不搬:它是這一集的素材入口(而且是 symlink),留在根看得到;
+    render_cut 的室噪也直接吃 sdir/source.wav。
+    """
+    from session_paths import WORK_SUBDIR
+    if not WORK_SUBDIR:
+        return []
+    dst = sdir / WORK_SUBDIR
+    return [(p, dst / p.name) for p in sorted(sdir.iterdir())
+            if p.is_file() and p.name in PIPELINE_KEEP
+            and p.name not in STAYS_VISIBLE
+            and not p.name.startswith("source.")]
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="podcast session 目錄分類(Drive 同構)")
     ap.add_argument("--session", required=True)
     ap.add_argument("--apply", action="store_true", help="真的搬(預設 dry-run)")
+    ap.add_argument("--migrate-work", action="store_true",
+                    help="把管線工作檔搬進 session_paths.WORK_SUBDIR(改了那個值就要跑)")
     ap.add_argument("--label", action="append", default=[],
                     metavar="MP3=標籤", help="指定某支成品的版本標籤")
     args = ap.parse_args()
@@ -156,7 +182,7 @@ def main() -> int:
         k, v = kv.split("=", 1)
         labels[k] = v
 
-    moves = plan(sdir, labels)
+    moves = plan_migrate_work(sdir) if args.migrate_work else plan(sdir, labels)
     if not moves:
         print(f"[tidy] {sdir.name}:已經是分類後的樣子,沒有要搬的檔案。")
         return 0

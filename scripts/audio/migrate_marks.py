@@ -23,6 +23,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from srt_utils import rel
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from session_paths import work_dir  # noqa: E402
+
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 # 兩碼前綴 = 分軌 block(MR/SR/KN…);單碼 B/G/S/I = 混音線/補錄
 BLOCK_RE = re.compile(
@@ -264,7 +267,7 @@ def main():
     args = ap.parse_args()
 
     session_dir = Path(args.session).resolve()
-    new_path = session_dir / args.to
+    new_path = work_dir(session_dir) / args.to
     if args.per_speaker:
         st = migrate_per_speaker(Path(args.old), new_path,
                                  args.with_checkboxes, args.cut_threshold)

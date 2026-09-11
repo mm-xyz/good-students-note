@@ -33,6 +33,9 @@ import fitz  # PyMuPDF
 import pytest
 from PIL import Image
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "audio"))
+from session_paths import work_dir  # noqa: E402
+
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 SESSION_PY = REPO_ROOT / "scripts" / "session.py"
 SESSIONS_DIR = REPO_ROOT / "sessions"
@@ -115,7 +118,7 @@ def test_pdf_input_produces_cleaned_md_and_skips_asr_stages(tmp_path: Path):
         assert not (sdir / "cleaned.srt").exists(), \
             "phase-a stage ran for a doc input — should be skipped"
 
-        meta = json.loads((sdir / "metadata.json").read_text(encoding="utf-8"))
+        meta = json.loads((work_dir(sdir) / "metadata.json").read_text(encoding="utf-8"))
         assert meta["source_type"] == "doc"
         assert meta["doc_extraction"]["input_type"] == "pdf"
         assert meta["doc_extraction"]["chars"] > 0
@@ -154,7 +157,7 @@ def test_txt_input_produces_cleaned_md_and_skips_asr_stages(tmp_path: Path):
         assert not (sdir / "transcript.srt").exists()
         assert not (sdir / "cleaned.srt").exists()
 
-        meta = json.loads((sdir / "metadata.json").read_text(encoding="utf-8"))
+        meta = json.loads((work_dir(sdir) / "metadata.json").read_text(encoding="utf-8"))
         assert meta["source_type"] == "doc"
         assert meta["doc_extraction"]["input_type"] == "txt"
     finally:
@@ -206,7 +209,7 @@ def test_vlm_flag_renders_figures_and_writes_image_markers(tmp_path: Path):
         assert m2["stage"] == "image-insert"
         assert m2["tool"] == "scripts/insert_images.py"
 
-        meta = json.loads((sdir / "metadata.json").read_text(encoding="utf-8"))
+        meta = json.loads((work_dir(sdir) / "metadata.json").read_text(encoding="utf-8"))
         assert meta["qaqc"]["images"]["status"] == "pending_agent_handoff"
         assert meta["qaqc"]["image_insert"]["status"] == "pending_agent_handoff"
     finally:
@@ -246,7 +249,7 @@ def test_vlm_stop_at_images_gate_only_writes_describe_marker(tmp_path: Path):
         assert not (sdir / ".image_insert_pending.json").exists(), \
             "--stop-at images 時不該寫 insert marker(gate 沒生效)"
 
-        meta = json.loads((sdir / "metadata.json").read_text(encoding="utf-8"))
+        meta = json.loads((work_dir(sdir) / "metadata.json").read_text(encoding="utf-8"))
         assert meta["stop_at"] == "images"
         assert meta["qaqc"]["images"]["status"] == "pending_agent_handoff"
         assert meta["qaqc"]["image_insert"] is None, \

@@ -31,7 +31,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from session_paths import work_dir  # noqa: E402
+from session_paths import ensure_meta_dir, work_dir  # noqa: E402
 from srt_utils import parse_srt, pick_transcript, fmt_mmss
 from diarize import ensure_wav  # 共用 audio16k.wav(冪等)
 
@@ -202,7 +202,7 @@ def main():
     pj = work_dir(session_dir) / "prosody.json"
     pj.write_text(json.dumps(out, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    hl = session_dir / "highlights.md"
+    hl = ensure_meta_dir(session_dir) / "highlights.md"
     n_hl = write_highlights(cues, hl, args.top_percent)
     top = max(cues, key=lambda c: c["excitement"]) if cues else None
     print(f"[prosody] prosody.json + highlights.md({n_hl} 段精華,{elapsed}s)")

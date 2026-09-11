@@ -531,12 +531,12 @@ def main() -> int:
     low_ids = {id(e["row"]) for e in low}
     id_time = {b["id"]: b["start"] for b in cp["blocks"]}
     id_time.update({gp["id"]: gp["start"] for gp in cp.get("gaps", [])})
-    src_md = (sdir / args.plan).read_text(encoding="utf-8").splitlines()
+    src_md = (work_dir(sdir) / args.plan).read_text(encoding="utf-8").splitlines()
     groups = carry_over_program(src_md, id_time)
     md = build_md(sdir.name, groups,
                   [r for r in rows_all if id(r) not in low_ids],
                   [r for r in rows_all if id(r) in low_ids])
-    out = sdir / args.out_md
+    out = work_dir(sdir) / args.out_md
     out.write_text(md, encoding="utf-8")
 
     n_sp = sum(1 for r in rows_all if r["kind"] == "speech")

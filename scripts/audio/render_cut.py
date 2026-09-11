@@ -29,7 +29,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from session_paths import work_dir  # noqa: E402
+from session_paths import ensure_meta_dir, work_dir  # noqa: E402
 from srt_utils import parse_srt, pick_transcript, fmt_mmss, sec_to_ts
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -1264,7 +1264,7 @@ def main():
         sys.exit("[render] FAIL: .cutplan_pending.json 還在 — 剪輯提案未完成,"
                  "先讓對話 agent 提案 + MM 人審 cutplan.md")
     cp = json.loads((work_dir(sdir) / "cutplan.json").read_text(encoding="utf-8"))
-    plan_path = sdir / args.plan
+    plan_path = work_dir(sdir) / args.plan
     if not plan_path.exists():
         sys.exit(f"[render] FAIL: 找不到節目單 {plan_path}")
     try:
@@ -1937,7 +1937,8 @@ def main():
         "music": music_map,
     }, ensure_ascii=False, indent=2), encoding="utf-8")
     if chap_lines:
-        (sdir / "chapters.txt").write_text("\n".join(chap_lines) + "\n",
+        (ensure_meta_dir(sdir) / "chapters.txt").write_text(
+            "\n".join(chap_lines) + "\n",
                                            encoding="utf-8")
         print(f"[render] chapters.txt: {len(chap_lines)} 章")
     print(f"[render] ✅ {out.name}({fmt_mmss(final_dur)})+ cut_map.json")

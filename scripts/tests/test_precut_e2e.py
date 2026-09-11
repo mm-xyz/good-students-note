@@ -40,6 +40,7 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "audio"))
+from session_paths import meta_dir  # noqa: E402
 from precut import AUDIO_VENV  # noqa: E402
 from diarize import load_env_token  # noqa: E402
 
@@ -209,7 +210,8 @@ class TestPrecutMixdownE2E(unittest.TestCase):
         self.assertTrue((self.sdir / "words.json").exists())
         self.assertTrue((self.sdir / "transcript.speakers.srt").exists())
         self.assertTrue((self.sdir / "prosody.json").exists())
-        self.assertTrue((self.sdir / "highlights.md").exists())
+        # highlights 現在直接產在 _meta/(ADR-2026-09-11-workfiles-move-to-asset)
+        self.assertTrue((meta_dir(self.sdir) / "highlights.md").exists())
         self.assertIn("初剪完成", r.stdout)
 
     def test_rerun_is_idempotent_and_fast(self) -> None:

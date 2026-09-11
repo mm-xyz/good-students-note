@@ -52,7 +52,7 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "audio"))
-from session_paths import work_dir  # noqa: E402
+from session_paths import ensure_work_dir, work_dir  # noqa: E402
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 SESSIONS_DIR = PROJECT_ROOT / "sessions"
@@ -206,6 +206,9 @@ def new_session(args):
         print("Remove it first or pick a different date.", file=sys.stderr)
         sys.exit(2)
     sdir.mkdir()
+    # 先把工作檔的家建好:work_dir() 的 fallback 是「子資料夾不存在就用根」,
+    # 新 session 沒先建就會整批寫進根,之後永遠走 fallback、等於沒搬家。
+    ensure_work_dir(sdir)
 
     print(f"[session] created: {sdir}")
 
@@ -395,7 +398,7 @@ def new_session(args):
 
         # 7. Phase B merged → cleaned.md
         # (skipped if --stop-at transcribe/phase-a OR --skip-phase-b)
-        cleaned_md = work_dir(sdir) / "cleaned.md"
+        cleaned_md = sdir / "cleaned.md"
         phase_b_stats = None
         do_phase_b = (not args.skip_phase_b
                       and args.stop_at not in ("transcribe", "phase-a"))
@@ -595,7 +598,7 @@ def new_session(args):
                     mii.write_text(json.dumps({
                         "stage": "image-insert",
                         "engine": engine,
-                        "input_file": str((work_dir(sdir) / "cleaned.md").relative_to(PROJECT_ROOT)),
+                        "input_file": str((sdir / "cleaned.md").relative_to(PROJECT_ROOT)),
                         "rules_ref": "prompts/publish_qaqc.md § S4.5.11",
                         "tool": "scripts/insert_images.py",
                         "depends_on": "images 完成(image_notes.json 全數 described)",
@@ -633,7 +636,7 @@ def new_session(args):
             sys.exit(3)
 
         t0 = time.time()
-        cleaned_md = work_dir(sdir) / "cleaned.md"
+        cleaned_md = sdir / "cleaned.md"
         cmd = [str(DOC_VENV), str(DOC_EXTRACT_SCRIPT), str(src_link),
                "-o", str(cleaned_md)]
         extract_proc = subprocess.run(cmd, cwd=str(PROJECT_ROOT),

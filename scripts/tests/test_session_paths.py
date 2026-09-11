@@ -14,20 +14,43 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "audio"))
 import session_paths  # noqa: E402
-from session_paths import ensure_work_dir, work_dir  # noqa: E402
+from session_paths import (ensure_meta_dir, ensure_work_dir,  # noqa: E402
+                           meta_dir, work_dir)
 
 
-class TestDefaultIsSessionRoot(unittest.TestCase):
-    """預設不改行為:WORK_SUBDIR 空字串 = 工作檔留在 session 根。"""
+class TestDisabled(unittest.TestCase):
+    """WORK_SUBDIR 設成空字串 = 關掉搬家,工作檔留在 session 根。"""
 
     def test_work_dir_is_session_root(self) -> None:
         with tempfile.TemporaryDirectory() as t:
-            self.assertEqual(work_dir(Path(t)), Path(t))
+            with mock.patch.object(session_paths, "WORK_SUBDIR", ""):
+                self.assertEqual(work_dir(Path(t)), Path(t))
 
     def test_ensure_creates_nothing(self) -> None:
         with tempfile.TemporaryDirectory() as t:
-            self.assertEqual(ensure_work_dir(Path(t)), Path(t))
+            with mock.patch.object(session_paths, "WORK_SUBDIR", ""):
+                self.assertEqual(ensure_work_dir(Path(t)), Path(t))
             self.assertEqual(list(Path(t).iterdir()), [])
+
+
+class TestCurrentDefault(unittest.TestCase):
+    """現行預設 = _asset(2026-09-11 MM:「不適合露在眼花撩亂」)。"""
+
+    def test_default_subdir_is_asset(self) -> None:
+        self.assertEqual(session_paths.WORK_SUBDIR, "_asset")
+
+    def test_ensure_creates_asset_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as t:
+            self.assertEqual(ensure_work_dir(Path(t)), Path(t) / "_asset")
+
+    def test_meta_dir_is_created_on_write(self) -> None:
+        with tempfile.TemporaryDirectory() as t:
+            self.assertEqual(ensure_meta_dir(Path(t)), Path(t) / "_meta")
+            self.assertTrue((Path(t) / "_meta").is_dir())
+
+    def test_meta_dir_read_falls_back_to_root(self) -> None:
+        with tempfile.TemporaryDirectory() as t:
+            self.assertEqual(meta_dir(Path(t)), Path(t))
 
 
 class TestRelocated(unittest.TestCase):

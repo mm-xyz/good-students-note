@@ -56,7 +56,7 @@ def load_env_token() -> str | None:
 
 def ensure_wav(session_dir: Path) -> Path:
     """source.<ext> → audio16k.wav(冪等:已存在就重用;prosody 也吃同一份)。"""
-    wav = session_dir / WAV_NAME
+    wav = work_dir(session_dir) / WAV_NAME
     if wav.exists() and wav.stat().st_size > 0:
         print(f"[diarize] reuse {wav.name}")
         return wav

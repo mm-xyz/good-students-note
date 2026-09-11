@@ -33,6 +33,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from render_cut import parse_program  # noqa: E402
+from session_paths import work_dir  # noqa: E402
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 DRIVE_ROOT = (Path.home() / "Library/CloudStorage"
@@ -278,7 +279,7 @@ def main() -> None:
     args, passthru = ap.parse_known_args()
 
     sdir = Path(args.session).resolve()
-    local = sdir / args.plan
+    local = work_dir(sdir) / args.plan
     if not local.exists():
         sys.exit(f"[cut] FAIL: 找不到 {local}")
     ddir = find_drive_dir(sdir, args.drive)
