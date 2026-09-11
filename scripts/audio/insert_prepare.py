@@ -25,6 +25,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from session_paths import work_dir  # noqa: E402
 from srt_utils import parse_srt, fmt_mmss  # noqa: E402
 from cutplan import detect_asr_artifact  # noqa: E402 — #675 同根因:補錄跟正片
 # 一樣是 whisper ASR 轉出來的,一樣可能陷入重複迴圈,守門判準與正片共用一份。
@@ -88,7 +89,7 @@ def main() -> int:
         return 2
 
     # ── cutplan.json:inserts[檔案] = blocks(防幻覺驗證的 json 真相源)──
-    cj = sdir / "cutplan.json"
+    cj = work_dir(sdir) / "cutplan.json"
     cp = json.loads(cj.read_text(encoding="utf-8"))
     inserts = {i["file"]: i for i in cp.get("inserts", [])}
     inserts[args.file] = {"file": args.file, "speaker": speaker,
@@ -97,7 +98,7 @@ def main() -> int:
     cj.write_text(json.dumps(cp, ensure_ascii=False), encoding="utf-8")
 
     # ── cutplan.md:在 `## ➕ <檔案>` 標頭底下放 block 行 ──
-    md = sdir / "cutplan.md"
+    md = work_dir(sdir) / "cutplan.md"
     lines = md.read_text(encoding="utf-8").splitlines()
     hdr_i = next((i for i, l in enumerate(lines)
                   if (m := INSERT_HDR_RE.match(l.strip())) and m.group(1) == args.file),

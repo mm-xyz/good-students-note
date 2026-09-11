@@ -25,6 +25,7 @@ import wave
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from session_paths import work_dir  # noqa: E402
 from srt_utils import parse_srt, pick_transcript, fmt_mmss, rel
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -273,15 +274,15 @@ def write_cutplan_md(blocks: list[dict], path: Path, slug: str, srt_name: str,
 
 def prepare(args):
     session_dir = Path(args.session).resolve()
-    spk_srt = session_dir / "transcript.speakers.srt"
+    spk_srt = work_dir(session_dir) / "transcript.speakers.srt"
     srt_src = spk_srt if spk_srt.exists() else pick_transcript(session_dir)
     cues = parse_srt(srt_src)
     blocks = build_blocks(cues, args.merge_gap, args.max_block)
     n_art = flag_artifacts(blocks)
     gaps = build_gaps(blocks, args.min_gap)
-    gaps = refine_gaps(gaps, session_dir / "audio16k.wav")
+    gaps = refine_gaps(gaps, work_dir(session_dir) / "audio16k.wav")
 
-    cp_json = session_dir / "cutplan.json"
+    cp_json = work_dir(session_dir) / "cutplan.json"
     cp_json.write_text(json.dumps({
         "generated_at": dt.datetime.now().isoformat(timespec="seconds"),
         "source_srt": srt_src.name,
@@ -291,7 +292,7 @@ def prepare(args):
         "gaps": gaps,
     }, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    cp_md = session_dir / "cutplan.md"
+    cp_md = work_dir(session_dir) / "cutplan.md"
     write_cutplan_md(blocks, cp_md, session_dir.name, srt_src.name, gaps)
     total = sum(b["end"] - b["start"] for b in blocks)
     print(f"[cutplan] {len(blocks)} blocks({fmt_mmss(total)} 內容)→ "
@@ -301,7 +302,7 @@ def prepare(args):
               f"未自動剪,人審前先看 ⚠ASR-artifact 理由)")
 
     prosody_note = ("prosody.json 已就緒,高分段見 highlights.md,剪點會 snap 靜音"
-                    if (session_dir / "prosody.json").exists()
+                    if (work_dir(session_dir) / "prosody.json").exists()
                     else "prosody.json 不存在 — 建議先跑 prosody stage,剪點才能 snap 靜音")
     marker = session_dir / ".cutplan_pending.json"
     marker.write_text(json.dumps({
@@ -327,14 +328,14 @@ def prepare(args):
 def add_gaps(args):
     """對既有 session 補 G 列(冪等):不動任何既有行(含刪除線/勾選/章節)。"""
     session_dir = Path(args.session).resolve()
-    cp_json = session_dir / "cutplan.json"
-    cp_md = session_dir / "cutplan.md"
+    cp_json = work_dir(session_dir) / "cutplan.json"
+    cp_md = work_dir(session_dir) / "cutplan.md"
     data = json.loads(cp_json.read_text(encoding="utf-8"))
     if data.get("gaps"):
         print(f"[cutplan] cutplan.json 已有 {len(data['gaps'])} 個 gap,不重複加")
         return
     gaps = build_gaps(data["blocks"], args.min_gap)
-    gaps = refine_gaps(gaps, session_dir / "audio16k.wav")
+    gaps = refine_gaps(gaps, work_dir(session_dir) / "audio16k.wav")
     data["gaps"] = gaps
     cp_json.write_text(json.dumps(data, ensure_ascii=False, indent=2),
                        encoding="utf-8")

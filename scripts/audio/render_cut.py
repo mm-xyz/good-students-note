@@ -29,6 +29,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from session_paths import work_dir  # noqa: E402
 from srt_utils import parse_srt, pick_transcript, fmt_mmss, sec_to_ts
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -698,8 +699,8 @@ def insert_words_candidates(logical: Path, resolved: Path) -> list[Path]:
     seen: list[Path] = []
     for c in (logical.with_suffix(".words.json"),
               resolved.with_suffix(".words.json"),
-              logical.parent / "words.json",
-              resolved.parent / "words.json"):
+              work_dir(logical.parent) / "words.json",
+              work_dir(resolved.parent) / "words.json"):
         if c not in seen:
             seen.append(c)
     return seen
@@ -1262,7 +1263,7 @@ def main():
     if (sdir / ".cutplan_pending.json").exists():
         sys.exit("[render] FAIL: .cutplan_pending.json 還在 — 剪輯提案未完成,"
                  "先讓對話 agent 提案 + MM 人審 cutplan.md")
-    cp = json.loads((sdir / "cutplan.json").read_text(encoding="utf-8"))
+    cp = json.loads((work_dir(sdir) / "cutplan.json").read_text(encoding="utf-8"))
     plan_path = sdir / args.plan
     if not plan_path.exists():
         sys.exit(f"[render] FAIL: 找不到節目單 {plan_path}")
@@ -1349,7 +1350,7 @@ def main():
         print("[render] ⚙ config: "
               + " ".join(f"{k}={v}" for k, v in applied.items()))
 
-    spk_srt = sdir / "transcript.speakers.srt"
+    spk_srt = work_dir(sdir) / "transcript.speakers.srt"
     srt_src = spk_srt if spk_srt.exists() else pick_transcript(sdir)
     srt_text = "".join(c["text"] for c in parse_srt(srt_src))
     v_blocks = ([b for t in cp["tracks"] for b in t["blocks"]] if pertrack
@@ -1373,7 +1374,7 @@ def main():
             print(f"           {b['id']} {fmt_mmss(b['start'])} "
                   f"長 {b['end'] - b['start']:.1f}s  {b['text'][:24]}…")
 
-    wp = sdir / "words.json"
+    wp = work_dir(sdir) / "words.json"
     words = json.loads(wp.read_text(encoding="utf-8")) if wp.exists() else None
     # 室噪的「窗內無字／前後留白」要對原始 words.json 做證據檢查；後面
     # 為一般剪點丟棄 >3s 的 whisper artifact，不能讓那個方便措施放寬 🔇。
@@ -1405,7 +1406,7 @@ def main():
             it["source_start"] = roomtone_choice["start"]
             it["source_end"] = roomtone_choice["start"] + it["duration"]
     silences = []
-    pj = sdir / "prosody.json"
+    pj = work_dir(sdir) / "prosody.json"
     if pj.exists():
         silences = json.loads(pj.read_text(encoding="utf-8")).get("silences", [])
     else:
@@ -1693,7 +1694,7 @@ def main():
         #
         # `## ✂` 手動剪除本來就因為同樣理由放在 word_guard 之後(見下方原註解),
         # 刪除線與停頓收緊是同一類「人審點名」,只是當初漏了。
-        ranges = refine_boundaries(ranges, sdir / "audio16k.wav")
+        ranges = refine_boundaries(ranges, work_dir(sdir) / "audio16k.wav")
         if words_guard:
             ranges = word_guard(ranges, words_guard)
         if removals:
@@ -1927,7 +1928,7 @@ def main():
             chap_lines.append(
                 f"{sec_to_ts(dst_starts[seg_i]).replace(',', '.')} {ch['title']}")
 
-    (sdir / "cut_map.json").write_text(json.dumps({
+    (work_dir(sdir) / "cut_map.json").write_text(json.dumps({
         "generated_at": dt.datetime.now().isoformat(timespec="seconds"),
         "final_duration_secs": round(final_dur, 3),
         "speech_secs": round(speech_secs, 3),

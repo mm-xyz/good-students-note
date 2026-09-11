@@ -15,6 +15,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from session_paths import work_dir  # noqa: E402
 from srt_utils import parse_srt, write_srt, split_words_to_phrases, rel
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -28,8 +29,8 @@ def main():
     args = ap.parse_args()
 
     session_dir = Path(args.session).resolve()
-    srt_path = session_dir / "transcript.srt"
-    words_path = session_dir / "words.json"
+    srt_path = work_dir(session_dir) / "transcript.srt"
+    words_path = work_dir(session_dir) / "words.json"
     if not srt_path.exists() or not words_path.exists():
         print(f"需要 transcript.srt + words.json 都在 {session_dir}", file=sys.stderr)
         sys.exit(1)

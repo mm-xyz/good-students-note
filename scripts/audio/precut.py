@@ -35,6 +35,7 @@ from pathlib import Path
 from typing import Callable
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from session_paths import work_dir  # noqa: E402
 from srt_utils import find_source_media  # noqa: E402
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -105,16 +106,16 @@ def plan_stages(session_dir: Path, args: argparse.Namespace) -> tuple[str, list[
         media = find_source_media(session_dir)
 
     transcribe_cmd = [str(AUDIO_VENV), str(TRANSCRIBE_SCRIPT), str(media),
-                      "-o", str(session_dir / "transcript.srt"),
+                      "-o", str(work_dir(session_dir) / "transcript.srt"),
                       "--language", args.language]
-    context = Path(args.context) if args.context else session_dir / "context.txt"
+    context = Path(args.context) if args.context else work_dir(session_dir) / "context.txt"
     if context.exists():
         transcribe_cmd += ["--context", str(context)]
     stages.append(Stage(
         name="transcribe（本地 whisper）",
         cmd=transcribe_cmd,
-        done=lambda: (session_dir / "transcript.srt").exists()
-        and (session_dir / "words.json").exists(),
+        done=lambda: (work_dir(session_dir) / "transcript.srt").exists()
+        and (work_dir(session_dir) / "words.json").exists(),
     ))
 
     if material == MATERIAL_TRACKS:
@@ -129,21 +130,21 @@ def plan_stages(session_dir: Path, args: argparse.Namespace) -> tuple[str, list[
     stages.append(Stage(
         name=diarize_name,
         cmd=diarize_cmd,
-        done=lambda: (session_dir / "transcript.speakers.srt").exists(),
+        done=lambda: (work_dir(session_dir) / "transcript.speakers.srt").exists(),
     ))
 
     stages.append(Stage(
         name="prosody（高昂度 + 靜音偵測）",
         cmd=[str(AUDIO_VENV), str(PROSODY_SCRIPT), "--session", str(session_dir)],
-        done=lambda: (session_dir / "prosody.json").exists()
+        done=lambda: (work_dir(session_dir) / "prosody.json").exists()
         and (session_dir / "highlights.md").exists(),
     ))
 
     stages.append(Stage(
         name="cutplan prepare",
         cmd=[sys.executable, str(CUTPLAN_SCRIPT), "prepare", "--session", str(session_dir)],
-        done=lambda: (session_dir / "cutplan.md").exists()
-        and (session_dir / "cutplan.json").exists(),
+        done=lambda: (work_dir(session_dir) / "cutplan.md").exists()
+        and (work_dir(session_dir) / "cutplan.json").exists(),
     ))
 
     if material == MATERIAL_TRACKS:
@@ -151,7 +152,7 @@ def plan_stages(session_dir: Path, args: argparse.Namespace) -> tuple[str, list[
             name="pertrack blocks（逐軌節目單）",
             cmd=[sys.executable, str(PERTRACK_BLOCKS_SCRIPT),
                 "--session", str(session_dir)],
-            done=lambda: (session_dir / "cutplan.pertrack.md").exists(),
+            done=lambda: (work_dir(session_dir) / "cutplan.pertrack.md").exists(),
         ))
 
     return material, stages

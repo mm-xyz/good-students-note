@@ -37,6 +37,7 @@ import urllib.request
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "frames"))
+from session_paths import work_dir  # noqa: E402
 from common import load_config  # env 優先序:環境變數 > repo/.env > mars-cc/.env
 
 LINE_RE = re.compile(r"^- \[( |x|X)\] (B\d{3,5}) \[([^\]]+)\] (.*)$")
@@ -191,7 +192,7 @@ def main() -> None:
     args = ap.parse_args()
 
     sdir = Path(args.session)
-    plan = sdir / "cutplan.md"
+    plan = work_dir(sdir) / "cutplan.md"
     if not plan.is_file():
         sys.exit(f"[fillers] FAIL: 找不到 {plan}")
     cfg = load_config()

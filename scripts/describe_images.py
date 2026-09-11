@@ -23,6 +23,9 @@ import sys
 import time
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent / "audio"))
+from session_paths import work_dir  # noqa: E402
+
 DEFAULT_MODEL = "Gemini 3.5 Flash (Medium)"  # antigravity models 實機清單確認(2026-07-05)
 IMG_EXTS = (".jpg", ".jpeg", ".png", ".JPG", ".JPEG", ".PNG")
 CALL_TIMEOUT_S = 480  # 照片型(非投影片)+ 完整 schema prompt 實測需 >240s 餘裕
@@ -310,7 +313,7 @@ def main() -> int:
         if marker.exists():
             marker.unlink()
             print("[images] 全數完成 → 已刪 .images_pending.json")
-        meta_path = sdir / "metadata.json"
+        meta_path = work_dir(sdir) / "metadata.json"
         if meta_path.exists():
             meta = json.loads(meta_path.read_text(encoding="utf-8"))
             meta.setdefault("qaqc", {})["images"] = {

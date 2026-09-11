@@ -33,6 +33,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from session_paths import work_dir  # noqa: E402
 from srt_utils import fmt_mmss, parse_srt, split_words_to_phrases  # noqa: E402
 from cutplan import detect_asr_artifact  # noqa: E402 — #675 入口防禦性補標,見下
 
@@ -365,14 +366,14 @@ def main() -> int:
     args = ap.parse_args()
 
     sdir = Path(args.session)
-    cj = sdir / "cutplan.json"
+    cj = work_dir(sdir) / "cutplan.json"
     cp = json.loads(cj.read_text(encoding="utf-8"))
     n_backfill = backfill_artifact_flags(cp["blocks"])
     if n_backfill:
         print(f"[pertrack] ⚠ 入口補標 {n_backfill} 個疑似 whisper artifact 的"
               f" block(缺 asr_artifact 欄位的舊格式或新命中,來源:cutplan.json"
               f" canonical 文字,只標記不影響切分)")
-    words = json.loads((sdir / "words.json").read_text(encoding="utf-8"))
+    words = json.loads((work_dir(sdir) / "words.json").read_text(encoding="utf-8"))
     wavs = sorted(p for p in (sdir / "tracks").glob("*")
                   if p.suffix.lower() in (".wav", ".flac"))
     if not wavs:

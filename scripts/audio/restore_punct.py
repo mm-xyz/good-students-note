@@ -24,8 +24,12 @@ import os
 import pathlib
 import re
 import sys
+from pathlib import Path
 import unicodedata
 import urllib.request
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from session_paths import work_dir  # noqa: E402
 
 # 允許 LLM 插入的標點（剝除比對時也用這一組）
 PUNCT = set("。，、！？；：「」『』（）〈〉《》…—～·-.,!?;:\"'()[]")
@@ -264,7 +268,7 @@ def main():
     if args.from_list:
         names = [l.strip() for l in pathlib.Path(args.from_list).read_text(encoding="utf-8").splitlines() if l.strip()]
         for n in names:
-            p = target / n / "transcript.srt"
+            p = work_dir(target / n) / "transcript.srt"
             if p.exists():
                 targets.append(p)
             else:

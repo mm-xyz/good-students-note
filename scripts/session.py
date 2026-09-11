@@ -51,6 +51,9 @@ import sys
 import time
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent / "audio"))
+from session_paths import work_dir  # noqa: E402
+
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 SESSIONS_DIR = PROJECT_ROOT / "sessions"
 GROQ_SCRIPT = PROJECT_ROOT / ".claude/skills/good-student-notes/scripts/groq_transcribe.py"
@@ -220,7 +223,7 @@ def new_session(args):
 
     # 2. context.txt
     ctx_text = resolve_context(args.context)
-    ctx_path = sdir / "context.txt"
+    ctx_path = work_dir(sdir) / "context.txt"
     ctx_path.write_text(ctx_text, encoding="utf-8")
     print(f"[session] context.txt: {len(ctx_text)} chars / "
           f"{len(ctx_text.encode('utf-8'))} bytes")
@@ -241,7 +244,7 @@ def new_session(args):
         # 2026-07-27 MM 拍板:主線=本地 mlx-whisper(--asr local,零雲端零 key);
         # Groq 降為選配(--asr groq,要 GROQ_API_KEY)。
         t0 = time.time()
-        transcript = sdir / "transcript.srt"
+        transcript = work_dir(sdir) / "transcript.srt"
         asr_engine = args.asr
         if asr_engine == "local":
             if not AUDIO_VENV.exists():
@@ -287,7 +290,7 @@ def new_session(args):
             print(f"[session] ERROR: {asr_engine} did not produce transcript.srt",
                   file=sys.stderr)
             meta["error"] = f"{asr_engine}_transcription_failed"
-            (sdir / "metadata.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2),
+            (work_dir(sdir) / "metadata.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2),
                                                 encoding="utf-8")
             sys.exit(3)
         groq_secs = round(time.time() - t0, 1)
@@ -297,7 +300,7 @@ def new_session(args):
         original_metrics = srt_effective_chars(transcript)
 
         # 5. Phase A cleanup → cleaned.srt
-        cleaned_srt = sdir / "cleaned.srt"
+        cleaned_srt = work_dir(sdir) / "cleaned.srt"
         cmd = ["python3", str(QAQC_SCRIPT), str(transcript), "-o", str(cleaned_srt)]
         if args.domain:
             cmd += ["--domain", args.domain]
@@ -308,7 +311,7 @@ def new_session(args):
         # 6. Structured-preserving polish → transcript.cleaned.srt (optional)
         transcript_cleaned_srt = None
         if args.structured_srt:
-            transcript_cleaned_srt = sdir / "transcript.cleaned.srt"
+            transcript_cleaned_srt = work_dir(sdir) / "transcript.cleaned.srt"
             cmd = ["python3", str(QAQC_SCRIPT), str(transcript),
                    "-o", str(transcript_cleaned_srt),
                    "--structured"]
@@ -392,7 +395,7 @@ def new_session(args):
 
         # 7. Phase B merged → cleaned.md
         # (skipped if --stop-at transcribe/phase-a OR --skip-phase-b)
-        cleaned_md = sdir / "cleaned.md"
+        cleaned_md = work_dir(sdir) / "cleaned.md"
         phase_b_stats = None
         do_phase_b = (not args.skip_phase_b
                       and args.stop_at not in ("transcribe", "phase-a"))
@@ -592,7 +595,7 @@ def new_session(args):
                     mii.write_text(json.dumps({
                         "stage": "image-insert",
                         "engine": engine,
-                        "input_file": str((sdir / "cleaned.md").relative_to(PROJECT_ROOT)),
+                        "input_file": str((work_dir(sdir) / "cleaned.md").relative_to(PROJECT_ROOT)),
                         "rules_ref": "prompts/publish_qaqc.md § S4.5.11",
                         "tool": "scripts/insert_images.py",
                         "depends_on": "images 完成(image_notes.json 全數 described)",
@@ -630,7 +633,7 @@ def new_session(args):
             sys.exit(3)
 
         t0 = time.time()
-        cleaned_md = sdir / "cleaned.md"
+        cleaned_md = work_dir(sdir) / "cleaned.md"
         cmd = [str(DOC_VENV), str(DOC_EXTRACT_SCRIPT), str(src_link),
                "-o", str(cleaned_md)]
         extract_proc = subprocess.run(cmd, cwd=str(PROJECT_ROOT),
@@ -641,7 +644,7 @@ def new_session(args):
             print(f"[session] ERROR: extract.py failed (exit "
                   f"{extract_proc.returncode})", file=sys.stderr)
             meta["error"] = "doc_extract_failed"
-            (sdir / "metadata.json").write_text(
+            (work_dir(sdir) / "metadata.json").write_text(
                 json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
             sys.exit(3)
         try:
@@ -921,7 +924,7 @@ def new_session(args):
                                        if transcript_cleaned_srt else None),
         },
     })
-    (sdir / "metadata.json").write_text(
+    (work_dir(sdir) / "metadata.json").write_text(
         json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
 
     print(f"\n[session] ✅ complete: {sdir}")

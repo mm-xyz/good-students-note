@@ -44,6 +44,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from srt_utils import sec_to_ts, split_words_to_phrases  # noqa: E402
 from frames.common import load_config  # noqa: E402
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from session_paths import work_dir  # noqa: E402
+
 # llm-node ASR 預設值(可用 env / repo .env / mars-cc .env 覆蓋,同 LLM_NODE_* 慣例)
 ASR_DEFAULTS = {
     "LLM_NODE_SSH": "llm-node",
@@ -264,7 +267,7 @@ def main():
     out = Path(args.output)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text("\n".join(blocks) + "\n", encoding="utf-8")
-    words_path = out.parent / "words.json"
+    words_path = work_dir(out.parent) / "words.json"
     words_path.write_text(json.dumps(words, ensure_ascii=False), encoding="utf-8")
     print(f"[transcribe-llmnode] {n_seg} segments → {n} 短句 cues → {args.output}"
           f"({len(words)} words → {words_path.name})")

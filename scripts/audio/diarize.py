@@ -32,6 +32,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from session_paths import work_dir  # noqa: E402
 from srt_utils import (parse_srt, write_srt, pick_transcript, find_source_media,
                        fmt_mmss, rel, join_words)
 
@@ -240,7 +241,7 @@ def align_from_tracks(session_dir: Path) -> None:
     ingest_tracks.py 的 speakers.json(每軌 VAD = ground truth)+ transcript.srt
     (+ words.json 切換手)→ transcript.speakers.srt。speaker=軌名=真名,
     不需 pyannote 也不需命名 marker。"""
-    sj = session_dir / "speakers.json"
+    sj = work_dir(session_dir) / "speakers.json"
     if not sj.exists():
         print(f"[diarize] {sj} 不存在;先跑 ingest_tracks.py", file=sys.stderr)
         sys.exit(1)
@@ -248,7 +249,7 @@ def align_from_tracks(session_dir: Path) -> None:
     srt_src = pick_transcript(session_dir)
     cues = parse_srt(srt_src)
 
-    wp = session_dir / "words.json"
+    wp = work_dir(session_dir) / "words.json"
     if wp.exists():
         words = json.loads(wp.read_text(encoding="utf-8"))
         cues, n_split = split_cues_by_turns(cues, turns, words)
@@ -257,7 +258,7 @@ def align_from_tracks(session_dir: Path) -> None:
         cues = assign_speakers(cues, turns)
         note = "無 words.json,退回逐段貼標(多人大段不會被切開)"
 
-    out_srt = session_dir / "transcript.speakers.srt"
+    out_srt = work_dir(session_dir) / "transcript.speakers.srt"
     write_srt(cues, out_srt)
     switches = sum(1 for a, b in zip(cues, cues[1:]) if a["speaker"] != b["speaker"])
     print(f"[diarize] {out_srt.name}: {len(cues)} segments(來源 {srt_src.name}),"
@@ -266,11 +267,11 @@ def align_from_tracks(session_dir: Path) -> None:
 
 def write_naming_marker(session_dir: Path, speakers: list[str]) -> None:
     marker = session_dir / ".speaker_naming_pending.json"
-    ctx = session_dir / "context.txt"
+    ctx = work_dir(session_dir) / "context.txt"
     marker.write_text(json.dumps({
         "stage": "speaker-naming",
-        "input_file": rel(session_dir / "transcript.speakers.srt", PROJECT_ROOT),
-        "output_file": rel(session_dir / "speakers_map.json", PROJECT_ROOT),
+        "input_file": rel(work_dir(session_dir) / "transcript.speakers.srt", PROJECT_ROOT),
+        "output_file": rel(work_dir(session_dir) / "speakers_map.json", PROJECT_ROOT),
         "speakers": speakers,
         "context_file": rel(ctx, PROJECT_ROOT) if ctx.exists() else None,
         "instructions": (
@@ -287,8 +288,8 @@ def write_naming_marker(session_dir: Path, speakers: list[str]) -> None:
 
 def apply_map(session_dir: Path) -> None:
     """speakers_map.json → 重寫 transcript.speakers.srt 的 speaker 前綴。"""
-    map_path = session_dir / "speakers_map.json"
-    srt_path = session_dir / "transcript.speakers.srt"
+    map_path = work_dir(session_dir) / "speakers_map.json"
+    srt_path = work_dir(session_dir) / "transcript.speakers.srt"
     if not map_path.exists():
         print(f"[diarize] {map_path} 不存在;先填人名對照", file=sys.stderr)
         sys.exit(1)
@@ -298,7 +299,7 @@ def apply_map(session_dir: Path) -> None:
         c["speaker"] = mapping.get(c["speaker"], c["speaker"])
     write_srt(cues, srt_path)
     # speakers.json 同步換名,下游(prosody/cutplan)看到的是同一套標籤
-    sj = session_dir / "speakers.json"
+    sj = work_dir(session_dir) / "speakers.json"
     if sj.exists():
         data = json.loads(sj.read_text(encoding="utf-8"))
         for t in data.get("turns", []):
@@ -346,7 +347,7 @@ def main():
     speakers = sorted({t["speaker"] for t in turns}, key=lambda s: int(s[1:]))
     elapsed = round(time.time() - t0, 1)
 
-    (session_dir / "speakers.json").write_text(json.dumps({
+    (work_dir(session_dir) / "speakers.json").write_text(json.dumps({
         "model": args.model,
         "generated_at": dt.datetime.now().isoformat(timespec="seconds"),
         "elapsed_secs": elapsed,
@@ -359,7 +360,7 @@ def main():
 
     srt_src = pick_transcript(session_dir)
     cues = assign_speakers(parse_srt(srt_src), turns)
-    out_srt = session_dir / "transcript.speakers.srt"
+    out_srt = work_dir(session_dir) / "transcript.speakers.srt"
     write_srt(cues, out_srt)
     switches = sum(1 for a, b in zip(cues, cues[1:]) if a["speaker"] != b["speaker"])
     print(f"[diarize] {out_srt.name}: {len(cues)} segments(來源 {srt_src.name}),"

@@ -31,6 +31,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from session_paths import work_dir  # noqa: E402
 from srt_utils import parse_srt, pick_transcript, fmt_mmss
 from diarize import ensure_wav  # 共用 audio16k.wav(冪等)
 
@@ -173,7 +174,7 @@ def main():
     wav = ensure_wav(session_dir)
 
     # 有 diarize 產物就用帶 speaker 的 SRT(z-score 分軌),沒有就退回一般 SRT
-    spk_srt = session_dir / "transcript.speakers.srt"
+    spk_srt = work_dir(session_dir) / "transcript.speakers.srt"
     srt_src = spk_srt if spk_srt.exists() else pick_transcript(session_dir)
     cues = parse_srt(srt_src)
     print(f"[prosody] {len(cues)} segments(來源 {srt_src.name},"
@@ -198,7 +199,7 @@ def main():
             "excitement": c["excitement"],
         } for c in cues],
     }
-    pj = session_dir / "prosody.json"
+    pj = work_dir(session_dir) / "prosody.json"
     pj.write_text(json.dumps(out, ensure_ascii=False, indent=2), encoding="utf-8")
 
     hl = session_dir / "highlights.md"

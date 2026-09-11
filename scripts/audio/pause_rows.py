@@ -39,6 +39,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from session_paths import work_dir  # noqa: E402
 from render_cut import (parse_program, parse_strikes, snap_boundaries,  # noqa: E402
                         merge_ranges, pause_removals, strike_removals)
 from srt_utils import fmt_mmss  # noqa: E402
@@ -62,13 +63,13 @@ def main() -> int:
 
     sdir = Path(args.session)
     plan = sdir / args.plan
-    cp = json.loads((sdir / "cutplan.json").read_text(encoding="utf-8"))
+    cp = json.loads((work_dir(sdir) / "cutplan.json").read_text(encoding="utf-8"))
     by_id = {b["id"]: b for b in cp.get("blocks", [])}
     for t in cp.get("tracks", []):
         by_id.update({b["id"]: b for b in t["blocks"]})
-    words = [w for w in json.loads((sdir / "words.json").read_text(encoding="utf-8"))
+    words = [w for w in json.loads((work_dir(sdir) / "words.json").read_text(encoding="utf-8"))
              if w["end"] - w["start"] <= 3.0]
-    sil = json.loads((sdir / "prosody.json").read_text(encoding="utf-8")).get(
+    sil = json.loads((work_dir(sdir) / "prosody.json").read_text(encoding="utf-8")).get(
         "silences", [])
     if not sil:
         print("[pause] prosody.json 沒有靜音資料,無事可做", file=sys.stderr)
@@ -163,7 +164,7 @@ def main() -> int:
             gaps.append({"id": f"P{i:04d}", "start": round(a, 3),
                          "end": round(z, 3), "before": bid, "keep": False})
         cp["gaps"] = gaps
-        (sdir / "cutplan.json").write_text(
+        (work_dir(sdir) / "cutplan.json").write_text(
             __import__("json").dumps(cp, ensure_ascii=False), encoding="utf-8")
         plan.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
         print(f"[pause] ✓ 已插入 {len(merged)} 個 P 列 → {plan.name}"

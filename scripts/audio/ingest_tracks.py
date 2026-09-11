@@ -35,6 +35,9 @@ import time
 import wave
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from session_paths import work_dir  # noqa: E402
+
 LENGTH_TOL_SECS = 0.1          # 各軌長度差容忍(同機錄音應相同)
 VAD_WIN_SECS = 0.03            # RMS 短窗(30ms,非重疊)
 VAD_STRIDE_SAMPLES = 96        # 每窗最多取樣點數(subsample,控 python 迴圈成本)
@@ -124,7 +127,7 @@ def mixdown(info: dict[str, dict], session_dir: Path) -> None:
     subprocess.run(cmd, check=True)
 
     # 與 diarize.ensure_wav 同規格,下游(轉錄/diarize/prosody)直接重用
-    wav16k = session_dir / "audio16k.wav"
+    wav16k = work_dir(session_dir) / "audio16k.wav"
     print("[ingest] source.wav → audio16k.wav (16kHz mono)")
     subprocess.run(
         ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
@@ -229,7 +232,7 @@ def main():
     elapsed = round(time.time() - t0, 1)
 
     # schema 與 diarize.py 相容(superset):下游把它當 diarization ground truth
-    (session_dir / "speakers.json").write_text(json.dumps({
+    (work_dir(session_dir) / "speakers.json").write_text(json.dumps({
         "model": "ingest-tracks/energy-vad-v1",
         "generated_at": dt.datetime.now().isoformat(timespec="seconds"),
         "elapsed_secs": elapsed,

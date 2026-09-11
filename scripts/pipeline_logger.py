@@ -25,6 +25,9 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent / "audio"))
+from session_paths import work_dir  # noqa: E402
+
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 BUILD_DIR = PROJECT_ROOT / "build"
 SESSIONS_DIR = PROJECT_ROOT / "sessions"
@@ -53,7 +56,7 @@ def _session_log_path(session) -> Path:
         p = Path(s)
         # 傳進來的若已是一個存在的目錄路徑(絕對或相對),直接用;否則當作 slug 拼 sessions/<slug>
         sdir = p if p.is_dir() else SESSIONS_DIR / s
-    return sdir / "pipeline_log.jsonl"
+    return work_dir(sdir) / "pipeline_log.jsonl"
 
 
 def _session_name(session) -> str:

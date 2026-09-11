@@ -23,6 +23,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from normalize_punctuation import count_residual  # noqa: E402
 
+sys.path.insert(0, str(Path(__file__).resolve().parent / "audio"))
+from session_paths import work_dir  # noqa: E402
+
 # 新名 + 舊名(相容):任一存在即視為該階段未完成
 PENDING_MARKERS = (".phase_c_pending.json", ".phase_d_pending.json",
                    ".step_2_2_pending.json", ".step_2_5_pending.json")
@@ -33,7 +36,7 @@ STATUS_KEYS = (("phase_c", "step_2_2"), ("phase_d", "step_2_5"))
 def find_session_root(md_path: Path) -> Path | None:
     """從 md 的所在目錄往上找第一個含 metadata.json 的目錄。"""
     for d in [md_path.parent, *md_path.parents]:
-        if (d / "metadata.json").is_file():
+        if (work_dir(d) / "metadata.json").is_file():
             return d
     return None
 
@@ -97,7 +100,8 @@ def main() -> int:
         leftover = [m for m in PENDING_MARKERS if (root / m).exists()]
         if leftover:
             fails.append(f"殘留 marker:{', '.join(leftover)}(Phase C/D 尚未完成)")
-        meta = json.loads((root / "metadata.json").read_text(encoding="utf-8"))
+        meta = json.loads((work_dir(root) / "metadata.json")
+                          .read_text(encoding="utf-8"))
         qaqc = meta.get("qaqc") or {}
         for new_key, old_key in STATUS_KEYS:
             entry = qaqc.get(new_key) or qaqc.get(old_key) or {}

@@ -39,6 +39,9 @@ import sys
 import time
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from session_paths import work_dir  # noqa: E402
+
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 AUDIO = Path(__file__).resolve().parent
 VER_RE = re.compile(r"^v(\d+)_\d{8}")
@@ -108,7 +111,7 @@ def step_transcribe(sdir: Path, mp3: Path, force: bool) -> Path:
         print(f"[finalize] ☑️ 逐字稿已比成品新,跳過轉錄({out})")
         return out
     out.parent.mkdir(parents=True, exist_ok=True)
-    ctx = sdir / "context.txt"
+    ctx = work_dir(sdir) / "context.txt"
     cmd = [venv_python(), AUDIO / "transcribe_local.py", mp3, "-o", out]
     if ctx.exists():
         cmd += ["--context", ctx]
@@ -124,7 +127,7 @@ def step_prompt(sdir: Path, ep: str, final_srt: Path, template: Path | None) -> 
         cmd += ["--template", template]
     if run(cmd).returncode != 0:
         die("prompt 組裝失敗")
-    return sdir / "copy_prompt.md"
+    return work_dir(sdir) / "copy_prompt.md"
 
 
 def step_engine(name: str, prompt: str, sdir: Path, timeout: int) -> tuple[bool, str]:
@@ -172,7 +175,7 @@ def main() -> None:
     sdir = Path(args.session).resolve()
     if not sdir.is_dir():
         die(f"找不到 session {sdir}")
-    if not (sdir / "copy_material.md").exists():
+    if not (work_dir(sdir) / "copy_material.md").exists():
         die("缺 copy_material.md(該集章節+內容重點+金句紅線,由對話 agent 撰寫)")
 
     mp3 = args.mp3 or latest_final_mp3(sdir)

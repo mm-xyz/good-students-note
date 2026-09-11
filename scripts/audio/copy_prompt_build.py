@@ -23,6 +23,9 @@ import re
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from session_paths import work_dir  # noqa: E402
+
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 DEFAULT_TEMPLATE = (PROJECT_ROOT / "shared-material" / "水星貓的生活實驗室_v1"
                     / "prompt_集數文案.md")
@@ -44,8 +47,8 @@ def hms(t: float) -> str:
 
 def build_transcript(sdir: Path) -> str:
     blocks = {b["id"]: b for b in
-              json.loads((sdir / "cutplan.json").read_text(encoding="utf-8"))["blocks"]}
-    cm = json.loads((sdir / "cut_map.json").read_text(encoding="utf-8"))
+              json.loads((work_dir(sdir) / "cutplan.json").read_text(encoding="utf-8"))["blocks"]}
+    cm = json.loads((work_dir(sdir) / "cut_map.json").read_text(encoding="utf-8"))
     ranges = cm["ranges"]
     # 語速加速過的成品:src 區間長度會被壓縮 tempo 倍才落到 dst
     # (配樂沒變速,但配樂不在 ranges 裡)。少除這一下,整份時間碼會越後面越飄。
@@ -59,7 +62,7 @@ def build_transcript(sdir: Path) -> str:
     lines: list[str] = []
     prev_spk = None
     clip = False
-    for raw in (sdir / "cutplan.md").read_text(encoding="utf-8").splitlines():
+    for raw in (work_dir(sdir) / "cutplan.md").read_text(encoding="utf-8").splitlines():
         s = raw.strip()
         if TEASER_RE.match(s):
             clip = True
@@ -98,7 +101,7 @@ def plan_sequence(sdir: Path) -> list[tuple[str, str]]:
     """
     seq: list[tuple[str, str]] = []
     clip = False
-    for raw in (sdir / "cutplan.md").read_text(encoding="utf-8").splitlines():
+    for raw in (work_dir(sdir) / "cutplan.md").read_text(encoding="utf-8").splitlines():
         s = raw.strip()
         if TEASER_RE.match(s):
             clip = True
@@ -214,7 +217,7 @@ def main():
     tpl = args.template.read_text(encoding="utf-8")
     out = (tpl.split("---", 1)[1].lstrip("\n")
            .replace("{{集數}}", args.ep)
-           .replace("{{素材}}", (sdir / "copy_material.md").read_text(encoding="utf-8"))
+           .replace("{{素材}}", (work_dir(sdir) / "copy_material.md").read_text(encoding="utf-8"))
            .replace("{{逐字稿}}",
                     build_transcript_from_final(sdir, args.final_srt)
                     if args.final_srt else build_transcript(sdir)))
@@ -227,7 +230,7 @@ def main():
         out = ("⚠️ 時間戳規則:逐字稿的時間來自**定稿成品**,是唯一正確的時間軸。"
                "素材(copy_material)裡的時間戳可能來自舊版本,**一律以逐字稿為準**,"
                "不要照抄素材的時間。\n\n" + out)
-    dst = sdir / "copy_prompt.md"
+    dst = work_dir(sdir) / "copy_prompt.md"
     dst.write_text(
         f"# EP{args.ep} 集數文案 — 組裝完成的完整 prompt(貼給 agy/codex 即用)\n"
         f"\n> 由 shared-material 模板+copy_material+{src} 組裝;"

@@ -33,7 +33,8 @@ from pathlib import Path
 PIPELINE_KEEP = {
     "source.wav", "source.mp3", "source.m4a", "audio16k.wav",
     "transcript.srt", "transcript.speakers.srt", "words.json",
-    "prosody.json", "cutplan.json", "cutplan.md", "cut_map.json",
+    "prosody.json", "cutplan.json", "cutplan.md", "cutplan.pertrack.md",
+    "cut_map.json",
     "speakers.json", "speakers_map.json", "context.txt",
     "corrections.json", "metadata.json", "pipeline_log.jsonl",
     "cleaned.md", "cleaned.srt", "transcript.cleaned.srt",

@@ -25,6 +25,9 @@ sys.path.insert(0, str(Path(__file__).parent))
 from common import (SESSIONS_DIR, frames_workdir, fmt_ts, load_config,
                     load_manifest, parse_srt)
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "audio"))
+from session_paths import work_dir  # noqa: E402
+
 
 def build_paragraphs(cues: list[dict], para_gap: float, max_chars: int = 220) -> list[dict]:
     """cues → [{start, end, text}] 段落；靠時間縫隙與長度斷段。"""
@@ -96,7 +99,7 @@ def main():
 
     # 停頓:prosody.json 有真實聲學靜音就用它(音訊線產物),否則退回 SRT gap proxy
     pause_min = float(cfg["PAUSE_MIN_SEC"])
-    prosody_path = SESSIONS_DIR / args.slug / "prosody.json"
+    prosody_path = work_dir(SESSIONS_DIR / args.slug) / "prosody.json"
     hot = []  # 高昂段(excitement ≥ 75)
     if prosody_path.exists():
         pj = json.loads(prosody_path.read_text(encoding="utf-8"))

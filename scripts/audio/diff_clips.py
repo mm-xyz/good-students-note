@@ -37,6 +37,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from session_paths import work_dir  # noqa: E402
 from render_cut import parse_program, parse_strikes  # noqa: E402
 from srt_utils import fmt_mmss  # noqa: E402
 
@@ -187,7 +188,7 @@ def main() -> int:
         print("[diff] 兩版的人審決定完全相同,沒有要聽的地方。")
         return 0
 
-    cp = json.loads((sdir / "cutplan.json").read_text(encoding="utf-8"))
+    cp = json.loads((work_dir(sdir) / "cutplan.json").read_text(encoding="utf-8"))
     by_id = {b["id"]: b for b in cp.get("blocks", [])}
     for t in cp.get("tracks", []):
         by_id.update({b["id"]: b for b in t["blocks"]})

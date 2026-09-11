@@ -22,6 +22,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from srt_utils import sec_to_ts, split_words_to_phrases
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from session_paths import work_dir  # noqa: E402
+
 DEFAULT_MODEL = "mlx-community/whisper-large-v3-turbo"
 
 
@@ -88,7 +91,7 @@ def main():
     out = Path(args.output)
     out.write_text("\n".join(blocks) + "\n", encoding="utf-8")
     # word 級時間軸(字級精剪 ~~刪除線~~ 用;與 transcript.srt 同源同輪轉錄)
-    words_path = out.parent / "words.json"
+    words_path = work_dir(out.parent) / "words.json"
     words_path.write_text(json.dumps(words, ensure_ascii=False), encoding="utf-8")
     print(f"[transcribe-local] {n_seg} segments → {n} 短句 cues → {args.output}"
           f"({len(words)} words → {words_path.name})")
