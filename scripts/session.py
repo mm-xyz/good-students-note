@@ -132,9 +132,39 @@ def _slugify(name: str) -> str:
     return s
 
 
-def build_slug(audio_path: Path, today: dt.date | None = None) -> str:
-    today = today or dt.date.today()
-    return f"{today.isoformat()}_{_slugify(audio_path.stem)}"
+# 檔名裡的日期:ISO 要排在前面,否則 `2026-09-07` 會先被鬆散的那條咬掉一半。
+DATE_PATTERNS = (
+    re.compile(r"(20\d{2})-(\d{2})-(\d{2})"),          # 2026-09-07
+    re.compile(r"(20\d{2})[_-]?(\d{2})(\d{2})"),       # 2026_0907 / 20260907
+)
+
+
+def recording_date(audio_path: Path) -> dt.date:
+    """這一集是什麼時候**錄**的。
+
+    先從檔名解析(錄音機都會帶),解不出來才用檔案 mtime。
+    **不用今天**——今天是「處理日」,跟這集何時錄的無關,而且同一個音檔今天跑跟
+    下週跑會得到不同的 slug(2026-09-11 MM:「而且為什麼是 09-07」的由來)。
+    """
+    for pat in DATE_PATTERNS:
+        m = pat.search(audio_path.stem)
+        if m:
+            try:
+                return dt.date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+            except ValueError:
+                continue        # 檔名裡的數字不是合法日期,換下一條
+    return dt.date.fromtimestamp(audio_path.stat().st_mtime)
+
+
+def build_slug(audio_path: Path, today: dt.date | None = None,
+               name: str | None = None) -> str:
+    """`sessions/{錄音日}_{名字}/`(2026-09-11 MM 拍板)。
+
+    名字由 `--slug` 給;沒給才退回音檔檔名——錄音機的檔名(2026_0907_1917)
+    沒有意義,所以開新集數建議一律帶 --slug。
+    """
+    day = today or recording_date(audio_path)
+    return f"{day.isoformat()}_{_slugify(name or audio_path.stem)}"
 
 
 # ─── Context writer ───
@@ -198,7 +228,7 @@ def new_session(args):
         sys.exit(1)
 
     SESSIONS_DIR.mkdir(exist_ok=True)
-    slug = build_slug(audio)
+    slug = build_slug(audio, name=args.slug)
     sdir = SESSIONS_DIR / slug
     if sdir.exists():
         # If the session already exists, we do NOT overwrite its products; bail.
@@ -965,6 +995,9 @@ def main():
                      "(scripts/doc/extract.py → cleaned.md,跳過 transcribe/"
                      "phase-a/phase-b),音檔/影片走既有轉錄線,兩者最後都匯流到"
                      "共用的 enhance/notes 理解層")
+    new.add_argument("--slug",
+                     help="session 名字(目錄為 sessions/<錄音日>_<名字>/)。"
+                          "省略就用音檔檔名——錄音機檔名沒有意義,開新集數建議帶")
     new.add_argument("--context", help="Context: a string OR a path to a .txt file")
     new.add_argument("--domain", help="Typo dict domain overlay, e.g. parenting")
     new.add_argument("--identity",

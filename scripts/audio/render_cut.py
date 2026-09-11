@@ -30,7 +30,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from session_paths import ensure_meta_dir, work_dir  # noqa: E402
-from srt_utils import parse_srt, pick_transcript, fmt_mmss, sec_to_ts
+from srt_utils import (find_source_media, parse_srt, pick_transcript,
+                       fmt_mmss, sec_to_ts)
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 # 2026-08-10 MM:節目音樂用 v1(三首各自的正式曲——開場 Park Avenue、
@@ -1395,7 +1396,12 @@ def main():
     if roomtone_items:
         # 室噪只准從 source.wav 取。絕不能改用 .pertrack_bus.wav：後者是已剪過
         # 的輸出時間軸，而 words.json/cutplan 的座標是 source.wav 原始時間軸。
-        roomtone_source = sdir / "source.wav"
+        # 不要寫死 "source.wav":錄音機給的是 .WAV,macOS 檔名大小寫不敏感所以
+        # 剛好跑得動,Linux 會直接 FileNotFound(2026-09-11)。
+        try:
+            roomtone_source = find_source_media(sdir)
+        except FileNotFoundError:
+            roomtone_source = sdir / "source.wav"
         track_dir = sdir / "tracks"
         track_paths = sorted(set(track_dir.glob("*.WAV"))
                              | set(track_dir.glob("*.wav")))
