@@ -49,17 +49,47 @@ def mtime(p: Path) -> str:
     return dt.datetime.fromtimestamp(p.stat().st_mtime).strftime("%m-%d %H:%M")
 
 
+def episode_root(p: Path) -> Path:
+    """把指到段落子夾的路徑往上爬回**集數資料夾**(DRIVE_ROOT 的直接子資料夾)。
+
+    cutplan 一律住集數根(ADR 0015b)。2026-09-11 EP19-0 踩到:錄音放在
+    `EP19-0_包棟！/包棟介紹/`(同集還有「試錄」),`--drive` 指了音檔那層,
+    cutplan 與版本目錄就落在段落子夾裡——Apps Script 編輯器的 listEpisodes()
+    只掃 `<集數>/cutplan.md` 與 `<集數>/_meta/cutplan.md`、**不遞迴**,於是
+    整集在下拉選單裡消失,而且不報錯。一集多段(正片/試錄/分段錄)是常態,
+    段落資料夾不是集數資料夾,所以這裡硬正規化而不是靠人記得。
+
+    不在 DRIVE_ROOT 底下的路徑原樣尊重(測試 tempdir、別的掛載點)。
+    """
+    if DRIVE_ROOT not in p.parents:
+        return p
+    while p.parent != DRIVE_ROOT:
+        p = p.parent
+    return p
+
+
 def find_drive_dir(sdir: Path, override: Path | None) -> Path | None:
     """session slug 與 Drive 資料夾名對不起來(EP15 一邊叫「前任」一邊叫
-    「情緒管理」),只能靠 EP 編號配對;配對結果記進 .drive_dir 免得每次猜。"""
+    「情緒管理」),只能靠 EP 編號配對;配對結果記進 .drive_dir 免得每次猜。
+
+    不管從哪條路進來,回傳的一律是**集數資料夾**(見 episode_root)。
+    """
     memo = sdir / ".drive_dir"
     if override:
-        memo.write_text(str(override), encoding="utf-8")
-        return override
+        ep = episode_root(override)
+        if ep != override:
+            print(f"[cut] --drive 指到段落子夾,已上修到集數資料夾:{ep.name}/"
+                  f"(cutplan 住集數根,放深一層編輯器會選不到)")
+        memo.write_text(str(ep), encoding="utf-8")
+        return ep
     if memo.exists():
         p = Path(memo.read_text(encoding="utf-8").strip())
         if p.is_dir():
-            return p
+            ep = episode_root(p)
+            if ep != p:
+                print(f"[cut] .drive_dir 指到段落子夾,已上修到集數資料夾:{ep.name}/")
+                memo.write_text(str(ep), encoding="utf-8")
+            return ep
     m = EP_RE.search(sdir.name)
     if not m or not DRIVE_ROOT.is_dir():
         return None

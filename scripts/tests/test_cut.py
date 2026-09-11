@@ -13,10 +13,12 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import datetime as dt  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "audio"))
+import cut  # noqa: E402
 from cut import (version_name, drive_cutplan, find_drive_dir, next_out_name,  # noqa: E402
                  next_version_dir, route_label, semantic_diff)
 
@@ -191,6 +193,72 @@ class TestFindDriveDir(unittest.TestCase):
             sdir.mkdir()
             (sdir / ".drive_dir").write_text("/nope/gone", encoding="utf-8")
             self.assertIsNone(find_drive_dir(sdir, None))
+
+    # ── 集數根正規化（2026-09-11 EP19-0 實踩）────────────────────────
+    # 錄音放在 `EP19-0_包棟！/包棟介紹/`（同集還有「試錄」），--drive 指了音檔
+    # 那層，cutplan 與版本目錄就落在段落子夾裡。Apps Script 編輯器的
+    # listEpisodes() 只掃 `<集數>/cutplan.md` 與 `<集數>/_meta/cutplan.md`、
+    # 不遞迴，於是整集在下拉選單裡消失且不報錯。cutplan 一律住集數根
+    # （ADR 0015b），所以往上爬到 DRIVE_ROOT 的直接子資料夾。
+
+    def test_override_at_segment_subfolder_climbs_to_episode_root(self) -> None:
+        with tempfile.TemporaryDirectory() as t:
+            root = Path(t) / "1_Podcast 音檔"
+            ep = root / "EP19-0_包棟！"
+            seg = ep / "包棟介紹"
+            seg.mkdir(parents=True)
+            sdir = Path(t) / "s"
+            sdir.mkdir()
+            with mock.patch.object(cut, "DRIVE_ROOT", root):
+                self.assertEqual(find_drive_dir(sdir, seg), ep)
+                # memo 記的也要是集數根,下次不給 override 一樣對
+                self.assertEqual(find_drive_dir(sdir, None), ep)
+
+    def test_override_already_at_episode_root_is_unchanged(self) -> None:
+        with tempfile.TemporaryDirectory() as t:
+            root = Path(t) / "1_Podcast 音檔"
+            ep = root / "EP18_季中回顧"
+            ep.mkdir(parents=True)
+            sdir = Path(t) / "s"
+            sdir.mkdir()
+            with mock.patch.object(cut, "DRIVE_ROOT", root):
+                self.assertEqual(find_drive_dir(sdir, ep), ep)
+
+    def test_deeply_nested_override_climbs_all_the_way(self) -> None:
+        with tempfile.TemporaryDirectory() as t:
+            root = Path(t) / "1_Podcast 音檔"
+            ep = root / "EP19-0_包棟！"
+            deep = ep / "包棟介紹" / "raw"
+            deep.mkdir(parents=True)
+            sdir = Path(t) / "s"
+            sdir.mkdir()
+            with mock.patch.object(cut, "DRIVE_ROOT", root):
+                self.assertEqual(find_drive_dir(sdir, deep), ep)
+
+    def test_stale_memo_at_segment_subfolder_is_normalised(self) -> None:
+        """既有 .drive_dir 已經指錯層的 session,讀回時也要修正。"""
+        with tempfile.TemporaryDirectory() as t:
+            root = Path(t) / "1_Podcast 音檔"
+            ep = root / "EP19-0_包棟！"
+            seg = ep / "包棟介紹"
+            seg.mkdir(parents=True)
+            sdir = Path(t) / "s"
+            sdir.mkdir()
+            (sdir / ".drive_dir").write_text(str(seg), encoding="utf-8")
+            with mock.patch.object(cut, "DRIVE_ROOT", root):
+                self.assertEqual(find_drive_dir(sdir, None), ep)
+
+    def test_path_outside_drive_root_is_left_alone(self) -> None:
+        """不在 Drive 根底下的路徑(測試 tempdir、別的掛載點)原樣尊重。"""
+        with tempfile.TemporaryDirectory() as t:
+            root = Path(t) / "1_Podcast 音檔"
+            root.mkdir(parents=True)
+            elsewhere = Path(t) / "somewhere" / "deep"
+            elsewhere.mkdir(parents=True)
+            sdir = Path(t) / "s"
+            sdir.mkdir()
+            with mock.patch.object(cut, "DRIVE_ROOT", root):
+                self.assertEqual(find_drive_dir(sdir, elsewhere), elsewhere)
 
 
 
