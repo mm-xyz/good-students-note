@@ -25,7 +25,8 @@ AUDIO_DIR = Path(__file__).resolve().parent.parent / "audio"
 REPO_ROOT = AUDIO_DIR.parent.parent
 sys.path.insert(0, str(AUDIO_DIR))
 
-from render_cut import (parse_program, parse_strikes, strike_removals,  # noqa: E402
+from render_cut import (src_to_dst,  # noqa: F401
+                        parse_program, parse_strikes, strike_removals,  # noqa: E402
                         pause_removals, word_guard, subtract, merge_ranges,
                         snap_boundaries, validate_program, bgm_envelope,
                         env_to_expr, resolve_music, extend_unit_edges,
@@ -1076,6 +1077,52 @@ class TestTemplate(unittest.TestCase):
         self.assertEqual(m["end"], 8)
         self.assertEqual(m["tail"], 3)
         self.assertEqual(filled, {})
+
+
+class TestChapterSrcToDst(unittest.TestCase):
+    """章節時間碼:用**來源時間反查**,不要用 segment index(卡 #991)。
+
+    原本 chapters.txt 走 `unit_first_seg[anchor]` → `dst_starts[seg_i]`。
+    anchor 記的是「章節行之後的下一個 **unit**」,而一個 unit 是「doc 連續且
+    src 時間連續的 kept blocks 併成的一整段」——EP19-0 的 382 個 block 只合成
+    9 個 speech unit,落在同一個 unit 裡的章節全部拿到同一個 index、同一個
+    時間碼(實測 6 章只產出 3 個相異值,後四章全擠在 09:22.186)。
+
+    章節的解析度應該是 block 不是 unit,所以改成記下「章節後第一個保留 block
+    的來源時間」,再照剪輯後的對應表換算。
+    """
+
+    RANGES = [
+        {"src_start": 28.0, "src_end": 110.0, "dst_start": 7.0},
+        {"src_start": 111.0, "src_end": 160.0, "dst_start": 89.0},
+        {"src_start": 236.0, "src_end": 382.0, "dst_start": 138.0},
+    ]
+
+    def test_inside_a_kept_range_keeps_the_offset(self) -> None:
+        # 59s 在第一段內,距段首 31s → 7 + 31
+        self.assertAlmostEqual(src_to_dst(59.0, self.RANGES), 38.0)
+
+    def test_each_chapter_gets_its_own_time(self) -> None:
+        """同一個 unit 內的多個章節不可以再撞在一起。"""
+        got = [src_to_dst(s, self.RANGES) for s in (29.0, 59.0, 120.0, 240.0)]
+        self.assertEqual(len(set(got)), 4, f"時間碼撞了:{got}")
+
+    def test_src_in_a_cut_gap_lands_on_next_kept_start(self) -> None:
+        """章節後第一個 block 剛好被剪掉,就對到下一段保留的開頭。"""
+        self.assertAlmostEqual(src_to_dst(200.0, self.RANGES), 138.0)
+
+    def test_src_before_everything_lands_on_first(self) -> None:
+        self.assertAlmostEqual(src_to_dst(0.0, self.RANGES), 7.0)
+
+    def test_src_after_everything_clamps_to_last_range(self) -> None:
+        self.assertAlmostEqual(src_to_dst(999.0, self.RANGES), 138.0 + 146.0)
+
+    def test_no_ranges_returns_none(self) -> None:
+        self.assertIsNone(src_to_dst(10.0, []))
+
+    def test_boundary_is_inclusive_at_start(self) -> None:
+        self.assertAlmostEqual(src_to_dst(28.0, self.RANGES), 7.0)
+        self.assertAlmostEqual(src_to_dst(111.0, self.RANGES), 89.0)
 
 
 if __name__ == "__main__":

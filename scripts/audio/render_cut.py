@@ -759,6 +759,28 @@ def subtract(ranges: list[list[float]], removals: list[list[float]],
     return out
 
 
+def src_to_dst(src: float, ranges: list[dict]) -> float | None:
+    """來源時間 → 成品時間(卡 #991)。
+
+    `ranges` 就是 cut_map 的保留區間(src_start / src_end / dst_start),照剪輯
+    結果對應回去。落在被剪掉的空隙就對到下一段保留的開頭——章節指向的那個
+    block 被剪掉時,人要的是「從這裡開始的內容在成品的哪裡」。
+
+    為什麼不用 segment index:`unit_first_seg[anchor]` 的解析度是 **unit**
+    (doc 連續且 src 連續的 kept blocks 併成一段),EP19-0 的 382 個 block 只
+    合成 9 個 speech unit,同一個 unit 內的章節會全部拿到同一個時間碼。
+    """
+    if not ranges:
+        return None
+    for r in ranges:
+        if src < r["src_start"]:
+            return r["dst_start"]                       # 落在剪掉的空隙/最前面
+        if src <= r["src_end"]:
+            return r["dst_start"] + (src - r["src_start"])
+    last = ranges[-1]
+    return last["dst_start"] + (last["src_end"] - last["src_start"])
+
+
 def enforce_monotonic(segments: list[dict], min_frag: float = 0.12) -> list[dict]:
     """保證來源時間軸上**同一段音訊不會播兩次**。
 
@@ -1495,7 +1517,17 @@ def main():
         if it["kind"] in ("config", "cut"):
             continue
         if it["kind"] == "chapter":
-            chapters.append({"title": it["title"], "anchor": len(units)})
+            # 記來源時間而不是只記 unit index:章節的解析度是 block,不是 unit
+            # (卡 #991)。往後找第一個**保留**的正片 block——章節後面第一個 block
+            # 被剪掉是常有的事。
+            src_t = None
+            for nxt in program[program.index(it) + 1:]:
+                if (nxt["kind"] == "block" and nxt.get("keep")
+                        and nxt.get("block") and not nxt.get("insert")):
+                    src_t = nxt["block"]["start"]
+                    break
+            chapters.append({"title": it["title"], "anchor": len(units),
+                             "src": src_t})
         elif it["kind"] == "roomtone":
             # 🔇 重用既有 insert unit 的單一 input + atrim 路徑；不產 pad 檔，
             # 也不走 insert_words_candidates，因為室噪沒有 block 子行。
@@ -1929,10 +1961,18 @@ def main():
 
     chap_lines = []
     for ch in chapters:
-        seg_i = unit_first_seg.get(ch["anchor"])
-        if seg_i is not None and seg_i < len(dst_starts):
+        dst = src_to_dst(ch["src"], cut_map) if ch.get("src") is not None else None
+        if dst is None:        # 沒有來源時間(章節後面沒有任何保留 block)才退回
+            seg_i = unit_first_seg.get(ch["anchor"])
+            dst = dst_starts[seg_i] if (seg_i is not None
+                                        and seg_i < len(dst_starts)) else None
+        if dst is not None:
             chap_lines.append(
-                f"{sec_to_ts(dst_starts[seg_i]).replace(',', '.')} {ch['title']}")
+                f"{sec_to_ts(dst).replace(',', '.')} {ch['title']}")
+    n_uniq = len({ln.split(" ", 1)[0] for ln in chap_lines})
+    if len(chap_lines) > n_uniq:
+        print(f"[render] ⚠ {len(chap_lines)} 章只有 {n_uniq} 個相異時間碼 — "
+              f"有章節撞在一起,chapters.txt 不能直接用")
 
     (work_dir(sdir) / "cut_map.json").write_text(json.dumps({
         "generated_at": dt.datetime.now().isoformat(timespec="seconds"),
