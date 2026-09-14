@@ -255,7 +255,7 @@ def write_cutplan_md(blocks: list[dict], path: Path, slug: str, srt_name: str,
         "> ⚙ 這一行明寫的旋鈕一律贏過樣板。",
         "> 出片:`python3 scripts/audio/render_cut.py --session sessions/<slug>`",
         "",
-        f"## ⚙ template={DEFAULT_TEMPLATE}",
+        f"## ⚙ line=mixdown template={DEFAULT_TEMPLATE}",
         "",
     ]
     gap_before: dict[str, list] = {}

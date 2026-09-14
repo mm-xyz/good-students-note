@@ -367,7 +367,12 @@ def main() -> None:
         (vdir / "render.txt").write_text(note, encoding="utf-8")
         shutil.copy2(local, drive)                     # Drive 工作版保持最新
         print(f"[cut] ☑️ Drive:{vdir.name}/(同上)")
-    print(f"[cut] ✅ 完成 → {sdir / out}")
+
+    # 版本目錄已有逐 byte 相同的快照,session 根不留工作檔——「根目錄乾淨」不能
+    # 是一個要定期執行的動作,否則每出一版就髒一次(2026-09-11 MM 清掉 EP18 累積
+    # 的 13 個、354MB)。next_out_name 已改成也看版本目錄,刪掉不會讓版本號回跳。
+    (sdir / out).unlink()
+    print(f"[cut] ✅ 完成 → {lvdir / f'{stem}.mp3'}")
 
 
 if __name__ == "__main__":

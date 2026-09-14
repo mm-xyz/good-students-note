@@ -89,6 +89,10 @@ def plan_stages(session_dir: Path, args: argparse.Namespace) -> tuple[str, list[
     呼叫端要接住轉成乾淨的 FAIL 訊息。
     """
     material = detect_material(session_dir)
+    want_line = getattr(args, "line", "mixdown")
+    if want_line == "pertrack" and material != MATERIAL_TRACKS:
+        sys.exit("[precut] FAIL: --line pertrack 但 tracks/ 沒有可用的 .wav — "
+                 "靜默退回混音會讓人以為跑的是分軌線")
     stages: list[Stage] = []
 
     if material == MATERIAL_TRACKS:
@@ -148,7 +152,7 @@ def plan_stages(session_dir: Path, args: argparse.Namespace) -> tuple[str, list[
         and (work_dir(session_dir) / "cutplan.json").exists(),
     ))
 
-    if material == MATERIAL_TRACKS:
+    if material == MATERIAL_TRACKS and getattr(args, "line", "mixdown") == "pertrack":
         stages.append(Stage(
             name="pertrack blocks（逐軌節目單）",
             cmd=[sys.executable, str(PERTRACK_BLOCKS_SCRIPT),
@@ -187,6 +191,10 @@ def run_pipeline(stages: list[Stage], force: bool,
 def main() -> None:
     ap = argparse.ArgumentParser(description="拿到音檔到 cutplan 產出的一鍵初剪(ADR 0015 SOP 第 2 步)")
     ap.add_argument("--session", required=True)
+    ap.add_argument("--line", choices=("mixdown", "pertrack"), default="mixdown",
+                    help="剪輯路線。預設 mixdown(合軌)——2026-09-14 MM:分軌線"
+                         "每一線切合很怪。有 tracks/ 仍會 ingest 合出 source 並用"
+                         "分軌做講者歸屬,只是不產逐軌節目單。要走分軌明寫 pertrack")
     ap.add_argument("--force", action="store_true", help="忽略既有產物,整條管線重來")
     ap.add_argument("--num-speakers", type=int,
                     help="混音線 diarize 已知講者人數就鎖定(分軌線用軌名=真名,用不到)")
@@ -207,18 +215,22 @@ def main() -> None:
     except FileNotFoundError as e:
         sys.exit(f"[precut] FAIL: {e}")
 
-    label = "分軌(tracks/)" if material == MATERIAL_TRACKS else "混音(source only)"
+    pertrack_line = (material == MATERIAL_TRACKS
+                     and getattr(args, "line", "mixdown") == "pertrack")
+    label = ("分軌(tracks/)" if pertrack_line
+             else ("合軌(有 tracks/,只用來合 source 與講者歸屬)"
+                   if material == MATERIAL_TRACKS else "合軌(source only)"))
     print(f"[precut] session={session_dir.name}  素材形態={label}  {len(stages)} 個階段")
 
     rc = run_pipeline(stages, args.force)
     if rc != 0:
         sys.exit(rc)
 
-    plan = session_dir / ("cutplan.pertrack.md" if material == MATERIAL_TRACKS else "cutplan.md")
+    plan = session_dir / ("cutplan.pertrack.md" if pertrack_line else "cutplan.md")
     print(f"\n[precut] ✅ 初剪完成 → {plan}")
     print(f"[precut] 下一步(SOP 第 3 步):讀 {plan.name} 人審勾選/理由,"
          "完稿後跑 cut.py 出片"
-         + (f"（--plan {plan.name}）" if material == MATERIAL_TRACKS else ""))
+         + (f"（--plan {plan.name}）" if pertrack_line else ""))
 
 
 if __name__ == "__main__":

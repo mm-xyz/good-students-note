@@ -26,7 +26,8 @@ from precut import (detect_material, plan_stages, run_pipeline,  # noqa: E402
 
 
 def args_ns(**over) -> argparse.Namespace:
-    base = dict(force=False, num_speakers=None, context=None, language="zh")
+    base = dict(force=False, num_speakers=None, context=None, language="zh",
+                line="mixdown")
     base.update(over)
     return SimpleNamespace(**base)
 
@@ -198,16 +199,26 @@ class TestPlanStagesTracks(unittest.TestCase):
     def tearDown(self) -> None:
         self.tmp.cleanup()
 
-    def test_full_six_stage_order(self) -> None:
+    def test_default_is_five_stages_without_pertrack_blocks(self) -> None:
+        """有 tracks/ 但預設走合軌:ingest 照跑(它合出 source),不產逐軌節目單。
+
+        2026-09-14 MM 拍板改預設前,這裡斷言的是六階段含 pertrack blocks。
+        """
         material, stages = plan_stages(self.d, args_ns())
         self.assertEqual(material, MATERIAL_TRACKS)
         names = [s.name for s in stages]
-        self.assertEqual(len(names), 6)
+        self.assertEqual(len(names), 5, names)
         self.assertIn("ingest", names[0])
         self.assertIn("transcribe", names[1])
         self.assertIn("diarize", names[2])
         self.assertIn("prosody", names[3])
         self.assertIn("cutplan", names[4])
+
+    def test_full_six_stage_order_when_pertrack_is_asked_for(self) -> None:
+        material, stages = plan_stages(self.d, args_ns(line="pertrack"))
+        self.assertEqual(material, MATERIAL_TRACKS)
+        names = [s.name for s in stages]
+        self.assertEqual(len(names), 6)
         self.assertIn("pertrack", names[5])
 
     def test_transcribe_targets_mixdown_source_wav(self) -> None:
@@ -293,6 +304,57 @@ class TestRunPipelineFailure(unittest.TestCase):
         stages = [Stage("a", ["cmd-a"], done=lambda: False)]
         rc = run_pipeline(stages, force=False, runner=lambda cmd: 1)
         self.assertEqual(rc, 1)
+
+
+class TestMixdownIsTheDefault(unittest.TestCase):
+    """2026-09-14 MM:「應該就是建立好都預設合軌就好」。
+
+    分軌線不退場(卡 #681 是 pending 不是丟棄),但要 `--line pertrack` 明寫才走。
+    理由:MM 實聽「分軌線不太能用,每一線切合很怪」;EP18 的結論也一樣
+    (ADR-2026-09-06),兩集實際出片最後都走合軌。
+
+    **有 tracks/ 仍然要跑 ingest 與 from-tracks diarize**——前者是合軌的來源
+    (錄音機只給分軌時,source.wav 就是 ingest 合出來的),後者只提升講者歸屬
+    準確度、不碰音質。停掉的是 pertrack_blocks(逐軌節目單),那才是接縫的來源。
+    """
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.d = Path(self.tmp.name)
+        (self.d / "tracks").mkdir()
+        touch(self.d / "tracks" / "Mars.wav")
+        touch(self.d / "source.wav")
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def test_tracks_present_but_no_pertrack_blocks_stage(self) -> None:
+        _, stages = plan_stages(self.d, args_ns())
+        names = " ".join(s.name for s in stages)
+        self.assertNotIn("pertrack", names,
+                         f"預設不該產逐軌節目單,實際階段:{names}")
+
+    def test_ingest_still_runs_because_it_makes_the_mixdown(self) -> None:
+        _, stages = plan_stages(self.d, args_ns())
+        self.assertIn("ingest", " ".join(s.name for s in stages))
+
+    def test_from_tracks_diarize_still_used(self) -> None:
+        """分軌歸屬零模型又更準,跟音質無關,留著。"""
+        _, stages = plan_stages(self.d, args_ns())
+        diarize = [s for s in stages if "diarize" in s.name][0]
+        self.assertIn("--from-tracks", diarize.cmd)
+
+    def test_explicit_pertrack_still_works(self) -> None:
+        _, stages = plan_stages(self.d, args_ns(line="pertrack"))
+        self.assertIn("pertrack", " ".join(s.name for s in stages))
+
+    def test_pertrack_without_tracks_is_refused(self) -> None:
+        """明寫 pertrack 但素材根本沒有分軌 — 不可以靜默退回混音。"""
+        with tempfile.TemporaryDirectory() as t2:
+            d2 = Path(t2)
+            touch(d2 / "source.wav")
+            with self.assertRaises(SystemExit):
+                plan_stages(d2, args_ns(line="pertrack"))
 
 
 if __name__ == "__main__":

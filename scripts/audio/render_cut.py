@@ -1296,8 +1296,12 @@ def main():
         sys.exit(f"[render] FAIL: {e}")
     # 分軌模式 = cutplan.json 有 tracks 區,而且節目單用的是逐軌 block(兩碼前綴)
     tk_prefix = {t["prefix"] for t in cp.get("tracks", [])}
-    pertrack = bool(tk_prefix) and any(
+    has_tk_blocks = bool(tk_prefix) and any(
         it["kind"] == "block" and it["id"][:2] in tk_prefix for it in program)
+    # 2026-09-14 MM:「應該就是建立好都預設合軌就好」——有 tracks 區不再自動走
+    # 分軌線,要 `## ⚙ line=pertrack` 明寫。分軌線沒有退場(卡 #681 是 pending
+    # 不是丟棄),只是不再是預設。
+    pertrack = False
     # `## ⚙ line=pertrack|mixdown` 明寫就以它為準,沒寫才自動偵測(2026-08-11
     # MM:路線放 cutplan config 不放 render.txt——cutplan 是參數真相源,會跟著
     # 一起備份、一起進版本目錄,而且重跑時它是**輸入**不只是紀錄)。
@@ -1310,7 +1314,13 @@ def main():
                 sys.exit("[render] FAIL: cutplan 寫了 line=pertrack,但 "
                          "cutplan.json 沒有 tracks 區 — 先跑 pertrack_blocks.py")
             pertrack = (want == "pertrack")
-            print(f"[render] ⚙ line={want}(cutplan 指定,覆蓋自動偵測)")
+            print(f"[render] ⚙ line={want}(cutplan 指定)")
+            break
+    else:
+        if has_tk_blocks:
+            sys.exit("[render] FAIL: 這份節目單是逐軌格式(block 帶兩碼軌前綴),"
+                     "但 ⚙ 沒寫 line=pertrack。2026-09-14 起預設是合軌,"
+                     "不再從素材自動判斷 — 要走分軌請在 ⚙ 明寫 line=pertrack")
 
     # `## ⚙ audio=mixdown` = 剪輯決定照分軌人審(勾選/刪除線/兩層模型),但**音源
     # 走混音 source.wav**,不混 speech bus。2026-09-06 MM:「分軌的品質不是很
