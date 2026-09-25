@@ -48,7 +48,8 @@ BRIEF_PROMPT = """你在審一場繁體中文演講影片抽出的畫面幀，�
 {"keep": true/false, "kind": "slide|demo|chart|code|speaker|transition|other", "caption": "一句繁體中文圖說（20字內）", "text": ""}"""
 
 
-def call_vlm(cfg: dict, image_path: Path, prompt: str, maxdim: int | None = None) -> dict:
+def call_vlm(cfg: dict, image_path: Path, prompt: str, maxdim: int | None = None,
+             max_tokens: int | None = None) -> dict:
     if maxdim:
         # Gemma 的 vision encoder 是固定 896x896 patch，送 1920x1080 會觸發 pan-and-scan
         # 切成多塊、image token 翻倍，llm-node 的 14GB 會被擠爆（症狀是 Connection refused
@@ -76,7 +77,7 @@ def call_vlm(cfg: dict, image_path: Path, prompt: str, maxdim: int | None = None
             "temperature": 0.1,
             # reasoning 模型（如 gemma-4 QAT）思考也吃這個額度，太低會 length 截斷、content 空白；
             # 文字密的投影片思考會超標，預設 6000、可用 .env 的 SCREEN_MAX_TOKENS 再加大
-            "max_tokens": int(cfg.get("SCREEN_MAX_TOKENS", "6000")),
+            "max_tokens": max_tokens or int(cfg.get("SCREEN_MAX_TOKENS", "6000")),
         },
         timeout=600,
     )
@@ -100,8 +101,12 @@ def call_vlm(cfg: dict, image_path: Path, prompt: str, maxdim: int | None = None
 
 
 def screen_frame(cfg: dict, image_path: Path, brief: bool = False) -> dict:
+    # brief 只要一個小 JSON，給 6000 額度會讓模型對複雜投影片一路寫下去：
+    # 實測請求時間 20s→55s→3m4s 遞增後把 llm-node 打到 OOM（kernel OOM killer 收掉
+    # llama-swap，13G peak）。壓到 300 就夠，順便讓每張的記憶體佔用可預測。
     out = call_vlm(cfg, image_path, BRIEF_PROMPT if brief else PROMPT,
-                   maxdim=int(cfg.get("SCREEN_BRIEF_MAXDIM", "1024")) if brief else None)
+                   maxdim=int(cfg.get("SCREEN_BRIEF_MAXDIM", "1024")) if brief else None,
+                   max_tokens=int(cfg.get("SCREEN_BRIEF_MAX_TOKENS", "300")) if brief else None)
     if not isinstance(out.get("keep"), bool):
         raise ValueError(f"keep 欄位不是布林：{out}")
     return {
@@ -145,7 +150,8 @@ def main():
     print(f"{args.slug}：{verb} {len(todo)}/{len(frames)} 張（model={cfg['LLM_NODE_MODEL']}）")
 
     t0 = time.time()
-    done = errors = 0
+    done = errors = consecutive = 0
+    backoff = 90
     for f in todo:
         path = frames_workdir(args.slug) / f["file"]
         try:
@@ -164,7 +170,19 @@ def main():
             if not args.enrich:
                 f["screen_error"] = str(e)[:300]
             errors += 1
+            consecutive += 1
             print(f"⚠️ {f['file']}: {e}")
+            # llm-node 的 12B vision 批次會週期性被 kernel OOM 收掉（機器 15G、
+            # llama-server 基線就 12.6G），llama-swap 約 40s 自動重啟完成。連續失敗
+            # 代表服務正在重啟中，繼續打只是空轉——退避等它回來，同一輪就能自己接上。
+            if consecutive >= 3:
+                print(f"   ⏸ 連續 {consecutive} 張失敗，等 {backoff}s 讓服務回復…", flush=True)
+                time.sleep(backoff)
+                backoff = min(backoff * 2, 240)
+                consecutive = 0
+        else:
+            consecutive = 0
+            backoff = 90
         done += 1
         save_manifest(args.slug, manifest)  # 逐張落盤，中斷不丟進度
 
