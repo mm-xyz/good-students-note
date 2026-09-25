@@ -16,6 +16,8 @@ import time
 from pathlib import Path
 
 import requests
+from PIL import Image
+import io
 
 sys.path.insert(0, str(Path(__file__).parent))
 from common import frames_workdir, load_config, load_manifest, save_manifest
@@ -34,9 +36,30 @@ PROMPT = """你在審一場繁體中文技術演講影片抽出的畫面幀，�
 只回傳 JSON，不要其他文字，格式：
 {"keep": true/false, "kind": "slide|demo|chart|code|speaker|transition|other", "caption": "一句繁體中文圖說（15字內）", "text": "畫面上的重點文字，逐字抄錄，沒有就空字串"}"""
 
+BRIEF_PROMPT = """你在審一場繁體中文演講影片抽出的畫面幀，決定它值不值得插進演講筆記。
 
-def call_vlm(cfg: dict, image_path: Path, prompt: str) -> dict:
-    b64 = base64.b64encode(image_path.read_bytes()).decode()
+判準：
+- 保留（keep=true）：投影片、demo 畫面、圖表、命盤／表格、程式碼——任何「只聽逐字稿會漏掉」的資訊。
+- 丟棄（keep=false）：講者特寫、過場黑幀、模糊晃動幀、跟前後重複的畫面。
+
+**不要抄錄畫面文字**：密集表格、命盤、名單一律只判類型與圖說，逐字抄錄由後續 OCR 階段處理。
+
+只回傳 JSON，不要其他文字，格式：
+{"keep": true/false, "kind": "slide|demo|chart|code|speaker|transition|other", "caption": "一句繁體中文圖說（20字內）", "text": ""}"""
+
+
+def call_vlm(cfg: dict, image_path: Path, prompt: str, maxdim: int | None = None) -> dict:
+    if maxdim:
+        # Gemma 的 vision encoder 是固定 896x896 patch，送 1920x1080 會觸發 pan-and-scan
+        # 切成多塊、image token 翻倍，llm-node 的 14GB 會被擠爆（症狀是 Connection refused
+        # 而不是 OOM，見 mars-cc MEMORY）。只判 keep/kind/caption 用不到原始解析度。
+        im = Image.open(image_path)
+        im.thumbnail((maxdim, maxdim), Image.LANCZOS)
+        buf = io.BytesIO()
+        im.convert("RGB").save(buf, format="JPEG", quality=85)
+        b64 = base64.b64encode(buf.getvalue()).decode()
+    else:
+        b64 = base64.b64encode(image_path.read_bytes()).decode()
     resp = requests.post(
         f"{cfg['LLM_NODE_URL']}/chat/completions",
         headers={"Authorization": f"Bearer {cfg.get('LLM_NODE_TOKEN', '')}"},
@@ -76,8 +99,9 @@ def call_vlm(cfg: dict, image_path: Path, prompt: str) -> dict:
     return out
 
 
-def screen_frame(cfg: dict, image_path: Path) -> dict:
-    out = call_vlm(cfg, image_path, PROMPT)
+def screen_frame(cfg: dict, image_path: Path, brief: bool = False) -> dict:
+    out = call_vlm(cfg, image_path, BRIEF_PROMPT if brief else PROMPT,
+                   maxdim=int(cfg.get("SCREEN_BRIEF_MAXDIM", "1024")) if brief else None)
     if not isinstance(out.get("keep"), bool):
         raise ValueError(f"keep 欄位不是布林：{out}")
     return {
@@ -98,6 +122,9 @@ def main():
     ap.add_argument("slug")
     ap.add_argument("--limit", type=int, default=None, help="只處理前 N 張（spot check 用）")
     ap.add_argument("--redo", action="store_true", help="忽略既有結果全部重審")
+    ap.add_argument("--brief", action="store_true",
+                    help="只判 keep/kind/caption，不要 VLM 逐字抄錄畫面文字（密集表格／命盤類"
+                         "抄錄會吃掉數千 token 而逾時；抄錄交給 ocr.py）")
     ap.add_argument("--enrich", action="store_true",
                     help="對已保留（keep）的幀補跑完整畫面文字逐字抄錄，更新 screen.text；"
                          "失敗保留原 text 不動")
@@ -129,7 +156,7 @@ def main():
                 f["screen"]["enriched"] = True
                 print(f"✍️ {f['file']}  {len(text)} 字")
             else:
-                f["screen"] = screen_frame(cfg, path)
+                f["screen"] = screen_frame(cfg, path, brief=args.brief)
                 f.pop("screen_error", None)
                 mark = "✓ keep" if f["screen"]["keep"] else "  drop"
                 print(f"{mark}  {f['file']}  [{f['screen']['kind']}] {f['screen']['caption']}")
