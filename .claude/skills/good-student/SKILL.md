@@ -21,8 +21,10 @@ flowchart TD
     A["/good-student &lt;path&gt;"] --> B{"Step 0-1<br/>count_figures.py<br/>實測數圖"}
     B -- "有圖" --> C["Step 0-2<br/>呼叫 doc-vlm-to-md<br/>圖說轉錄＋錨點插回原位"]
     B -- "🎬 影片" --> C2["Step 0-2b<br/>/video-to-md<br/>抽幀＋VLM 篩圖＋併回逐字稿"]
+    B -- "🎙️ 純音訊" --> C3["Step 0-2c 轉錄＋語者分辨"]
     B -- "實測 0 張" --> D["Step 0-3<br/>session.py 抽文字"]
     C2 --> E
+    C3 --> E
     C --> E{"核對落地率<br/>轉錄 N vs 插入 M"}
     E -- "有落差" --> C
     E -- "齊了" --> F["Step 0-4<br/>開切前自我確認三題"]
@@ -95,6 +97,103 @@ N 少了看不出來；實測曾靜默丟失 74 張。
 而且會產生跟 EPUB 缺圖一樣的假象：「逐字稿裡沒提到 X」，其實 X 一直在投影片上。
 
 畫面確實沒有資訊（純談話、podcast 錄影）才回頭走 `audio-to-md`。
+
+### 0-2c　音訊走「轉錄 + 語者分辨」雙線
+
+純音訊也要先過這關。**這關沒過不准往下切卡**——轉錄與語者分辨分兩條線跑，最後再對齊。
+
+#### 抽音軌
+
+```bash
+ffmpeg -map 0:a:0 -ac 1 -ar 16000 -c:a pcm_s16le
+```
+
+iPhone 語音備忘錄是 `.qta`（QuickTime 容器）。第一軌 `aac` stereo 才是拿來轉錄的。
+
+第二軌是 `apac`（Apple 專有 first-order Ambisonics，ACN/SN3D）。ffmpeg 解不開，`afconvert` 沒有選軌參數；要解得自己寫 AVFoundation。
+
+⚠️ 方位分離（DOA）在室內談話錄音上實測無效。殘響會打亂方位；拿語意去驗就破了：標成「對面方位」的句子，語意上全是主講者的話。不要為了分語者去碰這條。
+
+#### 轉錄：長音檔必開 VAD
+
+whisper.cpp 轉 30 分鐘以上中文長檔會陷入重複迴圈，同一句洗版到檔尾。2026-09-26 實測：37 分鐘錄音從 01:28 起把一句話重複到結束，整份轉錄作廢。
+
+| 設定 | unique 句 | 速度 |
+| :--- | :--- | :--- |
+| 原樣（server 帶 `--carry-initial-prompt`） | 40%（作廢） | RTF 0.41 |
+| `-mc 0`（等同 no-context） | 60%，仍重複 | RTF 0.73 |
+| `-mc 0` ＋ Silero VAD | 93–95% | RTF 0.29 |
+
+正式指令：
+
+```bash
+whisper-cli -m <model> -f in.wav -l zh -mc 0 \
+  --vad -vm ~/whisper.cpp/models/for-tests-silero-v6.2.0-ggml.bin \
+  -vp 300 -vsd 300 -vmsd 30 -vt 0.4 -ojf -of out --prompt "以下是繁體中文的對話錄音。"
+```
+
+- `for-tests-silero-*.ggml.bin`（885KB）名字有 `for-tests`，但就是可用的正式 VAD 模型。
+- VAD 比不開快 2.5 倍（跳過靜音），沒有速度代價。
+- 代價：句末標點全失（實測 0%）、句子較碎 → 交校稿階段補。
+- `-vp`（padding）不加會吃掉句首字（「然後地址…」→「地址…」）。
+- ⚠️ VAD 模式下 token 級時間戳沒有加上段偏移（segment 說 03:40、token 說 01:25）。只有 segment 級 `timestamps` 可信，不要拿 token 時間軸做對齊。
+- llm-node 的 whisper-server 啟動時寫死 `--carry-initial-prompt`，per-request 蓋不掉。長檔一律改走 `whisper-cli`，不要走 server。
+- 判活：`grep -oE "^\[[0-9:.]+ " out.log | tail -1` 看轉錄到音檔第幾分鐘，不要看 CPU。
+
+#### 語者分辨：用 repo 現成的
+
+不要自己造。直接跑：
+
+```bash
+.venv-audio/bin/python scripts/audio/diarize.py \
+    --session sessions/<slug> --num-speakers 2 --device auto
+```
+
+- `.venv-audio` 已有 pyannote-audio 4.0.7 + torch（Python 3.13；torch 對 3.14 支援落後）；`.env` 的 `HF_TOKEN` 與 `pyannote/speaker-diarization-community-1` 模型都已就緒。
+- 已經在別處轉好逐字稿的話，寫成 SRT 丟進 `sessions/<slug>/_asset/transcript.srt` 即可，不必重跑轉錄；`source.<ext>` 用 symlink 指向音檔。
+- 已知人數就一定要下 `--num-speakers`。
+
+**2026-09-26 的繞路事故：**為了分辨說話者另造了一套 sherpa-onnx + 3D-Speaker，戶外錄音勉強可用（與 pyannote 一致率 98%），但室內同性別對話直接失效（97:3 分不出第二人）；接著又去解 Ambisonics 方位、算基頻分佈，全部白做——而 repo 裡一直有能跑的 pyannote。**教訓：先找既有能跑的工具，不要發明新解法。**
+
+附帶教訓：基頻（F0）不能用來分語者。拿已知兩人的對照組去驗，兩人中位只差 13 Hz、分佈無雙峰，這支尺對同性別無辨別力。任何自製的判別方法，先拿「已知答案」的對照組驗過它本身有效再用。
+
+#### 對齊與輪次
+
+whisper segment × diarization turn 取最大時間重疊指派語者；覆蓋率低（<0.4）改用該段 word 範圍重判；完全無重疊的句子用時間上最近的語者補。輪次合併間隔取 0.8 秒。取 2 秒會把快速一問一答黏成一段，實測會把對方的話併進來。
+
+低覆蓋或次名語者重疊 >0.35 的句子，標為語者待確認，不與前後合併。
+
+### 逐字稿校稿
+
+轉錄與語者對齊完成後才校稿。**這關沒過不准往下切卡。**
+
+#### 簡繁與標點
+
+- 簡繁只用 `opencc s2tw`，不要用 `s2twp`。`s2twp` 會做詞彙替換：型別／社群／迴圈。轉完必掃一簡多繁風險字；⚠️ 命理語境必踩「丑→醜」（地支／生肖的「丑」會被轉成「醜」）。
+- CJK 相鄰的半形 `,:;?!()` 一律轉全形。⚠️ 驗收的尺要排除 `(sic)`——那是學術慣例，本來就用半形括號；不排除會誤報，實測誤報 60 處。
+- 全形化在前段驗過是 0，後續校正步驟會再引入半形，所以正規化要放在管線最後一步，不是中間。
+
+#### 校正表流程（四步，不可省）
+
+1. 建對照表：`wrong → right` ＋理由。
+2. 逐條印出上下文驗證：0 次命中的條目要刪；同一個詞在不同上下文可能不該改。實測：「討伐」在兩處是「桃花」、第三處是「敷衍」，一律替換就會改錯。
+3. 套用，並區分 `high_confidence`（直接換）／`context_dependent`（限定上下文）／`mark_sic`。
+4. 核對錨點：替換前後抓幾個關鍵詞（人名、公司名、金額）數出現次數，確認沒被吃掉。
+
+沒把握一律標 `(sic)` 保留原文，不猜。撤回紀錄也要留在對照表裡：實測差點把紫微斗數術語「帶破／帶殺」改成「帶煞」——領域術語看起來像錯字，動手前先確認它是不是行話。
+
+最強的校正依據是對話中另一方複述同一個詞：例「借斷」→戒斷（諮商師自己說了「戒斷那個東西」）、「沒有被接觸」→沒有被接住（說話者下一句自己用了「接不住」）。這比單看一句話猜可靠。
+
+ASR 重複幻覺段要用明確錨點切除並標註省略。切完必須核對關鍵內容還在；實測切除 193 字，核對人名／公司名／金額全數保留。
+
+### 隱私原則
+
+私人錄音（諮商、命理、醫療）走這條線時：
+
+- 全程本機（whisper.cpp ＋ pyannote），不要送任何雲端 ASR。
+- 產物不進版控（`sessions/` 已 gitignore）。
+- 為了轉錄而複製到其他機器的音檔與中間產物，收工時要刪掉並核對。
+- 要派 subagent 在這個 repo 工作前，先把 `sessions/` 下的私人產物移出 repo。
 
 ### 0-3　沒有圖才可以直接抽文字
 
