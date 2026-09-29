@@ -104,6 +104,9 @@ N 少了看不出來；實測曾靜默丟失 74 張。
 
 #### 抽音軌
 
+> **走 `transcribe_local.py` / `transcribe_llmnode.py` 就不用自己抽**——兩支腳本都會抽好
+> 16k 單聲道再送進推理。這節是手動路徑（走下方 VAD 備案時）與 `.qta` 結構的說明。
+
 ```bash
 ffmpeg -map 0:a:0 -ac 1 -ar 16000 -c:a pcm_s16le
 ```
@@ -114,9 +117,69 @@ iPhone 語音備忘錄是 `.qta`（QuickTime 容器）。第一軌 `aac` stereo 
 
 ⚠️ 方位分離（DOA）在室內談話錄音上實測無效。殘響會打亂方位；拿語意去驗就破了：標成「對面方位」的句子，語意上全是主講者的話。不要為了分語者去碰這條。
 
-#### 轉錄：長音檔必開 VAD
+#### 轉錄：三條 ASR 路徑，先選對再動手
 
-whisper.cpp 轉 30 分鐘以上中文長檔會陷入重複迴圈，同一句洗版到檔尾。2026-09-26 實測：37 分鐘錄音從 01:28 起把一句話重複到結束，整份轉錄作廢。
+**預設走 `transcribe_local.py`（Mac 的 mlx-whisper）。** 2026-07-27 MM 拍板轉錄主線改本地，
+裝在 `.venv-audio`（mlx-whisper 0.4.3 ＋ mlx-metal）。**39.5 分鐘音檔實測約 84 秒。**
+
+| 路徑 | 引擎 | 跑在哪 | 速度 | 什麼時候用 |
+| :--- | :--- | :--- | :--- | :--- |
+| `scripts/audio/transcribe_local.py` | mlx-whisper | Mac（Apple Silicon MLX） | 39.5 分 → **84 秒** | **預設** |
+| `scripts/audio/transcribe_llmnode.py` | whisper.cpp | llm-node（Intel Linux 14 核） | 約 2.75x realtime | 材料本來就在 llm-node；或 Mac 要留著做別的事 |
+| llm-node 上手動 `whisper-cli` | whisper.cpp ＋ **VAD** | llm-node | RTF 0.29 | **只有這條有 VAD**——重複迴圈時的唯一解，見下方備案 |
+
+兩支腳本**同契約**（同 CLI、同產物：SRT ＋ `words.json`），差別只在推理跑在哪，
+下游 QAQC/cleaned 不需要任何改動。
+
+```bash
+# 預設
+.venv-audio/bin/python scripts/audio/transcribe_local.py <media> -o transcript.srt \
+    [--context context.txt] [--language zh]
+
+# 材料已在 llm-node，或 Mac 要留著做別的事
+.venv-audio/bin/python scripts/audio/transcribe_llmnode.py <media> -o transcript.srt \
+    [--context context.txt] [--language zh] [--remote-media <llm-node 上的路徑>]
+```
+
+⚠️ **Mac 上沒有 whisper.cpp**（沒有 `~/whisper.cpp`，homebrew 也沒裝）。
+本檔舊版寫的那條裸 `whisper-cli … --vad …` 指令**在 Mac 上跑不起來**——whisper.cpp 只在 llm-node。
+
+⚠️ **VAD 只有 whisper.cpp 有，而上面兩支腳本都沒有帶 VAD、也沒帶 `-mc 0`。**
+所以重複迴圈要靠 VAD 解時，得手動走 llm-node（備案那節），或把 VAD 參數加進腳本。
+
+**llm-node 上的東西在哪**（`transcribe_llmnode.py` 的 `ASR_DEFAULTS` 就是這些值）：
+
+| 東西 | 路徑 |
+| :--- | :--- |
+| `whisper-cli` | `~/whisper.cpp/build/bin/whisper-cli` |
+| 模型 | `~/models/ggml-large-v3-turbo-q8_0.bin`（874MB，server 也用這個）／`ggml-large-v3-q5_0.bin`（1.1GB）／`ggml-large-v2-q8_0.bin`（1.7GB） |
+| VAD 模型 | `~/whisper.cpp/models/for-tests-silero-v6.2.0-ggml.bin`（885KB） |
+
+⚠️ `~/whisper.cpp/models/` 底下的 `for-tests-ggml-large/medium/small.bin` **全是 whisper.cpp
+的測試 fixture**（都只有 575KB，真的 large 是 1.7GB）——拿它們轉錄會得到垃圾。
+真模型只在 `~/models/`。唯一例外是同目錄的 Silero VAD 檔，那個 885KB 是真的可用。
+
+`transcribe_llmnode.py` 已經處理掉的事：Mac 抽 16k 單聲道 wav → scp 上傳
+（15 分鐘的課約 29MB，比傳原片省）→ **分段**轉錄 → 段落 JSON 的 `offsets` 平移回
+全域時間軸合併 → opencc → SRT ＋ `words.json`。`--remote-media` 給了就不上傳。
+收工自己刪遠端暫存檔（要留檔用 `--keep-remote`）。
+
+**不要自己組 ssh 指令**——與語者分辨同一個原則：先找既有能跑的工具。
+
+#### 分段與 VAD 解的是**兩件不同的事**，不要混
+
+| 手段 | 解什麼 | 證據 |
+| :--- | :--- | :--- |
+| **分段**（420/480s，腳本預設） | 長檔單次跑會讓 **ssh 連線撐不住**（106 分鐘那集實測失敗）；失敗只賠一段 | ADR-2026-09-07 |
+| **VAD ＋ `-mc 0`** | 30 分鐘以上中文長檔的**重複迴圈**（同一句洗版到檔尾） | 2026-09-26 實測，37 分鐘錄音從 01:28 重複到結束 |
+
+⚠️ **分段解決不了重複迴圈，也解決不了零標點。** ADR-2026-09-07 初版把零標點歸因於
+「跨段漂移」，後來被推翻：把中招的音檔單獨拉出來（390 秒）帶同一份 prompt 跑，
+前 90 秒照樣 0 標點。**「跑得完」曾被誤讀成「修好了」。**
+
+#### 備案：在 llm-node 上直呼 whisper-cli（開 VAD）
+
+重複迴圈實測對照（37 分鐘中文對話）：
 
 | 設定 | unique 句 | 速度 |
 | :--- | :--- | :--- |
@@ -124,21 +187,64 @@ whisper.cpp 轉 30 分鐘以上中文長檔會陷入重複迴圈，同一句洗�
 | `-mc 0`（等同 no-context） | 60%，仍重複 | RTF 0.73 |
 | `-mc 0` ＋ Silero VAD | 93–95% | RTF 0.29 |
 
-正式指令：
-
 ```bash
-whisper-cli -m <model> -f in.wav -l zh -mc 0 \
+# 在 llm-node 上跑（音檔要先傳上去）
+ssh llm-node '~/whisper.cpp/build/bin/whisper-cli \
+  -m ~/models/ggml-large-v3-turbo-q8_0.bin -f in.wav -l zh -mc 0 -t 12 \
   --vad -vm ~/whisper.cpp/models/for-tests-silero-v6.2.0-ggml.bin \
-  -vp 300 -vsd 300 -vmsd 30 -vt 0.4 -ojf -of out --prompt "以下是繁體中文的對話錄音。"
+  -vp 300 -vsd 300 -vmsd 30 -vt 0.4 -ojf -of out --prompt "以下是繁體中文的對話錄音。"'
 ```
 
 - `for-tests-silero-*.ggml.bin`（885KB）名字有 `for-tests`，但就是可用的正式 VAD 模型。
 - VAD 比不開快 2.5 倍（跳過靜音），沒有速度代價。
-- 代價：句末標點全失（實測 0%）、句子較碎 → 交校稿階段補。
 - `-vp`（padding）不加會吃掉句首字（「然後地址…」→「地址…」）。
-- ⚠️ VAD 模式下 token 級時間戳沒有加上段偏移（segment 說 03:40、token 說 01:25）。只有 segment 級 `timestamps` 可信，不要拿 token 時間軸做對齊。
-- llm-node 的 whisper-server 啟動時寫死 `--carry-initial-prompt`，per-request 蓋不掉。長檔一律改走 `whisper-cli`，不要走 server。
+- ⚠️ VAD 模式下 token 級時間戳**沒有加上段偏移**（segment 說 03:40、token 說 01:25）。
+  只有 segment 級 `timestamps` 可信，不要拿 token 時間軸做對齊——字級精剪用不了這條路。
+- ⚠️ **不要走 llm-node 的 whisper-server（port 8081）**：systemd unit 的 ExecStart 寫死
+  `--carry-initial-prompt`，per-request 蓋不掉。長檔一律走 `whisper-cli`。
 - 判活：`grep -oE "^\[[0-9:.]+ " out.log | tail -1` 看轉錄到音檔第幾分鐘，不要看 CPU。
+
+#### ⚠️ VAD 與下游 cue 切分互斥——先確認這份材料要什麼
+
+**VAD 的代價是句末標點全失（實測 0%）。** 而 repo 的標點密度 gate
+（`scripts/audio/check_punct_density.py`，門檻每 60 字一個標點）把零標點判為**失敗**，
+因為剪輯線的短句切分（`split_words_to_phrases`）靠標點與 ≥0.5s 停頓找切點。
+
+所以同一份逐字稿，兩條線要的東西不一樣：
+
+| 用途 | 能不能開 VAD |
+| :--- | :--- |
+| **知識點／諮商逐字稿**（只要可讀、可檢索） | **可以**。標點在校稿階段補回來 |
+| **podcast 剪輯線**（要切 cue、要字級時間軸） | **不行**。零標點過不了 gate，而且 token 時間戳不可信 |
+
+開工前先問自己這份材料屬於哪一欄。
+
+#### 零標點：成因是 prompt 的**書寫形式**，不是音檔長度
+
+批次轉 55 講時 **21 講整份逐字稿零標點**，非黑即白。對照實驗（同音檔、同模型、
+只換 prompt，各跑兩次數字完全相同——貪婪解碼是決定性的）：
+
+| prompt | 長度 | 字數 | 標點 | 密度 |
+| :--- | ---: | ---: | ---: | :--- |
+| 純敘述一句 | 21 字 | 2520 | 217 | 每 11.6 字 |
+| 敘述＋少量專名嵌在句中 | 62 字 | 2481 | 211 | 每 11.8 字 |
+| 敘述＋一長串專名列舉 | 147 字 | 2309 | **0** | — |
+
+62 字版帶了專名照樣正常 ⇒ 代價來自**「列舉」這個形式**，不是專名本身。
+
+**`context.txt` 規則**：控在 **60 字上下**、有標點的自然敘述、專名**嵌在句子裡**，
+不要寫成頓號分隔的清單。腳本裡的 `[:200]` 是硬截斷**不是安全額度**（147 字沒被截斷卻已經壞掉）。
+
+**驗收一律看標點密度，不要只看有沒有出 SRT**：
+
+```bash
+python3 scripts/audio/check_punct_density.py <輸出根> --check   # 有不合格就 exit 1
+```
+
+零標點時 cue 數、總字數、時間軸單調性、簡繁轉換**全部正常**，只有標點密度會暴露。
+正常中文落在每 10–40 字一個；壞掉的是每幾千字一個或整份 0 個（兩群相差兩個數量級）。
+⚠️ `batch_llmnode.sh` 是 resume-safe 的（`transcript.srt` 非空就跳過），
+改完 prompt 要重轉得**先刪掉那些 `transcript.srt`**。
 
 #### 語者分辨：用 repo 現成的
 
@@ -190,7 +296,8 @@ ASR 重複幻覺段要用明確錨點切除並標註省略。切完必須核對�
 
 私人錄音（諮商、命理、醫療）走這條線時：
 
-- 全程本機（whisper.cpp ＋ pyannote），不要送任何雲端 ASR。
+- 全程跑在自有機器（llm-node 的 whisper.cpp ＋ Mac 的 pyannote），不要送任何雲端 ASR。
+  ⚠️ 轉錄會把音檔 scp 到 llm-node 的 `/tmp`——腳本預設收工自己刪，用了 `--keep-remote` 要自己清。
 - 產物不進版控（`sessions/` 已 gitignore）。
 - 為了轉錄而複製到其他機器的音檔與中間產物，收工時要刪掉並核對。
 - 要派 subagent 在這個 repo 工作前，先把 `sessions/` 下的私人產物移出 repo。
