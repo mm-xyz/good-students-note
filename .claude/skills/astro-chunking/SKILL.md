@@ -1,5 +1,6 @@
 ---
 name: astro-chunking
+disable-model-invocation: true
 description: 命理（占星）課程語料的概念級 chunking——把課程逐字稿（.srt/.txt）按「行星×星座×宮位×相位」切成一概念一檔的 Obsidian 知識庫（RAG-ready）。Use when 把占星課程材料切塊進 MarsDots/astro/，或建立同型命理知識庫。
 ---
 

@@ -1,6 +1,6 @@
 ---
 name: doc-to-md
-description: Convert PDF, TXT, or EPUB files to clean Markdown with YAML frontmatter and per-section callout annotations. Use this skill when: (1) a student wants to convert a book or lecture file to Markdown for Obsidian/notes, (2) a user has a PDF/EPUB/TXT and needs structured Markdown output with chapter summaries, (3) someone wants garbled-text-free conversion with Simplified→Traditional Chinese auto-conversion.
+description: good-student 管線的「文字抽取」子步驟：PDF/TXT/EPUB → 乾淨 Markdown（YAML frontmatter、章節 callout、簡轉繁、去亂碼）。整份材料要做成知識庫請走 good-student（它會先過圖片閘門，避免卡切在殘缺語料上）。本 skill 只在 good-student 呼叫、或使用者明確說 /doc-to-md 時使用。
 ---
 
 # doc-to-md Skill

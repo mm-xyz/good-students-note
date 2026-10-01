@@ -1,6 +1,6 @@
 ---
 name: doc-vlm-to-md
-description: 一條指令把一份文件「一次」轉成「文字 + 圖表」都進得了 RAG 的單一 Markdown 知識庫。整合 doc-to-md（文字、章節摘要）與 vlm-to-md v1.0.1（嵌入點陣圖 + 向量圖表頁 + 掃描頁視覺），v1.3.0 起補上 EPUB 視覺線（zip 內嵌圖，錨點原位插圖）。當需要：(1) 把 PDF/EPUB/TXT 轉成含章節摘要的文字知識庫 (2) 同一份 PDF 裡的圖表、流程圖、框架圖、掃描頁也一起轉成可檢索的視覺描述 (3) EPUB 裡的內嵌插圖（對照表、命盤圖等）也要進知識庫 (4) 不想分兩個工具、要一次做完文字＋圖 (5) 為 RAG 知識庫一次備齊文字與圖時使用。完全免費、不需 API key、不需本地大模型——Phase 1 本地把文字抽好＋圖抽好或渲染好（0 token），Phase 2 由 Claude 自己的眼睛與理解一次把「章節摘要」和「圖像解讀」都填滿；EPUB 圖另有 llm-node OCR-first 本地批次路徑可選（零費用、資料不出門）。
+description: good-student 管線的「文字＋圖表」子步驟：doc-to-md 的文字線，加上嵌入點陣圖／向量圖表頁／掃描頁的視覺轉錄，EPUB 走 zip 內嵌圖並用錨點插回原位。整份材料要做成知識庫請走 good-student。本 skill 只在 good-student 呼叫、或使用者明確說 /doc-vlm-to-md 時使用。
 ---
 
 # doc-vlm-to-md Skill（整合版）

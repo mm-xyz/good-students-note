@@ -1,6 +1,6 @@
 ---
 name: video-to-md
-description: 影片 → 帶截圖與停頓標注的 Obsidian 逐字稿＋筆記。**影片線的正式入口**：場景偵測抽幀、地端 VLM（llm-node）依「只聽逐字稿會漏掉」篩圖寫圖說、SRT 合流成時間錨點逐字稿，Claude 收尾蒸餾筆記。當需要：(1) 把演講／課程／Zoom 錄影做成筆記 (2) 影片裡的投影片、demo、圖表、程式碼也要進知識庫，不只抽音軌 (3) 為 RAG 補上「畫面」這一塊時使用。與 `audio-to-md`（只處理聲音）的分工：影片有畫面資訊就走本 skill。觸發：「把這場演講做成筆記」「影片轉筆記」「/video-to-md」，或給出影片要筆記時。舊名 invisible-context（2026-09-08 更名——名字沒有「video」害得使用者找不到）。
+description: good-student 管線的「影片」子步驟：場景偵測抽幀、地端 VLM（llm-node）依「只聽逐字稿會漏掉」篩圖寫圖說、SRT 合流成時間錨點逐字稿。整份材料要做成知識庫請走 good-student。本 skill 只在 good-student 呼叫、或使用者明確說 /video-to-md 時使用。舊名 invisible-context（2026-09-08 更名）。
 ---
 
 # video-to-md — 影片演講 → 看得見畫面的筆記

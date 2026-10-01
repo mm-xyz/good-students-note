@@ -1,6 +1,6 @@
 ---
 name: audio-to-md
-description: 用本地 Whisper 把「音訊或影片」轉成帶時間戳的逐字稿 Markdown 知識庫。當需要：(1) 把錄音／podcast／會議／訪談音檔轉成逐字稿 (2) 把影片（演講、課程、Zoom 錄影）抽音軌轉逐字稿 (3) 把逐字稿整理成可檢索、含段落摘要與重點的知識庫 (4) 為 RAG 補上「聲音」這一塊時使用。完全免費、不需 API key、不需付費 ASR——Phase 1 本地 Whisper 轉錄（0 token），Phase 2 由 Claude 校稿（簡繁/錯字/斷句）＋寫摘要與重點。把「聽打」這種機械重活交給本地 Whisper、把「理解整理」交給 Claude，是最省 token 的 AI 指揮分工。
+description: good-student 管線的「純聲音」子步驟：本地 Whisper → 帶時間戳的逐字稿 Markdown（0 token，Claude 只負責校稿與摘要）。影片請走 video-to-md——有畫面還只抽音軌會丟掉一半資訊。整份材料要做成知識庫請走 good-student。本 skill 只在 good-student 呼叫、或使用者明確說 /audio-to-md 時使用。
 ---
 
 # audio-to-md Skill
