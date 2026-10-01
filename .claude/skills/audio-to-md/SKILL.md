@@ -1,6 +1,6 @@
 ---
 name: audio-to-md
-description: good-student 管線的「純聲音」子步驟：本地 Whisper → 帶時間戳的逐字稿 Markdown（0 token，Claude 只負責校稿與摘要）。影片請走 video-to-md——有畫面還只抽音軌會丟掉一半資訊。整份材料要做成知識庫請走 good-student。本 skill 只在 good-student 呼叫、或使用者明確說 /audio-to-md 時使用。
+description: good-student 管線的「純聲音」子步驟：本地 Whisper → 帶時間戳的逐字稿 Markdown（0 token，Claude 只負責校稿與摘要）。影片請走 video-to-md——有畫面還只抽音軌會丟掉一半資訊。整份材料要做成知識庫請走 good-student。本 skill 在 good-student 呼叫、或使用者明確說 /audio-to-md 時使用；也接「只要逐字稿」的直接要求（例如「把這段錄音轉成逐字稿就好」「我只要 transcript，不要知識卡」）。
 ---
 
 # audio-to-md Skill

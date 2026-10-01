@@ -1,6 +1,6 @@
 ---
 name: video-to-md
-description: good-student 管線的「影片」子步驟：場景偵測抽幀、地端 VLM（llm-node）依「只聽逐字稿會漏掉」篩圖寫圖說、SRT 合流成時間錨點逐字稿。整份材料要做成知識庫請走 good-student。本 skill 只在 good-student 呼叫、或使用者明確說 /video-to-md 時使用。舊名 invisible-context（2026-09-08 更名）。
+description: good-student 管線的「影片」子步驟：場景偵測抽幀、地端 VLM（llm-node）依「只聽逐字稿會漏掉」篩圖寫圖說、SRT 合流成時間錨點逐字稿。整份材料要做成知識庫請走 good-student。本 skill 在 good-student 呼叫、或使用者明確說 /video-to-md 時使用；也接「只要逐字稿／截圖筆記」的直接要求（例如「把這部影片轉成帶截圖的逐字稿就好，不要切卡」）。舊名 invisible-context（2026-09-08 更名）。
 ---
 
 # video-to-md — 影片演講 → 看得見畫面的筆記

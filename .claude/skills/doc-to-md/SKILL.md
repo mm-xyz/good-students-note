@@ -1,6 +1,6 @@
 ---
 name: doc-to-md
-description: good-student 管線的「文字抽取」子步驟：PDF/TXT/EPUB → 乾淨 Markdown（YAML frontmatter、章節 callout、簡轉繁、去亂碼）。整份材料要做成知識庫請走 good-student（它會先過圖片閘門，避免卡切在殘缺語料上）。本 skill 只在 good-student 呼叫、或使用者明確說 /doc-to-md 時使用。
+description: good-student 管線的「文字抽取」子步驟：PDF/TXT/EPUB → 乾淨 Markdown（YAML frontmatter、章節 callout、簡轉繁、去亂碼）。整份材料要做成知識庫請走 good-student（它會先過圖片閘門，避免卡切在殘缺語料上）。本 skill 在 good-student 呼叫、或使用者明確說 /doc-to-md 時使用；也接「只轉檔不切卡」的直接要求（例如「把這份 PDF 轉成 Markdown 就好」「我只要乾淨的文字檔，不要知識卡」）。
 ---
 
 # doc-to-md Skill

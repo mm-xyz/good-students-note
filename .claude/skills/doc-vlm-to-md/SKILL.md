@@ -1,6 +1,6 @@
 ---
 name: doc-vlm-to-md
-description: good-student 管線的「文字＋圖表」子步驟：doc-to-md 的文字線，加上嵌入點陣圖／向量圖表頁／掃描頁的視覺轉錄，EPUB 走 zip 內嵌圖並用錨點插回原位。整份材料要做成知識庫請走 good-student。本 skill 只在 good-student 呼叫、或使用者明確說 /doc-vlm-to-md 時使用。
+description: good-student 管線的「文字＋圖表」子步驟：doc-to-md 的文字線，加上嵌入點陣圖／向量圖表頁／掃描頁的視覺轉錄，EPUB 走 zip 內嵌圖並用錨點插回原位。整份材料要做成知識庫請走 good-student。本 skill 在 good-student 呼叫、或使用者明確說 /doc-vlm-to-md 時使用；也接「只轉檔不切卡」的直接要求（例如「把這份 PDF 連圖表一起轉成 Markdown 就好，不要切卡」）。
 ---
 
 # doc-vlm-to-md Skill（整合版）
