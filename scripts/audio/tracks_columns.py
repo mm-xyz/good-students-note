@@ -108,6 +108,79 @@ def track_files(sdir: Path) -> list[tuple[str, Path]]:
 TRACK_LEN_TOL = 0.02
 
 
+# ── 對齊(驗收 F-4)──────────────────────────────────────────────────────
+# 每一軌對 source.wav 量位移:FFT 互相關,取幾個短窗、只採該軌在 source 裡
+# 佔比夠高(相關係數 ≥ ALIGN_MIN_RHO)的窗,取中位數(單窗串音/雜訊不會帶偏)。
+# 三軌彼此的位移 = 各自對 source 位移的差。**不直接拿麥對麥做互相關**:兩支麥
+# 之間的串音帶著聲波傳遞的物理延遲(約 3ms/公尺),會被誤判成檔案沒對齊;
+# source(錄音機合軌)直接含每一軌,是乾淨的共同參考。
+#
+# 門檻:
+#   ALIGN_SRC_MAX=20ms —— 分軌對錄音機合軌本來就有固定位移(EP16 4.97、EP18
+#     4.88ms,錄音機內部處理延遲),render 的 auto offset 會補,所以不能要求 0;
+#     20ms 給那個已知延遲 4 倍餘裕,又遠低於「不同次錄音/被裁過」常見的幾十 ms
+#     以上。超過就 FAIL:那已經不是延遲,是素材不對。
+#   ALIGN_SPREAD_MAX=2ms —— 同一台錄音機的多軌彼此 sample-aligned,實測差異只有
+#     互相關的量測抖動(EP22 0.5ms 量級)。三軌各差幾 ms 以上混在一起,串音會互相
+#     疊出梳狀濾波/假回音,auto offset 雖然逐軌補得回來,但那代表素材被動過,FAIL
+#     讓人去查,不默默修。
+#   ALIGN_MAX_LAG=60ms —— 搜尋範圍,比 SRC 門檻大,量到邊界就一定超門檻。
+ALIGN_SRC_MAX = 0.020
+ALIGN_SPREAD_MAX = 0.002
+ALIGN_MAX_LAG = 0.060
+# 取窗:均勻 80 個 0.5 秒窗(EP22 50 分鐘只讀約 40 秒,不讀整條)。
+# 只採信「這一軌在 source 裡佔主導」的窗(相關係數 ≥0.8):EP22 實測,相關 0.5–0.7
+# 的窗量到的是**別人的聲音經過這支麥的串音路徑**(Mars 講話時 Sarah 麥收到的
+# 延遲版),lag 散在 +4~+40ms;門檻拉到 0.8 之後三軌全部落在 −0.07~−0.09ms。
+# (舊的 pertrack_render.measure_track_offset 用 0.55 門檻、6 個固定探點,EP22
+# 量出 Kin +0.43ms、Sarah 沒有探點合格就默默回 0.0 —— 都是這個坑。)
+ALIGN_WINDOWS = 80
+ALIGN_WIN_SECS = 0.5
+ALIGN_MIN_WIN = 0.1         # 短檔窗太短 → 減少窗數,不把窗縮到量不準
+ALIGN_MIN_RHO = 0.8
+ALIGN_MIN_HITS = 3          # 至少 3 個窗採信才算量得到(取中位數)
+
+
+def measure_alignment(tracks: list[tuple[str, Path]], source: Path, sr: int,
+                      dur: float) -> dict[str, float | None]:
+    """{軌: 對 source 的位移秒數(正=分軌內容比較晚;讀分軌時 +這個值)|None}。
+
+    None = 量不到(採信的窗 < ALIGN_MIN_HITS)。符號與 render 的 track_offset
+    相同:mix_ranges 讀分軌用 `來源時間 + offset`。"""
+    import numpy as np
+    from pertrack_render import _read_mono
+
+    L = int(round(ALIGN_MAX_LAG * sr))
+    usable = dur - 2 * ALIGN_MAX_LAG
+    w = min(ALIGN_WIN_SECS, max(ALIGN_MIN_WIN, usable / ALIGN_WINDOWS))
+    k_win = min(ALIGN_WINDOWS, int(usable / w))
+    if k_win < ALIGN_MIN_HITS:
+        return {n: None for n, _p in tracks}
+    starts = [ALIGN_MAX_LAG + i * (usable - w) / max(1, k_win - 1)
+              for i in range(k_win)]
+    srcw = [_read_mono(source, sr, a, a + w) for a in starts]
+    out: dict[str, float | None] = {}
+    for name, p in tracks:
+        lags = []
+        for a, s in zip(starts, srcw):
+            n = len(s)
+            t = _read_mono(p, sr, a - L / sr, a + w + L / sr)[:n + 2 * L]
+            if len(t) < n + 2 * L or not s.any():
+                continue
+            m = 1 << int(np.ceil(np.log2(n + 2 * L + n)))
+            c = np.fft.irfft(np.fft.rfft(t, m) * np.conj(np.fft.rfft(s, m)), m)
+            c = c[:2 * L + 1]                         # c[k] = Σ s[i]·t[i+k]
+            cs = np.concatenate([[0.0], np.cumsum(t ** 2)])
+            et = cs[n:n + 2 * L + 1] - cs[:2 * L + 1]  # 每個 lag 對到的分軌能量
+            rho = c / np.sqrt(np.maximum(et * float((s ** 2).sum()), 1e-20))
+            k = int(np.argmax(rho))
+            if rho[k] >= ALIGN_MIN_RHO:
+                lags.append(k - L)
+        out[name] = (float(np.median(lags)) / sr
+                     if len(lags) >= ALIGN_MIN_HITS else None)
+    return out
+
+
 def _probe(path: Path) -> tuple[int | None, float | None]:
     """(取樣率, 秒);讀不到回 (None, None)。"""
     import subprocess
@@ -124,7 +197,8 @@ def _probe(path: Path) -> tuple[int | None, float | None]:
 
 
 def validate_tracks(sdir: Path, tracks: list[tuple[str, Path]],
-                    source: Path | None, tol: float = TRACK_LEN_TOL) -> list[str]:
+                    source: Path | None, tol: float = TRACK_LEN_TOL,
+                    report: dict | None = None) -> list[str]:
     """audio=tracks 的分軌前提(驗收 F-2)。回傳錯誤清單,空的才可以用。
 
     · 軌數 = speakers.json 的講者數(缺軌、多軌都擋;不靜默補零)
@@ -174,7 +248,35 @@ def validate_tracks(sdir: Path, tracks: list[tuple[str, Path]],
         if abs(dur - src_dur) > tol:
             errs.append(f"{n}:長度 {dur:.3f}s 與 source {src_dur:.3f}s 差 "
                         f"{abs(dur - src_dur):.3f}s > 容差 {tol}s({p.name})")
+    if errs:
+        return errs          # 取樣率/長度都不對時,對齊量出來也沒有意義
+    offs = measure_alignment(tracks, Path(source), src_sr, src_dur)
+    got = {n: v for n, v in offs.items() if v is not None}
+    spread = (max(got.values()) - min(got.values())) if len(got) > 1 else 0.0
+    if report is not None:
+        report["offsets"] = offs
+        report["spread"] = spread
+    for n, v in offs.items():
+        if v is None:
+            errs.append(f"{n}:量不到與 source 的對齊(互相關 {ALIGN_WINDOWS} 窗"
+                        f"裡相關 ≥{ALIGN_MIN_RHO} 的不到 {ALIGN_MIN_HITS} 個)—— "
+                        f"這一軌可能不是同一次錄音")
+        elif abs(v) > ALIGN_SRC_MAX:
+            errs.append(f"{n}:與 source 對齊位移 {v * 1000:+.2f}ms 超過門檻 "
+                        f"±{ALIGN_SRC_MAX * 1000:.0f}ms(不是錄音機延遲,素材不對)")
+    if spread > ALIGN_SPREAD_MAX:
+        errs.append("三軌彼此對齊不一致:"
+                    + "、".join(f"{n} {v * 1000:+.2f}ms" for n, v in got.items())
+                    + f",互差 {spread * 1000:.2f}ms > 門檻 "
+                      f"{ALIGN_SPREAD_MAX * 1000:.0f}ms(多軌應 sample-aligned)")
     return errs
+
+
+def format_alignment(report: dict) -> str:
+    offs = report.get("offsets") or {}
+    return ("、".join(f"{n} {'量不到' if v is None else f'{v * 1000:+.2f}ms'}"
+                     for n, v in offs.items())
+            + f";三軌互差 {report.get('spread', 0.0) * 1000:.2f}ms")
 
 
 def find_source(sdir: Path) -> Path | None:
@@ -360,7 +462,10 @@ def main() -> int:
     if len(set(names)) != len(names):
         print(f"[tracks] FAIL: 軌名重複:{names}", file=sys.stderr)
         return 2
-    errs = validate_tracks(sdir, tracks, find_source(sdir))
+    info: dict = {}
+    errs = validate_tracks(sdir, tracks, find_source(sdir), report=info)
+    if info:
+        print("[tracks] 分軌對齊(相對 source.wav):" + format_alignment(info))
     if errs:
         print("[tracks] FAIL: 分軌前提不成立 ——\n  " + "\n  ".join(errs),
               file=sys.stderr)

@@ -362,5 +362,51 @@ class TestMixdownIsTheDefault(unittest.TestCase):
                 plan_stages(d2, args_ns(line="pertrack"))
 
 
+class TestFindAudioVenv(unittest.TestCase):
+    """驗收 F-5:worktree 沒有自己的 .venv-audio 時,precut 要找主樹的
+    (同 scripts/tests/pick_python.sh 的 fallback);都沒有就回 repo 自己的
+    路徑,讓既有的「.venv-audio 不存在」FAIL 照舊觸發。"""
+
+    def setUp(self):
+        import subprocess
+        self._td = tempfile.TemporaryDirectory()
+        t = Path(self._td.name).resolve()
+        self.main, self.wt = t / "main", t / "wt"
+        self.main.mkdir()
+        env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+               "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+        for cmd in (["init", "-q"], ["commit", "-q", "--allow-empty", "-m", "i"],
+                    ["worktree", "add", "-q", str(self.wt)]):
+            subprocess.run(["git", *cmd], cwd=self.main, check=True,
+                           capture_output=True, env=env)
+
+    def tearDown(self):
+        self._td.cleanup()
+
+    def mk(self, root: Path) -> Path:
+        p = root / ".venv-audio" / "bin" / "python"
+        p.parent.mkdir(parents=True)
+        p.write_text("#!/bin/sh\n")
+        p.chmod(0o755)
+        return p
+
+    def test_worktree_uses_main_tree_venv(self):
+        from precut import find_audio_venv
+        main_py = self.mk(self.main)
+        self.assertEqual(find_audio_venv(self.wt), main_py)
+
+    def test_own_venv_wins(self):
+        from precut import find_audio_venv
+        self.mk(self.main)
+        own = self.mk(self.wt)
+        self.assertEqual(find_audio_venv(self.wt), own)
+
+    def test_none_returns_own_path_so_existing_fail_fires(self):
+        from precut import find_audio_venv
+        got = find_audio_venv(self.wt)
+        self.assertEqual(got, self.wt / ".venv-audio" / "bin" / "python")
+        self.assertFalse(got.exists())
+
+
 if __name__ == "__main__":
     unittest.main()

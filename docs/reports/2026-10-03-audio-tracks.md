@@ -218,3 +218,85 @@ SKIP  文件線測試 — .venv-doc 不存在(既有狀態)
 node --test "scripts/cutplan-editor/tests/**/*.test.js"
 # tests 93  # pass 93  # fail 0
 ```
+
+---
+
+## 第二輪驗收：F-4（對齊）與 F-5（precut 找主樹 venv）
+
+### F-4（High）：validate_tracks 沒驗對齊
+
+luna 的重現案例：Mars 軌的內容整體後移 441 samples（10 ms），長度不變，原本會被放行。
+
+**修法**：新增 `tracks_columns.measure_alignment()`，由 `validate_tracks()` 呼叫。`tracks_columns.py` 和 render 共用這一條路徑。
+
+- **量法**：每一軌都對 `source.wav` 做 FFT 互相關。均勻取 80 個 0.5 秒的窗，只讀約 40 秒，不讀整條音檔。只採信相關係數 ≥ 0.8 的窗，也就是「這一軌在合軌裡佔主導」的窗；至少要有 3 個這樣的窗，再取中位數。
+- **三軌彼此的位移**：取各軌對 source 位移的差值。不拿麥對麥直接做互相關，因為兩支麥之間的串音本來就帶著聲波傳遞的物理延遲（約 3 ms／公尺），會被誤判成檔案沒對齊。
+
+**門檻**（常數註解裡寫了理由）：
+
+| 項目 | 門檻 | 超過時 |
+| :--- | :--- | :--- |
+| 軌 vs source | `ALIGN_SRC_MAX` = 20 ms | FAIL。門檻內交給 auto offset 補償；已知的錄音機延遲 4.9 ms 會通過，30 ms 會 FAIL |
+| 三軌互差 | `ALIGN_SPREAD_MAX` = 2 ms | FAIL |
+| 量不到（合格的窗不到 3 個） | — | FAIL，不默默當成 0 |
+
+**(c) 的處理**：明寫 `--track-offset X`，而 X 跟實測差超過 2 ms 時，只**警告、不擋**。
+
+- 走到這一步，實測值已經在 20 ms 門檻內（超過的在前面就 FAIL 了），切點偏幾 ms 會落在 snap 過的靜音裡，聽不出來。
+- 明寫 offset 是人的刻意選擇（測試或診斷），所以照他寫的值走。
+- `auto` 改用這次量到的值，不再呼叫 `ptr.measure_track_offset`。
+
+**EP22 實測**（相對 source.wav，耗時約 3 秒）：
+
+- Mars −0.07 ms
+- Sarah −0.09 ms
+- Kin −0.07 ms
+- 三軌互差 0.02 ms
+
+三軌實際上就是 sample-aligned，驗證通過。`audio=tracks` dry-run 的 dump-ranges 跟合軌仍然完全相同（56 段）。
+
+**順帶抓到的舊坑**：
+
+- 舊的 `ptr.measure_track_offset` 用 0.55 門檻、6 個固定探點。在 EP22 上它量出 Kin +0.43 ms（被串音帶偏），Sarah 則因為沒有任何探點合格，**默默回傳 0.0**。
+- 第一次實作時門檻設 0.4，EP22 量出 Sarah +4.31、Kin +7.01 ms，也是串音造成的。把相關係數門檻拉到 0.8 之後，三軌就一致了。
+- 第一輪 e2e 出片時用的時間補償是舊值（Kin +0.43 ms）。這個差距小於 1 ms，不影響第一輪的結論。
+
+**紅→綠的測試**：
+
+- `test_tracks_columns.py::TestAlignment`，共 4 項：
+  - `test_luna_repro_one_track_shifted_10ms_fails`
+  - `test_common_4_9ms_vs_source_passes_and_is_reported`
+  - `test_common_30ms_vs_source_fails`
+  - `test_unmeasurable_track_fails`
+- `test_render_tracks.py::TestRouteGuards`，共 3 項：
+  - `test_misaligned_track_fails_render`（Kin 後移 10 ms）
+  - `test_alignment_is_reported`
+  - `test_explicit_offset_far_from_measured_warns`
+
+**測試資料的調整**：
+
+- 合成 session 在剪掉的 4–6 秒區段，每一軌輪流加一段寬頻雜訊。純音是週期訊號，互相關會在整數週期上產生歧義，需要一段「這一軌主導」的窗。
+- `TestValidateTracks` 的 fixture 從全零改成雜訊。全零的軌現在會被正確判為「量不到」。
+- 真音訊測試改用 `balanced_window()`，挑三個人講話秒數最平均的 90 秒窗。原本固定用 60–100 秒那段，那裡 Sarah 和 Kin 都不主導，會被正確判為量不到。
+
+### F-5（已做，改動 15 行）：precut.py 在 worktree 找不到主樹的 .venv-audio
+
+- **修法**：新增 `precut.find_audio_venv()`，先找 repo 自己的 venv，再找 git common dir 所在主樹的 venv；兩邊都沒有就回傳 repo 自己的路徑，讓原本的「`.venv-audio` 不存在」FAIL 照常觸發。
+- **紅→綠的測試**：`test_precut.py::TestFindAudioVenv`，共 3 項。
+- **連帶影響**：`test_precut_e2e.py` 在 worktree 裡也能找到 venv 了，10 項全綠。
+
+### 修後總結（原文摘要）
+
+```
+bash scripts/tests/run_all.sh
+python: /Users/marslo/GithubRepo_mm-xyz/good-students-note/.venv-audio/bin/python3.13
+PASS  scripts/tests/test_precut.py — Ran 35 tests
+PASS  scripts/tests/test_precut_e2e.py — Ran 10 tests
+PASS  scripts/tests/test_render_tracks.py — Ran 19 tests
+PASS  scripts/tests/test_tracks_columns.py — Ran 35 tests
+…(共 30 個檔全 PASS,626 項,失敗 0)
+✅ 全部測試通過
+
+node --test "scripts/cutplan-editor/tests/**/*.test.js"
+# tests 93  # pass 93  # fail 0
+```

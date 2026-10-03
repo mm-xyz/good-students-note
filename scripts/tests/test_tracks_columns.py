@@ -231,6 +231,83 @@ def write_wav(path: Path, sr: int, x: np.ndarray) -> None:
         f.writeframes((np.clip(x, -1, 1) * 32767).astype("<i2").tobytes())
 
 
+def noise_tracks(sr: int, secs: float, seed: int = 7) -> dict:
+    """三軌各自獨立的「講話」:輪流出聲的寬頻雜訊(互相關才有明確的峰)。"""
+    rng = np.random.default_rng(seed)
+    n = int(secs * sr)
+    out = {}
+    for i, name in enumerate(NAMES):
+        x = rng.normal(0, 0.01, n)
+        seg = n // 3
+        x[i * seg:(i + 1) * seg] += rng.normal(0, 0.2, seg)
+        out[name] = np.clip(x, -0.9, 0.9)
+    return out
+
+
+def shift(x: np.ndarray, k: int) -> np.ndarray:
+    """內容往後移 k 個樣本(長度不變,前面補靜音);k<0 往前。"""
+    if k >= 0:
+        return np.concatenate([np.zeros(k), x[:len(x) - k]])
+    return np.concatenate([x[-k:], np.zeros(-k)])
+
+
+class TestAlignment(unittest.TestCase):
+    """驗收 F-4:validate_tracks 原本只比數量/名稱/取樣率/長度,沒驗對齊。
+
+    luna 重現:Mars 軌內容後移 441 samples(10ms@44.1k)、長度不變 → 原本放行。
+    真實資料:分軌對錄音機合軌本來就可能有固定位移(EP18 4.88ms),那要通過、
+    交給 render 的 auto offset 補;30ms 以上一定 FAIL。"""
+
+    SR = 44100
+
+    def make(self, track_shift: dict, secs: float = 12.0):
+        self.td = tempfile.TemporaryDirectory()
+        s = Path(self.td.name)
+        (s / "tracks").mkdir()
+        sig = noise_tracks(self.SR, secs)
+        write_wav(s / "source.wav", self.SR, sum(sig.values()) / 3)
+        for i, n in enumerate(NAMES, 1):
+            write_wav(s / "tracks" / f"{i}_{n}.wav", self.SR,
+                      shift(sig[n], track_shift.get(n, 0)))
+        write_speakers(s, NAMES)
+        self.addCleanup(self.td.cleanup)
+        return s
+
+    def run_validate(self, s):
+        from tracks_columns import track_files, validate_tracks
+        info: dict = {}
+        errs = validate_tracks(s, track_files(s), s / "source.wav", report=info)
+        return errs, info
+
+    def test_luna_repro_one_track_shifted_10ms_fails(self):
+        s = self.make({"Mars": 441})
+        errs, info = self.run_validate(s)
+        self.assertAlmostEqual(info["offsets"]["Mars"] * 1000, 10.0, delta=0.1)
+        self.assertTrue(any("Mars" in e and "對齊" in e for e in errs), errs)
+
+    def test_common_4_9ms_vs_source_passes_and_is_reported(self):
+        k = int(round(0.0049 * self.SR))                # 216 samples
+        s = self.make({n: k for n in NAMES})
+        errs, info = self.run_validate(s)
+        self.assertEqual(errs, [])
+        for n in NAMES:
+            self.assertAlmostEqual(info["offsets"][n] * 1000, 4.9, delta=0.1)
+        self.assertLess(info["spread"] * 1000, 0.1)
+
+    def test_common_30ms_vs_source_fails(self):
+        k = int(round(0.030 * self.SR))
+        s = self.make({n: k for n in NAMES})
+        errs, _ = self.run_validate(s)
+        self.assertTrue(any("source" in e and "對齊" in e for e in errs), errs)
+
+    def test_unmeasurable_track_fails(self):
+        s = self.make({})
+        write_wav(s / "tracks" / "3_Kin.wav", self.SR,
+                  np.random.default_rng(99).normal(0, 0.1, 12 * self.SR))
+        errs, _ = self.run_validate(s)
+        self.assertTrue(any("Kin" in e and "量不到" in e for e in errs), errs)
+
+
 def write_speakers(sdir: Path, names, with_tracks: bool = True) -> None:
     d = {"num_speakers": len(names), "speakers": sorted(names)}
     if with_tracks:
@@ -247,10 +324,10 @@ class TestValidateTracks(unittest.TestCase):
         self.s = Path(self.td.name)
         (self.s / "tracks").mkdir()
         sr = 8000
-        z = np.zeros(int(2.0 * sr))
-        write_wav(self.s / "source.wav", sr, z)
+        sig = noise_tracks(sr, 2.0)
+        write_wav(self.s / "source.wav", sr, sum(sig.values()) / 3)
         for i, n in enumerate(NAMES, 1):
-            write_wav(self.s / "tracks" / f"{i}_{n}.wav", sr, z)
+            write_wav(self.s / "tracks" / f"{i}_{n}.wav", sr, sig[n])
         write_speakers(self.s, NAMES)
 
     def tearDown(self):
@@ -292,7 +369,8 @@ class TestValidateTracks(unittest.TestCase):
     def test_length_within_tolerance(self):
         from tracks_columns import TRACK_LEN_TOL
         n = int(round((2.0 - TRACK_LEN_TOL / 2) * 8000))
-        write_wav(self.s / "tracks" / "1_Mars.wav", 8000, np.zeros(n))
+        write_wav(self.s / "tracks" / "1_Mars.wav", 8000,
+                  noise_tracks(8000, 2.0)["Mars"][:n])
         self.assertEqual(self.errs(), [])
 
     def test_diarize_speakers_without_tracks_map_only_count(self):

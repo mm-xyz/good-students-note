@@ -78,6 +78,12 @@ def make_session(td: str, cfg: str = "## ⚙ line=mixdown max-pause=0",
     sdir.mkdir()
     t = np.arange(int(6.0 * sr)) / sr
     sig = {n: 0.15 * np.sin(2 * np.pi * FREQ[n] * t) for n in NAMES}
+    # 4–6s(B0003 剪掉、不進成品)每軌輪流一段寬頻雜訊 —— 給對齊檢查(F-4)
+    # 一個「這一軌主導」的窗;純音是週期訊號,互相關會有整數週期的歧義
+    rng = np.random.default_rng(3)
+    for i, n in enumerate(NAMES):
+        a, b = int((4.0 + i * 2 / 3) * sr), int((4.0 + (i + 1) * 2 / 3) * sr)
+        sig[n][a:b] += rng.normal(0, 0.25, b - a)
     if tracks:
         (sdir / "tracks").mkdir()
         for i, n in enumerate(NAMES, 1):
@@ -245,6 +251,40 @@ class TestRouteGuards(unittest.TestCase):
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("取樣率", r.stdout + r.stderr)
 
+    def test_misaligned_track_fails_render(self):
+        """驗收 F-4 重現:Kin 軌內容後移 10ms、長度不變 → render 要擋。"""
+        with tempfile.TemporaryDirectory() as td:
+            s = make_session(td, cfg=TR_CFG, rows=with_cols(ROWS, TR_COLS))
+            x, sr = read_wav(s / "tracks" / "3_Kin.wav")
+            k = int(0.010 * sr)
+            write_wav(s / "tracks" / "3_Kin.wav", sr,
+                      np.concatenate([np.zeros(k), x[:-k]]))
+            r = render(s, "--dry-run")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("對齊", r.stdout + r.stderr)
+        self.assertIn("Kin", r.stdout + r.stderr)
+
+    def test_alignment_is_reported(self):
+        with tempfile.TemporaryDirectory() as td:
+            s = make_session(td, cfg=TR_CFG, rows=with_cols(ROWS, TR_COLS))
+            r = render(s, "--dry-run")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("分軌對齊", r.stdout)
+
+    def test_explicit_offset_far_from_measured_warns(self):
+        """(c) 明寫 --track-offset 0、量到 4.9ms(門檻內):警告不擋——切點偏
+        5ms 落在 snap 過的靜音裡聽不出來,明寫是人的刻意選擇(測試/診斷)。"""
+        with tempfile.TemporaryDirectory() as td:
+            s = make_session(td, cfg=TR_CFG, rows=with_cols(ROWS, TR_COLS))
+            for p in sorted((s / "tracks").iterdir()):
+                x, sr = read_wav(p)
+                k = int(round(0.0049 * sr))
+                write_wav(p, sr, np.concatenate([np.zeros(k), x[:-k]]))
+            r = render(s, "--dry-run", "--track-offset", "0")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("⚠", r.stdout)
+        self.assertIn("--track-offset", r.stdout)
+
     def test_no_tracks_dir_fails(self):
         with tempfile.TemporaryDirectory() as td:
             s = make_session(td, cfg=TR_CFG, rows=with_cols(ROWS, TR_COLS),
@@ -343,15 +383,36 @@ def build_mini_ep22(real: Path, out: Path, t0: float, t1: float) -> list[dict]:
     return blocks
 
 
+def balanced_window(real: Path, secs: float = 90.0) -> tuple[float, float]:
+    """三個人講話秒數最平均的窗(取「最少的那位」最多者)。
+
+    對齊檢查(F-4)只採信「該軌主導」的窗,40 秒的隨便一段常常只有一兩個人
+    在講,會被正確地判成量不到;測試要挑一段三個人都有講的。"""
+    cp = json.loads((real / "_asset" / "cutplan.json").read_text(encoding="utf-8"))
+    spk = sorted({b.get("speaker") for b in cp["blocks"] if b.get("speaker")})
+    end = cp["blocks"][-1]["end"]
+    best = (-1.0, 0.0)
+    t0 = 0.0
+    while t0 + secs <= end:
+        d = dict.fromkeys(spk, 0.0)
+        for b in cp["blocks"]:
+            o = min(b["end"], t0 + secs) - max(b["start"], t0)
+            if o > 0 and b.get("speaker") in d:
+                d[b["speaker"]] += o
+        best = max(best, (min(d.values()), t0))
+        t0 += 10.0
+    return best[1], best[1] + secs
+
+
 @unittest.skipIf(find_ep22() is None, "EP22 分軌 session 不在本機")
 class TestRealAudioEP22(unittest.TestCase):
-    T0, T1 = 60.0, 100.0
 
     def test_kin_only_block_ducks_mars_27db_and_timeline_matches(self):
         real = find_ep22()
+        t0, t1 = balanced_window(real)
         with tempfile.TemporaryDirectory() as td:
             s = Path(td) / "mini"
-            blocks = build_mini_ep22(real, s, self.T0, self.T1)
+            blocks = build_mini_ep22(real, s, t0, t1)
             long_ = [b for b in blocks if b["end"] - b["start"] >= 1.5]
             self.assertGreaterEqual(len(long_), 2, "窗內長 block 不夠")
             r0 = render(s, "--dry-run", "--dump-ranges", str(Path(td) / "mix.json"))

@@ -39,7 +39,20 @@ from session_paths import meta_dir, work_dir  # noqa: E402
 from srt_utils import find_source_media  # noqa: E402
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
-AUDIO_VENV = PROJECT_ROOT / ".venv-audio/bin/python"
+def find_audio_venv(root: Path) -> Path:
+    """repo 自己的 .venv-audio → 沒有就 git common dir 所在主樹的(worktree 不帶
+    venv,F-5,同 scripts/tests/pick_python.sh)→ 都沒有回自己的路徑讓 FAIL 照舊。"""
+    own = root / ".venv-audio/bin/python"
+    if own.exists():
+        return own
+    import subprocess
+    r = subprocess.run(["git", "-C", str(root), "rev-parse", "--path-format=absolute",
+                        "--git-common-dir"], capture_output=True, text=True)
+    main = Path(r.stdout.strip()).parent / ".venv-audio/bin/python"
+    return main if r.returncode == 0 and main.exists() else own
+
+
+AUDIO_VENV = find_audio_venv(PROJECT_ROOT)
 AUDIO_DIR = Path(__file__).resolve().parent
 INGEST_SCRIPT = AUDIO_DIR / "ingest_tracks.py"
 TRANSCRIBE_SCRIPT = AUDIO_DIR / "transcribe_local.py"

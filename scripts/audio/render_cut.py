@@ -1389,11 +1389,29 @@ def main():
         names = [n for n, _p in track_list]
         # 驗收 F-2:軌數=講者數、同取樣率、與 source 等長(容差見
         # tracks_columns.TRACK_LEN_TOL);不合就 FAIL,不靜默補零
-        from tracks_columns import find_source, validate_tracks
-        terrs = validate_tracks(sdir, track_list, find_source(sdir))
+        from tracks_columns import (ALIGN_SPREAD_MAX, find_source,
+                                    format_alignment, validate_tracks)
+        align_info: dict = {}
+        terrs = validate_tracks(sdir, track_list, find_source(sdir),
+                                report=align_info)
+        if align_info:
+            print("[render] 分軌對齊(相對 source.wav,互相關多窗中位數):"
+                  + format_alignment(align_info))
         if terrs:
             sys.exit("[render] FAIL: ⚙ audio=tracks 的分軌前提不成立 ——\n  "
                      + "\n  ".join(terrs))
+        if args.track_offset != "auto":
+            # (c) 明寫 offset 跟實測差很多:**警告不擋**。走到這裡實測已在
+            # ALIGN_SRC_MAX 內(超過的上面就 FAIL 了),切點偏幾 ms 會落在 snap
+            # 過的靜音裡聽不出來;明寫是人的刻意選擇(測試、診斷),照它的值
+            given = float(args.track_offset)
+            off_by = {n: v - given for n, v in align_info["offsets"].items()
+                      if abs(v - given) > ALIGN_SPREAD_MAX}
+            if off_by:
+                print(f"[render] ⚠ --track-offset {given:g} 與實測位移差 "
+                      + "、".join(f"{n} {d * 1000:+.2f}ms"
+                                 for n, d in off_by.items())
+                      + " —— 照明寫的值;要自動補償請用 --track-offset auto")
         missing, bad = [], []
         for it in program:
             if it["kind"] != "block":
@@ -2060,11 +2078,12 @@ def main():
         pan = {kv.split("=")[0]: float(kv.split("=")[1])
                for kv in args.pan.split(",") if "=" in kv}
         if args.track_offset == "auto":
-            toff = {n: ptr.measure_track_offset(src, p, sr=bus_sr)
-                    for n, p in track_list}
+            # 用 validate_tracks 量好的(主導窗才採信);不再用
+            # ptr.measure_track_offset —— 它在 EP22 被串音帶偏、量不到時回 0.0
+            toff = dict(align_info["offsets"])
         else:
             toff = {n: float(args.track_offset) for n, _p in track_list}
-        print("[render] 分軌時間對齊(相對 source.wav):"
+        print("[render] 分軌時間補償(讀分軌時加上):"
               + " ".join(f"{n}{v * 1000:+.2f}ms" for n, v in toff.items()))
         out_path = sdir / args.out
         out_path.parent.mkdir(parents=True, exist_ok=True)
