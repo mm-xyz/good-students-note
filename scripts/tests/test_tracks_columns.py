@@ -300,6 +300,35 @@ class TestAlignment(unittest.TestCase):
         errs, _ = self.run_validate(s)
         self.assertTrue(any("source" in e and "對齊" in e for e in errs), errs)
 
+    def test_luna_local_splice_3ms_is_caught_with_time(self):
+        """F-4-R1 重現:120s、8kHz,Mars 只在 29.4–30.1s 內容後移 3ms,
+        其他時間完全不動。稀疏 80 窗會漏;全檔每 10 秒一窗+逐窗偏離中位數要抓到,
+        並印出發生的時間點。"""
+        self.SR = 8000
+        self.td = tempfile.TemporaryDirectory()
+        s = Path(self.td.name)
+        self.addCleanup(self.td.cleanup)
+        (s / "tracks").mkdir()
+        sig = noise_tracks(self.SR, 120.0)
+        write_wav(s / "source.wav", self.SR, sum(sig.values()) / 3)
+        mars = sig["Mars"].copy()
+        a, b, k = int(29.4 * self.SR), int(30.1 * self.SR), int(0.003 * self.SR)
+        mars[a:b] = sig["Mars"][a - k:b - k]
+        for i, n in enumerate(NAMES, 1):
+            write_wav(s / "tracks" / f"{i}_{n}.wav", self.SR,
+                      mars if n == "Mars" else sig[n])
+        write_speakers(s, NAMES)
+        errs, info = self.run_validate(s)
+        self.assertTrue(any("Mars" in e and "0:30" in e for e in errs), errs)
+        self.assertAlmostEqual(info["offsets"]["Mars"], 0.0, delta=1e-4)
+
+    def test_windows_cover_whole_file_every_10s(self):
+        from tracks_columns import alignment_windows
+        st, w = alignment_windows(3000.0)
+        self.assertGreaterEqual(len(st), 290)
+        gaps = [y - x for x, y in zip(st, st[1:])]
+        self.assertLessEqual(max(gaps), 10.0 + 1e-6)
+
     def test_unmeasurable_track_fails(self):
         s = self.make({})
         write_wav(s / "tracks" / "3_Kin.wav", self.SR,
@@ -410,6 +439,10 @@ class TestCliOnSyntheticSession(unittest.TestCase):
         mars = tone(300, 0.5, [(0.0, 1.0)]) + tone(700, 0.08, [(1.5, 2.5)])
         sarah = tone(500, 0.3, [(3.0, 4.0)])
         kin = tone(700, 0.05, [(1.5, 2.5)])             # 小聲麥,串音到 Mars 更大
+        # G 區(4.4–5.6s)Kin 自己出一段寬頻聲:對齊檢查(F-4)只採信「該軌主導」
+        # 的窗,上面那段 Kin 的 700Hz 在 Mars 麥裡更大,Kin 永遠不主導
+        m = (t >= 4.4) & (t < 5.6)
+        kin[m] += rng.normal(0, 0.05, int(m.sum()))
         with tempfile.TemporaryDirectory() as td:
             sdir = Path(td) / "ep"
             (sdir / "tracks").mkdir(parents=True)

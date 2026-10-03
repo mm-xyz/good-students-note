@@ -134,15 +134,90 @@ ALIGN_MAX_LAG = 0.060
 # 延遲版),lag 散在 +4~+40ms;門檻拉到 0.8 之後三軌全部落在 −0.07~−0.09ms。
 # (舊的 pertrack_render.measure_track_offset 用 0.55 門檻、6 個固定探點,EP22
 # 量出 Kin +0.43ms、Sarah 沒有探點合格就默默回 0.0 —— 都是這個坑。)
-ALIGN_WINDOWS = 80
-ALIGN_WIN_SECS = 0.5
-ALIGN_MIN_WIN = 0.1         # 短檔窗太短 → 減少窗數,不把窗縮到量不準
+#
+# 2026-10-03 第三輪驗收 F-4-R1:原本 80 個窗只取 50 分鐘裡的 40 秒,窗與窗之間
+# 隔幾十秒,局部錯位(某軌只在 29.4–30.1s 錯 3ms)抽不到。改成**全檔每 10 秒
+# 一個 0.25 秒窗**(50 分鐘約 300 窗,仍只讀窗內樣本約 75 秒),而且不只看中位
+# 數:每一軌每個採信窗的位移偏離該軌中位數 > ALIGN_SPREAD_MAX 就 FAIL 並印時間點。
+# 窗縮到 0.25 秒:錯位段若只蓋到窗的一部分,相關係數會被未錯位的那一截拉低到
+# 0.8 以下而被丟掉;窗短一點,落在錯位段裡的窗才會整窗都是錯位內容。
+# **抓不到的**:錯位段落在兩個窗之間(短於約 10 秒且剛好沒蓋到窗),或錯位段
+# 裡這一軌沒有主導(相關 <0.8)。同一台錄音機的多軌共用時脈,實務上不會局部
+# 漂移;會出事的是人工剪接/轉檔掉段,通常長於 10 秒或會反映在長度上。
+ALIGN_STEP = 10.0           # 長檔:每 10 秒一窗
+ALIGN_MIN_WINDOWS = 80      # 短檔:至少約 80 窗(步距 = 可用長度/80,< 10 秒)
+ALIGN_WIN_SECS = 0.25
 ALIGN_MIN_RHO = 0.8
 ALIGN_MIN_HITS = 3          # 至少 3 個窗採信才算量得到(取中位數)
 
 
+def alignment_windows(dur: float) -> tuple[list[float], float]:
+    """(各窗起點秒數, 窗長)。格點步距 = min(10 秒, 可用長度/80),窗中心在
+    步距的整數倍(長檔即 10,20,30…秒);前後各留 ALIGN_MAX_LAG 給 lag 搜尋。
+    短檔(< ~13 分鐘)窗會比 10 秒密 —— 太稀的話每一軌湊不到 3 個主導窗。"""
+    L = ALIGN_MAX_LAG
+    w = ALIGN_WIN_SECS
+    usable = dur - 2 * L
+    if usable < w:
+        return [], w
+    step = min(ALIGN_STEP, usable / ALIGN_MIN_WINDOWS)
+    starts = []
+    k = 1
+    while k * step + w / 2 + L <= dur:
+        if k * step - w / 2 >= L:
+            starts.append(k * step - w / 2)
+        k += 1
+    return starts, w
+
+
+def window_rho(s, track: Path, sr: int, a: float, w: float):
+    """source 窗 s(起點 a 秒)對分軌的正規化互相關,lag −L..+L;讀不到回 None。"""
+    import numpy as np
+    from pertrack_render import _read_mono
+    L = int(round(ALIGN_MAX_LAG * sr))
+    n = len(s)
+    # 多讀 4 個樣本再切:秒數→樣本的取整可能讓讀回來少 1 個,少了就整窗被跳過
+    # (0.25 秒窗在 EP22 上 304 窗全被跳過,實踩)
+    t = _read_mono(track, sr, a - L / sr, a + w + (L + 4) / sr)[:n + 2 * L]
+    if len(t) < n + 2 * L or not s.any():
+        return None
+    m = 1 << int(np.ceil(np.log2(n + 2 * L + n)))
+    c = np.fft.irfft(np.fft.rfft(t, m) * np.conj(np.fft.rfft(s, m)), m)
+    c = c[:2 * L + 1]                             # c[k] = Σ s[i]·t[i+k]
+    cs = np.concatenate([[0.0], np.cumsum(t ** 2)])
+    et = cs[n:n + 2 * L + 1] - cs[:2 * L + 1]      # 每個 lag 對到的分軌能量
+    return c / np.sqrt(np.maximum(et * float((s ** 2).sum()), 1e-20))
+
+
+# 局部錯位要「鄰窗確認」:可疑窗前後 ±0.3 秒各再量一次,至少一個量到同一個位移
+# (±0.5ms)且相關 ≥ALIGN_MIN_RHO 才算。EP22 實測剩下的 3 個可疑窗在中位數位移處
+# 仍有 0.75–0.80 的相關(語音基頻週期的歧義,−6~−15ms),只出現在那一個窗;
+# 真的錯位段 ≥約 0.55 秒就會延伸到鄰窗。代價:< 0.55 秒的錯位抓不到。
+ALIGN_CONFIRM_DT = 0.3
+ALIGN_CONFIRM_TOL = 0.0005
+
+
+def confirm_local_offset(source: Path, track: Path, sr: int, t: float,
+                         lag: float, w: float) -> bool:
+    import numpy as np
+    from pertrack_render import _read_mono
+    L = int(round(ALIGN_MAX_LAG * sr))
+    for dt in (-ALIGN_CONFIRM_DT, ALIGN_CONFIRM_DT):
+        a = t + dt - w / 2
+        if a - ALIGN_MAX_LAG < 0:
+            continue
+        rho = window_rho(_read_mono(source, sr, a, a + w), track, sr, a, w)
+        if rho is None:
+            continue
+        k = int(np.argmax(rho))
+        if rho[k] >= ALIGN_MIN_RHO and abs((k - L) / sr - lag) <= ALIGN_CONFIRM_TOL:
+            return True
+    return False
+
+
 def measure_alignment(tracks: list[tuple[str, Path]], source: Path, sr: int,
-                      dur: float) -> dict[str, float | None]:
+                      dur: float, detail: dict | None = None
+                      ) -> dict[str, float | None]:
     """{軌: 對 source 的位移秒數(正=分軌內容比較晚;讀分軌時 +這個值)|None}。
 
     None = 量不到(採信的窗 < ALIGN_MIN_HITS)。符號與 render 的 track_offset
@@ -151,33 +226,58 @@ def measure_alignment(tracks: list[tuple[str, Path]], source: Path, sr: int,
     from pertrack_render import _read_mono
 
     L = int(round(ALIGN_MAX_LAG * sr))
-    usable = dur - 2 * ALIGN_MAX_LAG
-    w = min(ALIGN_WIN_SECS, max(ALIGN_MIN_WIN, usable / ALIGN_WINDOWS))
-    k_win = min(ALIGN_WINDOWS, int(usable / w))
-    if k_win < ALIGN_MIN_HITS:
+    starts, w = alignment_windows(dur)
+    if not starts:
         return {n: None for n, _p in tracks}
-    starts = [ALIGN_MAX_LAG + i * (usable - w) / max(1, k_win - 1)
-              for i in range(k_win)]
-    srcw = [_read_mono(source, sr, a, a + w) for a in starts]
     out: dict[str, float | None] = {}
-    for name, p in tracks:
-        lags = []
-        for a, s in zip(starts, srcw):
-            n = len(s)
-            t = _read_mono(p, sr, a - L / sr, a + w + L / sr)[:n + 2 * L]
-            if len(t) < n + 2 * L or not s.any():
+    acc: dict[str, list] = {n: [] for n, _p in tracks}   # (時間, lag, 相關曲線)
+    names = [n for n, _p in tracks]
+    rows = []                     # 每窗:{軌: (該軌窗內 dB, lag, ρ峰, ρ曲線)}
+    for a in starts:
+        s = _read_mono(source, sr, a, a + w)
+        if not s.any():
+            continue
+        row = {}
+        for name, p in tracks:
+            rho = window_rho(s, p, sr, a, w)
+            if rho is None:
                 continue
-            m = 1 << int(np.ceil(np.log2(n + 2 * L + n)))
-            c = np.fft.irfft(np.fft.rfft(t, m) * np.conj(np.fft.rfft(s, m)), m)
-            c = c[:2 * L + 1]                         # c[k] = Σ s[i]·t[i+k]
-            cs = np.concatenate([[0.0], np.cumsum(t ** 2)])
-            et = cs[n:n + 2 * L + 1] - cs[:2 * L + 1]  # 每個 lag 對到的分軌能量
-            rho = c / np.sqrt(np.maximum(et * float((s ** 2).sum()), 1e-20))
+            x = _read_mono(p, sr, a, a + w)
+            lvl = 10 * np.log10(float((x ** 2).mean()) + 1e-20)
             k = int(np.argmax(rho))
-            if rho[k] >= ALIGN_MIN_RHO:
-                lags.append(k - L)
-        out[name] = (float(np.median(lags)) / sr
-                     if len(lags) >= ALIGN_MIN_HITS else None)
+            row[name] = (lvl, k - L, float(rho[k]), rho)
+        rows.append((a, row))
+    # 一個窗只採信「正在講話的那一軌」:以各軌**自己**的動態範圍(窗電平的
+    # P10 底噪 → P97 講話電平,同 pick_loudest)判誰在講,不是比相關係數 ——
+    # 相關係數與音量無關,安靜的麥只收到別人的串音也能到 0.88(EP22 1953.2s:
+    # Mars 在講、ρ0.85;Sarah 麥收到他的聲音晚 17.9ms、ρ0.88,比主講者還高)
+    lv = {n: [r[n][0] for _a, r in rows if n in r] for n in names}
+    cal = {n: (float(np.percentile(v, 10)), float(np.percentile(v, 97)))
+           for n, v in lv.items() if v}
+    for a, row in rows:
+        cand = [(n, (row[n][0] - cal[n][0]) / max(cal[n][1] - cal[n][0], 1e-6))
+                for n in row if n in cal]
+        if not cand:
+            continue
+        who = max(cand, key=lambda x: x[1])[0]
+        _lvl, lag, rk, curve = row[who]
+        if rk >= ALIGN_MIN_RHO:
+            acc[who].append((a + w / 2, lag, curve))
+    for name, _p in tracks:
+        times = [x[0] for x in acc[name]]
+        lags = [x[1] for x in acc[name]]
+        curves = [x[2] for x in acc[name]]
+        med = float(np.median(lags)) if len(lags) >= ALIGN_MIN_HITS else None
+        out[name] = med / sr if med is not None else None
+        if detail is not None:
+            # (時間, 該窗位移, 該窗峰值相關, 該窗在「中位數位移」處的相關)
+            mi = int(round(med)) + L if med is not None else None
+            detail[name] = [(t, lg / sr, float(c[lg + L]),
+                             float(c[mi]) if mi is not None else None)
+                            for t, lg, c in zip(times, lags, curves)]
+    if detail is not None:
+        detail["_windows"] = len(starts)
+        detail["_w"] = w
     return out
 
 
@@ -250,15 +350,32 @@ def validate_tracks(sdir: Path, tracks: list[tuple[str, Path]],
                         f"{abs(dur - src_dur):.3f}s > 容差 {tol}s({p.name})")
     if errs:
         return errs          # 取樣率/長度都不對時,對齊量出來也沒有意義
-    offs = measure_alignment(tracks, Path(source), src_sr, src_dur)
+    detail: dict = {}
+    offs = measure_alignment(tracks, Path(source), src_sr, src_dur, detail)
     got = {n: v for n, v in offs.items() if v is not None}
     spread = (max(got.values()) - min(got.values())) if len(got) > 1 else 0.0
     if report is not None:
         report["offsets"] = offs
         report["spread"] = spread
+        report["windows"] = detail.get("_windows", 0)
+        report["hits"] = {n: len(detail.get(n, [])) for n, _p in tracks}
+    # F-4-R1:逐窗檢查——任一採信窗偏離該軌中位數 > ALIGN_SPREAD_MAX 就是局部錯位
+    paths = dict(tracks)
+    for n, v in got.items():
+        bad = [(t, lg) for t, lg, _rp, _rm in detail.get(n, [])
+               if abs(lg - v) > ALIGN_SPREAD_MAX
+               and confirm_local_offset(Path(source), paths[n], src_sr, t, lg,
+                                        detail.get("_w", ALIGN_WIN_SECS))]
+        if bad:
+            errs.append(f"{n}:局部對齊不一致 {len(bad)} 處(偏離中位數 "
+                        f"{v * 1000:+.2f}ms 超過 {ALIGN_SPREAD_MAX * 1000:.0f}ms):"
+                        + "、".join(f"{_mmss(t)} {lg * 1000:+.2f}ms"
+                                   for t, lg in bad[:6])
+                        + (" …" if len(bad) > 6 else ""))
     for n, v in offs.items():
         if v is None:
-            errs.append(f"{n}:量不到與 source 的對齊(互相關 {ALIGN_WINDOWS} 窗"
+            errs.append(f"{n}:量不到與 source 的對齊(互相關 "
+                        f"{detail.get('_windows', 0)} 窗"
                         f"裡相關 ≥{ALIGN_MIN_RHO} 的不到 {ALIGN_MIN_HITS} 個)—— "
                         f"這一軌可能不是同一次錄音")
         elif abs(v) > ALIGN_SRC_MAX:
@@ -270,6 +387,10 @@ def validate_tracks(sdir: Path, tracks: list[tuple[str, Path]],
                     + f",互差 {spread * 1000:.2f}ms > 門檻 "
                       f"{ALIGN_SPREAD_MAX * 1000:.0f}ms(多軌應 sample-aligned)")
     return errs
+
+
+def _mmss(t: float) -> str:
+    return f"{int(t // 60)}:{t % 60:04.1f}"
 
 
 def format_alignment(report: dict) -> str:
