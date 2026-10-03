@@ -411,5 +411,37 @@ class TestRouteChangeVisibleInDiff(unittest.TestCase):
         self.assertIn("audio: 無→mixdown", out)
 
 
+TR_ROWS = ("- [x] B0001 [0:02–0:05] [Sarah] 嗨大家好。 ⟦Mars○ Sarah● Kin○⟧\n"
+           "- [x] B0002 [0:06–0:09] [KIN] 我是KIN。 ⟦Mars○ Sarah○ Kin●⟧\n"
+           "- [ ] B0003 [0:10–0:12] [Mars] 呃這個。 ⟦Mars● Sarah○ Kin○⟧\n")
+
+
+class TestAudioTracks(unittest.TestCase):
+    """ADR-2026-10-03-audio-tracks-line:合軌決定＋分軌音源。"""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.d = Path(self.tmp.name)
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def test_route_label(self) -> None:
+        p = write(self.d, "cutplan.md",
+                  "# t\n\n## ⚙ line=mixdown audio=tracks\n" + TR_ROWS)
+        self.assertEqual(route_label(p), "合軌決定＋分軌音源")
+
+    def test_track_toggle_is_visible_in_diff(self) -> None:
+        """只切軌欄也是剪輯決定:Drive↔session 對照不能印「不影響剪輯」。"""
+        cfg = "# t\n\n## ⚙ line=mixdown audio=tracks\n"
+        a = write(self.d, "a.md", cfg + TR_ROWS)
+        b = write(self.d, "b.md", cfg + TR_ROWS.replace(
+            "我是KIN。 ⟦Mars○ Sarah○ Kin●⟧", "我是KIN。 ⟦Mars● Sarah○ Kin●⟧"))
+        out = "\n".join(semantic_diff(a, b))
+        self.assertIn("軌欄變動 1 個", out)
+        self.assertIn("B0002", out)
+        self.assertNotIn("不影響剪輯", out)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

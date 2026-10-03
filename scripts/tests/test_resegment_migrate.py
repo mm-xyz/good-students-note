@@ -123,6 +123,15 @@ class TestMigrateParseBlocks(unittest.TestCase):
         self.assertEqual(stream, "你打扮,嗯不對")
         self.assertEqual(spans, [(4, 5)])                      # 嗯 的字元流座標
 
+    def test_tracks_column_goes_to_suffix_not_text(self):
+        """audio=tracks 行尾軌欄不能混進字元流(否則對齊會把它當逐字稿)。"""
+        lines = ["- [x] B0001 [0:00–0:04] [Sarah] 你打扮,~~嗯~~不對 ⟦Mars○ Sarah● Kin○⟧",
+                 "- [x] B0002 [0:04–0:05] [Mars] 好 ← 理由 ⟦Mars● Sarah○ Kin○⟧"]
+        blocks, stream, spans, cuts = parse_blocks(lines)
+        self.assertEqual(stream, "你打扮,嗯不對好")
+        self.assertEqual(blocks[0]["suffix"], " ⟦Mars○ Sarah● Kin○⟧")
+        self.assertEqual(blocks[1]["suffix"], " ← 理由 ⟦Mars● Sarah○ Kin○⟧")
+
     def test_unchecked_block_also_parsed(self):
         lines = ["- [ ] B0002 [0:04–0:05] [Mars] 剪掉段"]
         blocks, stream, spans, cuts = parse_blocks(lines)

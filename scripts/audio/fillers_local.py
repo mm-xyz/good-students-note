@@ -72,10 +72,15 @@ def parse_cutplan(path: Path) -> tuple[list[str], list[dict]]:
         if not m or m.group(1).lower() != "x":
             continue
         body = m.group(4)
+        # audio=tracks 行尾軌欄 ⟦…⟧ 原樣留在 tail,不送進 LLM、不會被改寫
+        m_col = re.search(r"\s*⟦[^⟦⟧]*⟧\s*$", body)
+        col_tail = body[m_col.start():] if m_col else ""
+        body = body[:m_col.start()] if m_col else body
         tail = ""
         if " ← " in body:
             body, t = body.rsplit(" ← ", 1)
             tail = " ← " + t
+        tail += col_tail
         sp = re.match(r"^(\[[^\]]{1,20}\]\s*)", body)
         speaker = sp.group(1) if sp else ""
         text = body[len(speaker):]

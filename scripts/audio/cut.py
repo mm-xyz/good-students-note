@@ -108,12 +108,18 @@ def find_drive_dir(sdir: Path, override: Path | None) -> Path | None:
 def semantic_diff(a: Path, b: Path) -> list[str]:
     """兩份 cutplan 的**語意**差異(不是逐行 diff):勾選翻轉、刪除線增減、
     ✂ 手動剪除、⚙ 參數。逐行 diff 對這種一行幾百字的檔案沒有可讀性。"""
-    def load(p: Path) -> tuple[dict, dict, set, dict, dict]:
+    tcol_a: dict = {}
+    tcol_b: dict = {}
+
+    def load(p: Path, tcol: dict) -> tuple[dict, dict, set, dict, dict]:
         keep, strikes, cuts, cfg, mus = {}, {}, set(), {}, {}
         for it in parse_program(p):
             if it["kind"] == "block":
                 keep[it["id"]] = it["keep"]
                 strikes[it["id"]] = it["raw"].count("~~") // 2
+                # audio=tracks 的軌欄(哪幾軌出聲)也是剪輯決定
+                if it.get("tracks") is not None and not it.get("clip"):
+                    tcol[it["id"]] = " ".join(it["tracks"].split())
             elif it["kind"] == "cut":
                 cuts.add((round(it["a"], 2), round(it["b"], 2)))
             elif it["kind"] == "config":
@@ -126,9 +132,17 @@ def semantic_diff(a: Path, b: Path) -> list[str]:
                                     "lead", "tail")}
         return keep, strikes, cuts, cfg, mus
 
-    ka, sa, ca, ga, ma = load(a)
-    kb, sb, cb, gb, mb = load(b)
+    ka, sa, ca, ga, ma = load(a, tcol_a)
+    kb, sb, cb, gb, mb = load(b, tcol_b)
     out = []
+    dt = [i for i in tcol_a.keys() | tcol_b.keys()
+          if tcol_a.get(i) != tcol_b.get(i)]
+    if dt:
+        dt.sort()
+        out.append(f"  軌欄變動 {len(dt)} 個:"
+                   + "、".join(f"{i}({tcol_a.get(i, '無')}→{tcol_b.get(i, '無')})"
+                               for i in dt[:8])
+                   + (" …" if len(dt) > 8 else ""))
     flipped = [i for i in ka if i in kb and ka[i] != kb[i]]
     if flipped:
         out.append(f"  勾選翻轉 {len(flipped)} 個:"
@@ -193,7 +207,8 @@ def route_label(plan: Path) -> str:
         # 兩碼前綴(MR/SR/KN)=逐軌 block,單碼(B/G/S/I)=混音線
         line = "pertrack" if any(i[:2].isalpha() for i in ids) else "mixdown"
     if line == "mixdown":
-        return "混音"
+        # ADR-2026-10-03-audio-tracks-line:合軌節目單決定時間、分軌出聲
+        return "合軌決定＋分軌音源" if cfg.get("audio") == "tracks" else "混音"
     return "分軌決定＋合軌音源" if cfg.get("audio") == "mixdown" else "分軌"
 
 

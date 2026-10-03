@@ -25,6 +25,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from session_paths import work_dir  # noqa: E402
+from tracks_columns import split_col  # noqa: E402 — audio=tracks 行尾軌欄不是逐字稿
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 DEFAULT_TEMPLATE = (PROJECT_ROOT / "shared-material" / "水星貓的生活實驗室_v1"
@@ -80,7 +81,7 @@ def build_transcript(sdir: Path) -> str:
         if not m or clip:
             continue
         bid, spk = m.group(2), m.group(4) or "?"
-        body = m.group(5).rsplit(" ← ", 1)[0].replace("~~", "")
+        body = split_col(m.group(5))[0].rsplit(" ← ", 1)[0].replace("~~", "")
         if spk == prev_spk:
             lines[-1] += body
         else:
@@ -116,7 +117,7 @@ def plan_sequence(sdir: Path) -> list[tuple[str, str]]:
         m = LINE_RE.match(s)
         if not m or clip:
             continue
-        body = m.group(5).rsplit(" ← ", 1)[0].replace("~~", "")
+        body = split_col(m.group(5))[0].rsplit(" ← ", 1)[0].replace("~~", "")
         seq.append((m.group(4) or "?", body))
     return seq
 
