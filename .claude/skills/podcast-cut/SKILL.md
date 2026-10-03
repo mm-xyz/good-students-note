@@ -1,3 +1,8 @@
+---
+name: podcast-cut
+description: Podcast 剪輯線——依已建 session 的最新 cutplan 出片（cut.py：Drive 同步＋dry-run＋render＋版本目錄），也負責新集數初剪與定稿歸檔。觸發：「剪 podcast」「剪 EP18」「照最新 cutplan 出片」「/podcast-cut」。知識點切卡不走這顆（那是 /good-student）。
+---
+
 # Podcast Cut（剪輯線）
 
 把已建 session 的 podcast 集數，依最新 cutplan 出片。核心是零 LLM 零 token：`cut.py` 一行搞定 Drive 同步＋dry-run＋render＋版本目錄；agent 只在「改了 cutplan 沒效果」「要提案剪輯」時介入。
