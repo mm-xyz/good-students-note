@@ -149,3 +149,37 @@ test('Code.gs loadCutplan:同資料夾有 timeline 就一起回傳,沒有回 nul
   assert.equal(r.timeline, null);
   assert.equal(r.content, PLAN);
 });
+
+// ── 第四輪驗收 TL-1 / TL-2 ───────────────────────────────────────────────
+const { OUT_OF_RANGE } = require('../cutplan-core.js');
+
+test('TL-1 parseTimeline 保留 final_duration_secs', () => {
+  const tl = parseTimeline(JSON.stringify({ version: 'v3', blocks: { B0001: [1] },
+    final_duration_secs: 2608.9 }));
+  assert.equal(tl.finalDuration, 2608.9);
+  assert.equal(parseTimeline(TL).finalDuration, null);
+});
+
+test('TL-1 findLineAtTime:超過成品長度或負數 → OUT_OF_RANGE,不跳卡', () => {
+  const doc = parseCutplan(PLAN);
+  const tl = parseTimeline(JSON.stringify({ ...JSON.parse(TL), final_duration_secs: 30 }));
+  assert.equal(findLineAtTime(doc, tl, 31), OUT_OF_RANGE);
+  assert.equal(findLineAtTime(doc, tl, -1), OUT_OF_RANGE);
+  assert.equal(findLineAtTime(doc, tl, 30), idx('- [x] B0003', 1));
+  // 沒有 final_duration_secs:維持原行為(超過也找最後一張)
+  assert.equal(findLineAtTime(doc, parseTimeline(TL), 9999), idx('- [x] B0003', 1));
+});
+
+test('TL-2 parseTimeline:任一 block 值不是 null 或有限非負數字陣列 → 整份 null', () => {
+  const base = JSON.parse(TL);
+  for (const bad of [
+    { B0001: 'x' }, { B0001: [1, 'a'] }, { B0001: [-1] }, { B0001: [null] },
+    { B0001: {} }, { B0001: 5 }, { B0001: [true] },
+  ]) {
+    const t = JSON.stringify({ ...base, blocks: { ...base.blocks, ...bad } });
+    assert.equal(parseTimeline(t), null, JSON.stringify(bad));
+  }
+  assert.ok(parseTimeline(TL));
+  assert.equal(parseTimeline(JSON.stringify({ version: 'v1', blocks: [] })), null);
+  assert.equal(parseTimeline(JSON.stringify({ ...base, final_duration_secs: -3 })), null);
+});

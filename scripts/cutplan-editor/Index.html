@@ -298,6 +298,7 @@
     dirty: false,
     tracksMode: false, // ⚙ audio=tracks:每張卡片多畫各軌開關
     timeline: null,    // cutplan.timeline.json(#1078),沒有就是 null
+    timelineBad: false, // 有檔但格式不合格(整份不採信)
     history: Core.createHistory(), // undo 堆疊(純資料,見 cutplan-core.js)
   };
 
@@ -373,6 +374,8 @@
         state.tracksMode = Core.hasTracksAudio(state.doc);
         // 成品時間對照(#1078):同資料夾沒有 timeline 就不顯示,不報錯
         state.timeline = Core.parseTimeline(res.timeline);
+        // 有檔案但格式不合格:整份不採信,頁首講清楚(驗收 TL-2)
+        state.timelineBad = !!res.timeline && !state.timeline;
         showTimelineBar();
         render();
         setStatus('已載入:' + res.name, 'ok');
@@ -831,8 +834,14 @@
 
   function showTimelineBar() {
     var tl = state.timeline;
-    tlEls.bar.classList.toggle('show', !!tl);
-    if (!tl) return;
+    tlEls.bar.classList.toggle('show', !!tl || !!state.timelineBad);
+    tlEls.input.style.display = tl ? '' : 'none';
+    document.getElementById('tlGo').style.display = tl ? '' : 'none';
+    if (!tl) {
+      tlEls.info.textContent = state.timelineBad
+        ? 'cutplan.timeline.json 格式錯誤,未啟用成品時間對照' : '';
+      return;
+    }
     var n = 0;
     state.doc.lines.forEach(function (l) {
       var s = Core.timelineStatus(l, tl);
@@ -851,6 +860,11 @@
       return;
     }
     var idx = Core.findLineAtTime(state.doc, state.timeline, secs);
+    if (idx === Core.OUT_OF_RANGE) {
+      setStatus('成品只有 ' + Core.formatTime(state.timeline.finalDuration)
+        + ',' + tlEls.input.value + ' 超出範圍', 'error');
+      return;
+    }
     var card = idx === null ? null
       : els.blockList.querySelector('.block-card[data-line-index="' + idx + '"]');
     if (!card) {

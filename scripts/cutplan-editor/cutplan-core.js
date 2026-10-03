@@ -607,17 +607,31 @@ function parseTimeline(text) {
   } catch (e) {
     return null;
   }
-  if (!d || typeof d !== 'object' || !d.blocks || typeof d.blocks !== 'object') {
+  if (!d || typeof d !== 'object' || !d.blocks || typeof d.blocks !== 'object'
+      || Array.isArray(d.blocks)) {
     return null;
   }
+  // 每一列都要合格(null 或有限非負數字陣列),任一不合格整份不採信(驗收 TL-2):
+  // 部分採信會讓「v3 未出現」這種結論建立在壞資料上,MM 看不出哪幾列是假的
+  const okNum = (v) => typeof v === 'number' && Number.isFinite(v) && v >= 0;
+  for (const v of Object.values(d.blocks)) {
+    if (v !== null && !(Array.isArray(v) && v.every(okNum))) return null;
+  }
+  const fd = d.final_duration_secs;
+  if (fd !== undefined && fd !== null && !okNum(fd)) return null;
   const version = String(d.version || '');
   return {
     version,
     versionShort: version.split('_')[0] || version,
     generatedAt: String(d.generated_at || ''),
+    finalDuration: okNum(fd) ? fd : null,
     blocks: d.blocks,
   };
 }
+
+// findLineAtTime 的「超出成品長度」結果(驗收 TL-1):UI 要說「成品只有 43:28」,
+// 不能默默跳到最後一張卡讓人以為那裡就是。
+const OUT_OF_RANGE = 'out-of-range';
 
 // 「12:34」「754」「1:02:03」「12:34.5」→ 秒;不合法回 null(不猜)。
 function parseTimeInput(text) {
@@ -660,7 +674,12 @@ function timelineStatus(line, timeline) {
 // 與正文時,集錦的時間(成品前段)對到文件裡第一次出現的那列(集錦區),其餘
 // 時間對到最後一次出現的那列(正文)。
 function findLineAtTime(doc, timeline, secs) {
-  if (!timeline || typeof secs !== 'number' || secs < 0) return null;
+  if (!timeline || typeof secs !== 'number' || Number.isNaN(secs)) return null;
+  if (timeline.finalDuration !== null && timeline.finalDuration !== undefined
+      && (secs < 0 || secs > timeline.finalDuration)) {
+    return OUT_OF_RANGE;
+  }
+  if (secs < 0) return null;
   let best = null;
   for (const [id, times] of Object.entries(timeline.blocks)) {
     if (!Array.isArray(times)) continue;
@@ -685,6 +704,7 @@ const api = {
   formatTime,
   timelineStatus,
   findLineAtTime,
+  OUT_OF_RANGE,
   serializeCutplan,
   toggleCheckbox,
   splitStrikes,
