@@ -1018,6 +1018,17 @@ def measure_lufs(path: Path) -> float | None:
     return float(m[-1]) if m else None
 
 
+def insert_gain_db(ref_l: float, ins_l: float,
+                   bus_l: float | None = None) -> float:
+    """➕ 補錄 gain=auto:對鄰段(合軌 source)拉齊,夾 ±12dB。
+
+    audio=tracks 時成品取自分軌 bus,另外補上 bus 與 source 在同一批鄰段的
+    實測落差(bus_l − ref_l,不夾)——夾住它會讓補錄比正片大聲(EP22 實測
+    bus 比合軌小 20dB,夾在 −12 → 成品補錄段大聲 3.4 LU)。"""
+    g = max(-12.0, min(12.0, ref_l - ins_l))
+    return g + (bus_l - ref_l if bus_l is not None else 0.0)
+
+
 def ffprobe_duration(path: Path) -> float:
     out = subprocess.run(
         ["ffprobe", "-v", "error", "-show_entries", "format=duration",
@@ -2008,6 +2019,7 @@ def main():
         src = bus
 
     tracks_bus = None
+    src_mix = src          # 合軌 source(audio=tracks 時 ➕ 電平基準仍要用它)
     if audio_tracks:
         # 時間已經由合軌決定層算完(segments 跟 line=mixdown 逐毫秒相同),
         # 這裡只換「從哪裡取聲音」:三軌照同一組區間切、各軌套軌欄包絡,
@@ -2103,16 +2115,32 @@ def main():
                 acc += take
                 if acc >= args.insert_ref:
                     break
-        ref_l = measure_lufs_ranges(src, nb)
+        bus_l = None
+        if tracks_bus is not None:
+            # audio=tracks:src 是分軌 bus(EP22 實測比合軌小聲 ~20dB)。基準照
+            # 合軌線的語意對 source 量,再補 bus 與 source 在同一批鄰段的落差
+            bus_l = measure_lufs_ranges(src, nb)
+            nb_src = []
+            for a_, b_ in nb:
+                seg = next(t for t in segments if t["kind"] == "speech"
+                           and t["a"] - 1e-6 <= a_ and b_ <= t["b"] + 1e-6)
+                nb_src.append([seg["src_a"] + a_ - seg["a"],
+                               seg["src_a"] + b_ - seg["a"]])
+            ref_l = measure_lufs_ranges(src_mix, nb_src)
+        else:
+            ref_l = measure_lufs_ranges(src, nb)
         ins_l = measure_lufs(s["path"])
-        if ref_l is None or ins_l is None:
+        if ref_l is None or ins_l is None or (tracks_bus is not None
+                                              and bus_l is None):
             print(f"[render] ⚠ {s['path'].name} 量不到響度,gain 退回 0dB"
                   f"(要手動指定就在 cutplan 寫 gain=+3)")
             continue
-        s["gain_db"] = max(-12.0, min(12.0, ref_l - ins_l))
+        s["gain_db"] = insert_gain_db(ref_l, ins_l, bus_l)
         print(f"[render] ➕ {s['path'].name} 電平對齊(鄰近 {args.insert_ref:.0f}s"
               f"×2 保留語音):鄰段 {ref_l:.1f} LUFS / 補錄 {ins_l:.1f} LUFS"
-              f" → {s['gain_db']:+.1f}dB")
+              + (f" / 分軌 bus 鄰段 {bus_l:.1f} LUFS" if bus_l is not None
+                 else "")
+              + f" → {s['gain_db']:+.1f}dB")
 
     out = sdir / args.out
     dst_starts, final_dur = run_ffmpeg(src, segments, musics, out, args.fade,

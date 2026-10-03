@@ -141,6 +141,25 @@ class TestParseColumn(unittest.TestCase):
         self.assertTrue(all(it.get("tracks") is None for it in prog))
 
 
+class TestInsertGainOnTracksBus(unittest.TestCase):
+    """➕ 補錄 gain=auto 在分軌 bus 上(EP22 e2e 實踩):分軌 bus 比錄音機合軌
+    小聲約 20dB,直接拿 bus 當基準,補錄要壓 −20dB 卻被 ±12dB 夾住,成品裡
+    補錄比前後正片大聲 3.4 LU。正解:先照合軌線的語意對 source 算(夾 ±12),
+    再補上 bus 與 source 在同一批鄰段上的實測落差(不夾)。"""
+
+    def test_mixdown_semantics_unchanged(self):
+        from render_cut import insert_gain_db
+        self.assertAlmostEqual(insert_gain_db(-18.7, -18.6), -0.1, places=6)
+        self.assertEqual(insert_gain_db(-40.0, -18.0), -12.0)
+
+    def test_bus_offset_is_added_unclamped(self):
+        from render_cut import insert_gain_db
+        self.assertAlmostEqual(insert_gain_db(-18.7, -18.6, bus_l=-38.7),
+                               -20.1, places=6)
+        self.assertAlmostEqual(insert_gain_db(-40.0, -18.0, bus_l=-60.0),
+                               -32.0, places=6)
+
+
 class TestRouteGuards(unittest.TestCase):
     def test_tracks_timeline_identical_to_mixdown(self):
         with tempfile.TemporaryDirectory() as td:
