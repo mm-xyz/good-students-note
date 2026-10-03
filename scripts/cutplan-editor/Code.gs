@@ -109,36 +109,10 @@ function loadCutplan(fileId) {
  * 這支檔案只要跟 cutplan-core.js 一起部署,不需要額外 require/import)。
  */
 function findIllegalEdit_(oldContent, newContent) {
-  var oldDoc = parseCutplan(oldContent);
-  var newDoc = parseCutplan(newContent);
-  if (oldDoc.lines.length !== newDoc.lines.length) {
-    return '行數不一致(' + oldDoc.lines.length + ' → ' + newDoc.lines.length + ')';
-  }
-  for (var i = 0; i < oldDoc.lines.length; i++) {
-    var a = oldDoc.lines[i];
-    var b = newDoc.lines[i];
-    if (a.editable !== b.editable) {
-      return '第 ' + (i + 1) + ' 行的可編輯性改變了(唯讀 ↔ 可編輯)';
-    }
-    if (!a.editable) {
-      if (a.raw !== b.raw || a.term !== b.term) {
-        return '第 ' + (i + 1) + ' 行是唯讀行,但內容被改動了';
-      }
-      continue;
-    }
-    if (a.id !== b.id || a.timecode !== b.timecode
-        || a.prefix !== b.prefix || a.reason !== b.reason || a.term !== b.term) {
-      return '第 ' + (i + 1) + ' 行(' + a.id + ')的 id/時間碼/speaker/理由被改動了';
-    }
-    if (a.bodyRaw !== b.bodyRaw) {
-      var cleanA = splitStrikes(a.bodyRaw).clean;
-      var cleanB = splitStrikes(b.bodyRaw).clean;
-      if (cleanA !== cleanB) {
-        return '第 ' + (i + 1) + ' 行(' + a.id + ')的逐字稿文字被改動了(只能加/去刪除線)';
-      }
-    }
-  }
-  return null;
+  // 規則本體住 cutplan-core.js 的 findIllegalEdit(2026-10-03 搬過去,讓 Node
+  // 測試守得到;tests/tracks.test.js 用 vm 把本檔跟 core 一起載入驗 saveCutplan)。
+  // 允許:勾選、加/去刪除線、⚙ 有 audio=tracks 時翻軌欄 ●/○;其餘一律拒絕。
+  return findIllegalEdit(oldContent, newContent);
 }
 
 /**

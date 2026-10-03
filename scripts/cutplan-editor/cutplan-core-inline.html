@@ -96,6 +96,14 @@ const REASON_SEP = ' ← ';
 // 行尾符號(保留 CRLF/LF/CR 與「無結尾換行」四種狀態)。
 const EOL_RE = /(\r\n|\r|\n)/;
 
+// `## ⚙ line=mixdown audio=tracks` 的行尾軌欄 ` ⟦Mars● Sarah○ Kin○⟧`
+// (ADR-2026-10-03-audio-tracks-line)——對齊 scripts/audio/tracks_columns.py 的
+// COL_RE / CELL_RE。先於 ` ← 理由` 切掉,所以理由與逐字稿都看不到它。
+const TRACKS_COL_RE = /\s*⟦([^⟦⟧]*)⟧\s*$/;
+const TRACK_ON = '●';
+const TRACK_OFF = '○';
+const TRACK_CELL_RE = /^(\S+?)([●○])$/;
+
 // ── 行層級解析 ──────────────────────────────────────────────────────────
 
 function parseLine(content, term) {
@@ -103,7 +111,10 @@ function parseLine(content, term) {
   if (!m) {
     return { editable: false, raw: content, term };
   }
-  const [, mark, id, timecode, restFull] = m;
+  const [, mark, id, timecode, restAll] = m;
+  const cm = TRACKS_COL_RE.exec(restAll);
+  const tracksRaw = cm ? restAll.slice(cm.index) : '';
+  const restFull = cm ? restAll.slice(0, cm.index) : restAll;
   const sepIdx = restFull.lastIndexOf(REASON_SEP);
   let rest = restFull;
   let reason = '';
@@ -118,12 +129,13 @@ function parseLine(content, term) {
     prefix = sm[0];
     bodyRaw = rest.slice(sm[0].length);
   }
-  return { editable: true, term, mark, id, timecode, prefix, bodyRaw, reason };
+  return { editable: true, term, mark, id, timecode, prefix, bodyRaw, reason, tracksRaw };
 }
 
 function serializeLine(line) {
   if (!line.editable) return line.raw;
-  return `- [${line.mark}] ${line.id} [${line.timecode}] ${line.prefix}${line.bodyRaw}${line.reason}`;
+  return `- [${line.mark}] ${line.id} [${line.timecode}] ${line.prefix}${line.bodyRaw}${line.reason}`
+    + (line.tracksRaw || '');
 }
 
 // ── 文件層級 parse / serialize ────────────────────────────────────────────
@@ -355,7 +367,13 @@ function canUndo(history) {
 function peekHistory(history) {
   if (history.stack.length === 0) return null;
   const top = history.stack[history.stack.length - 1];
-  return { lineIndex: top.lineIndex, start: top.start, end: top.end };
+  const out = { lineIndex: top.lineIndex, start: top.start, end: top.end };
+  // 軌欄切換沒有「選取範圍」可以貼復原按鈕,UI 要改貼在那顆開關旁邊
+  if (top.kind) {
+    out.kind = top.kind;
+    out.track = top.track;
+  }
+  return out;
 }
 
 // applyStrike + 自動推入歷史的便利包裝。選取不合法一樣丟錯(沿用
@@ -462,6 +480,119 @@ function removeRoomtoneWithHistory(doc, history, lineIndex) {
   };
 }
 
+// ── 軌欄切換(`## ⚙ … audio=tracks`)──────────────────────────────────
+//
+// **第二個刻意開的口**,只開「翻 ●/○」這一個動作:欄位有沒有、哪幾軌、順序、
+// 格式全部唯讀(那是 tracks_columns.py 產的,改壞了 render 會 FAIL,MM 在手機
+// 上不會發現)。開它的理由跟 🔇 同一組條件:①「這段哪幾軌該出聲」只有耳朵
+// 聽得出來(串音、笑聲、搶話),預設值只是猜;②翻錯一定看得到(開關就畫在
+// 卡片上)、也翻得回來(吃既有的復原)。
+
+function parseTracks(tracksRaw) {
+  const m = TRACKS_COL_RE.exec(tracksRaw || '');
+  if (!m) return null;
+  const out = [];
+  const seen = new Set();
+  for (const tok of m[1].split(/\s+/).filter(Boolean)) {
+    const c = TRACK_CELL_RE.exec(tok);
+    if (!c || seen.has(c[1])) return null;
+    seen.add(c[1]);
+    out.push({ name: c[1], on: c[2] === TRACK_ON });
+  }
+  return out.length ? out : null;
+}
+
+function hasTracksAudio(doc) {
+  return doc.lines.some((l) => !l.editable
+    && /^##\s*⚙/.test(l.raw || '') && /(^|\s)audio=tracks(\s|$)/.test(l.raw));
+}
+
+function toggleTrack(doc, lineIndex, name) {
+  const line = requireEditableLine(doc, lineIndex, 'toggleTrack');
+  const cells = parseTracks(line.tracksRaw);
+  if (!cells) {
+    throw new Error(`cutplan-core: toggleTrack — 第 ${lineIndex} 行(${line.id})沒有軌欄`);
+  }
+  if (!cells.some((c) => c.name === name)) {
+    throw new Error(`cutplan-core: toggleTrack — ${line.id} 的軌欄沒有「${name}」這一軌`);
+  }
+  // 只換那一格的 ●/○ 一個字元,欄位其餘 byte(空白、括號)原樣保留
+  const re = new RegExp(`(^|[\\s⟦])(${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})([●○])`);
+  const tracksRaw = line.tracksRaw.replace(re, (_all, pre, n, mk) =>
+    pre + n + (mk === TRACK_ON ? TRACK_OFF : TRACK_ON));
+  const lines = doc.lines.slice();
+  lines[lineIndex] = { ...line, tracksRaw };
+  return { ...doc, lines };
+}
+
+function toggleTrackWithHistory(doc, history, lineIndex, name) {
+  const nextDoc = toggleTrack(doc, lineIndex, name);
+  return {
+    doc: nextDoc,
+    history: pushHistory(history, {
+      doc, lineIndex, start: 0, end: 0, kind: 'tracks', track: name,
+    }),
+  };
+}
+
+// ── 唯讀護欄(伺服端第二道防線;Code.gs 的 saveCutplan 呼叫它)────────
+//
+// 逐行比對 oldContent → newContent,回傳第一個「超出允許編輯範圍」的說明字串,
+// 沒問題回 null。允許:block 行的 mark、block 內文「拿掉 ~~ 之後的文字不變」、
+// (⚙ 有 audio=tracks 時)軌欄只翻 ●/○;其他任何差異一律不合法。
+// 從 Code.gs 搬來這裡是為了讓 Node 測試守得到(規則本身沒改)。
+
+function trackSkeleton(tracksRaw) {
+  return (tracksRaw || '').replace(/[●○]/g, '?');
+}
+
+function findIllegalEdit(oldContent, newContent) {
+  const oldDoc = parseCutplan(oldContent);
+  const newDoc = parseCutplan(newContent);
+  if (oldDoc.lines.length !== newDoc.lines.length) {
+    return `行數不一致(${oldDoc.lines.length} → ${newDoc.lines.length})`;
+  }
+  const tracksOk = hasTracksAudio(oldDoc);
+  for (let i = 0; i < oldDoc.lines.length; i++) {
+    const a = oldDoc.lines[i];
+    const b = newDoc.lines[i];
+    const n = i + 1;
+    if (a.editable !== b.editable) {
+      return `第 ${n} 行的可編輯性改變了(唯讀 ↔ 可編輯)`;
+    }
+    if (!a.editable) {
+      if (a.raw !== b.raw || a.term !== b.term) {
+        return `第 ${n} 行是唯讀行,但內容被改動了`;
+      }
+      continue;
+    }
+    if (a.id !== b.id || a.timecode !== b.timecode
+        || a.prefix !== b.prefix || a.reason !== b.reason || a.term !== b.term) {
+      return `第 ${n} 行(${a.id})的 id/時間碼/speaker/理由被改動了`;
+    }
+    if (a.tracksRaw !== b.tracksRaw) {
+      if (!a.tracksRaw || !b.tracksRaw) {
+        return `第 ${n} 行(${a.id})的軌欄被新增或刪除了(只能切換 ●/○)`;
+      }
+      if (!tracksOk) {
+        return `第 ${n} 行(${a.id})的軌欄被改動了,但 ⚙ 沒寫 audio=tracks`;
+      }
+      if (trackSkeleton(a.tracksRaw) !== trackSkeleton(b.tracksRaw)
+          || !parseTracks(b.tracksRaw)) {
+        return `第 ${n} 行(${a.id})的軌欄軌名/順序/格式被改動了(只能切換 ●/○)`;
+      }
+    }
+    if (a.bodyRaw !== b.bodyRaw) {
+      const cleanA = splitStrikes(a.bodyRaw).clean;
+      const cleanB = splitStrikes(b.bodyRaw).clean;
+      if (cleanA !== cleanB) {
+        return `第 ${n} 行(${a.id})的逐字稿文字被改動了(只能加/去刪除線)`;
+      }
+    }
+  }
+  return null;
+}
+
 const api = {
   parseCutplan,
   serializeCutplan,
@@ -489,6 +620,12 @@ const api = {
   removeRoomtoneWithHistory,
   SPEAKER_PREFIX_RE,
   REASON_SEP,
+  TRACKS_COL_RE,
+  parseTracks,
+  hasTracksAudio,
+  toggleTrack,
+  toggleTrackWithHistory,
+  findIllegalEdit,
 };
 
 if (typeof module !== 'undefined' && module.exports) {

@@ -152,6 +152,30 @@
     user-select: text;
   }
   .block-body s { background: var(--strike-bg); text-decoration: line-through; }
+  /* audio=tracks 的軌開關:每軌一個,觸控目標跟列勾選同大小(22px checkbox)。
+     手機一列放得下三個名字;放不下就換行,不縮字。 */
+  .track-toggles {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px 14px;
+    margin-top: 6px;
+  }
+  .track-toggles label {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 14px;
+    color: var(--muted);
+    -webkit-user-select: none;
+    user-select: none;
+  }
+  .track-toggles label.on { color: var(--fg); font-weight: 600; }
+  .track-toggles input[type="checkbox"] {
+    width: 22px;
+    height: 22px;
+    margin: 0;
+    flex: none;
+  }
   .block-card.unchecked .block-body { opacity: .55; }
   /* 復原按鈕:絕對定位(不是 fixed)——JS 用「選取範圍的 client rect +
      window.scrollX/scrollY」換算文件座標,讓按鈕跟著頁面內容一起捲動,
@@ -239,6 +263,7 @@
     fileId: null,
     doc: null,
     dirty: false,
+    tracksMode: false, // ⚙ audio=tracks:每張卡片多畫各軌開關
     history: Core.createHistory(), // undo 堆疊(純資料,見 cutplan-core.js)
   };
 
@@ -310,6 +335,8 @@
       .withSuccessHandler(function (res) {
         state.fileId = res.fileId;
         state.doc = Core.parseCutplan(res.content);
+        // ⚙ 寫了 audio=tracks 才畫軌開關(⚙ 是唯讀行,載入後不會變)
+        state.tracksMode = Core.hasTracksAudio(state.doc);
         render();
         setStatus('已載入:' + res.name, 'ok');
       })
@@ -405,6 +432,36 @@
       }
     });
     main.appendChild(body);
+
+    // audio=tracks:這段哪幾軌出聲(列勾選＝留不留這段時間,語意不變)。
+    // 只能翻 ●/○;欄位本身(哪幾軌、順序)唯讀,伺服端護欄也只放行翻轉。
+    var cells = state.tracksMode ? Core.parseTracks(line.tracksRaw) : null;
+    if (cells) {
+      var tt = document.createElement('div');
+      tt.className = 'track-toggles';
+      tt.dataset.lineIndex = String(idx);
+      cells.forEach(function (c) {
+        var lab = document.createElement('label');
+        lab.className = c.on ? 'on' : '';
+        lab.dataset.track = c.name;
+        var cb = document.createElement('input');
+        cb.type = 'checkbox';
+        cb.checked = c.on;
+        cb.setAttribute('aria-label', c.name + (c.on ? ' 出聲' : ' 壓低'));
+        cb.addEventListener('change', function () {
+          var r = Core.toggleTrackWithHistory(state.doc, state.history, idx, c.name);
+          state.doc = r.doc;
+          state.history = r.history;
+          setDirty(true);
+          render();
+          positionUndoAtTrack(idx, c.name);
+        });
+        lab.appendChild(cb);
+        lab.appendChild(document.createTextNode(c.name));
+        tt.appendChild(lab);
+      });
+      main.appendChild(tt);
+    }
 
     // 「在這一句之後留白」—— `## 🔇` 是編輯器裡唯一可新增的結構行(見 core 註解)。
     // 秒數只給固定檔位:手機上打錯的成本遠高於少幾個選項。
@@ -662,6 +719,28 @@
     els.undoFloat.style.display = 'none';
   }
 
+  // 軌欄切換沒有選取範圍,復原按鈕貼在那顆開關旁邊(同樣是文件座標)。
+  function positionUndoAtTrack(lineIndex, track) {
+    var lab = els.blockList.querySelector(
+      '.track-toggles[data-line-index="' + lineIndex + '"] label[data-track="'
+      + String(track).replace(/"/g, '\\"') + '"]');
+    if (!lab) { hideUndoFloat(); return; }
+    var rect = lab.getBoundingClientRect();
+    var el = els.undoFloat;
+    el.style.visibility = 'hidden';
+    el.style.display = 'block';
+    var w = el.offsetWidth;
+    var h = el.offsetHeight;
+    var left = Math.max(VIEWPORT_MARGIN,
+      Math.min(rect.right + UNDO_GAP, window.innerWidth - w - VIEWPORT_MARGIN));
+    var top = rect.top - h - UNDO_GAP;
+    if (top < VIEWPORT_MARGIN) top = rect.bottom + UNDO_GAP;
+    top = Math.max(VIEWPORT_MARGIN, Math.min(top, window.innerHeight - h - VIEWPORT_MARGIN));
+    el.style.left = (left + window.scrollX) + 'px';
+    el.style.top = (top + window.scrollY) + 'px';
+    el.style.visibility = 'visible';
+  }
+
   els.undoBtn.addEventListener('click', function () {
     var result = Core.undo(state.doc, state.history);
     if (!result.undone) {
@@ -673,7 +752,9 @@
     setDirty(true);
     render();
     var next = Core.peekHistory(state.history);
-    if (next) {
+    if (next && next.kind === 'tracks') {
+      positionUndoAtTrack(next.lineIndex, next.track);
+    } else if (next) {
       // 點一次撤一步,按鈕跳到「再上一步」操作的位置(還有東西可以復原)。
       positionUndoFloat(next.lineIndex, next.start, next.end);
     } else {

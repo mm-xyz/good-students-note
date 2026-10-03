@@ -22,6 +22,14 @@ podcast `cutplan.md`,只開放兩個動作:
 要再開第二個口之前,請先確認同樣這兩個條件都成立。秒數只給固定檔位、不做自由
 輸入框 —— 手機上打錯的成本(整段留白長度不對)遠高於少幾個選項。
 
+**第二個口是 `audio=tracks` 的軌欄切換**(ADR-2026-10-03-audio-tracks-line):
+`## ⚙` 寫了 `audio=tracks` 時,每張 block 卡片多一排各軌開關(Mars/Sarah/Kin,
+觸控目標跟列勾選同為 22px),切的是行尾 ` ⟦Mars● Sarah○ Kin○⟧` 的 ●/○,吃既有
+的復原(復原鈕貼在那顆開關旁)。只能翻 ●/○:欄位有無、軌名、順序、格式唯讀,
+`saveCutplan` 的護欄(規則本體在 `cutplan-core.js` 的 `findIllegalEdit`,
+`Code.gs` 只是呼叫它)一樣只放行翻轉,⚙ 沒寫 `audio=tracks` 時連翻轉都拒絕。
+測試:`tests/tracks.test.js`(含用 `vm` 載入 `Code.gs`、DriveApp 打樁驗 saveCutplan)。
+
 其餘一切(block id、時間碼、`[Speaker]`、逐字稿文字、`## ✂`/`## 🎵`/`## ⚙`/
 `## ➕`/`## 🎬`/`## 章節`、註解、引言)**唯讀** —— 這不是省事,是護欄:
 `scripts/audio/render_cut.py` 會逐 block 對 SRT 驗證,文字或時間碼被改壞
