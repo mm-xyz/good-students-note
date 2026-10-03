@@ -593,8 +593,99 @@ function findIllegalEdit(oldContent, newContent) {
   return null;
 }
 
+// ── 成品時間對照(cutplan.timeline.json,Lifov #1078)──────────────────
+//
+// render 出片時在 cutplan.md 旁產 timeline:block id → 成品起點秒數陣列,或
+// null=成品裡沒有。判定是 render 看**實際保留範圍**算的,不是看勾選——所以
+// 「勾了卻沒出現」「取消卻仍出現」在這裡才看得到。timeline 是另一個檔,編輯器
+// 只讀不寫,唯讀護欄不受影響。
+
+function parseTimeline(text) {
+  if (!text || typeof text !== 'string') return null;
+  let d;
+  try {
+    d = JSON.parse(text);
+  } catch (e) {
+    return null;
+  }
+  if (!d || typeof d !== 'object' || !d.blocks || typeof d.blocks !== 'object') {
+    return null;
+  }
+  const version = String(d.version || '');
+  return {
+    version,
+    versionShort: version.split('_')[0] || version,
+    generatedAt: String(d.generated_at || ''),
+    blocks: d.blocks,
+  };
+}
+
+// 「12:34」「754」「1:02:03」「12:34.5」→ 秒;不合法回 null(不猜)。
+function parseTimeInput(text) {
+  const s = String(text == null ? '' : text).trim();
+  if (!/^\d+(?:\.\d+)?$|^\d+:\d{1,2}(?:\.\d+)?$|^\d+:\d{1,2}:\d{1,2}(?:\.\d+)?$/.test(s)) {
+    return null;
+  }
+  const parts = s.split(':').map(Number);
+  for (let i = 1; i < parts.length; i++) {
+    if (parts[i] >= 60) return null;
+  }
+  return parts.reduce((acc, v) => acc * 60 + v, 0);
+}
+
+function formatTime(secs) {
+  const t = Math.floor(Math.max(0, secs));
+  const h = Math.floor(t / 3600);
+  const m = Math.floor((t % 3600) / 60);
+  const s = String(t % 60).padStart(2, '0');
+  return h ? `${h}:${String(m).padStart(2, '0')}:${s}` : `${m}:${s}`;
+}
+
+// 卡片上的小字與不一致判定;timeline 沒有這一列(或沒有 timeline)回 null。
+function timelineStatus(line, timeline) {
+  if (!timeline || !line || !line.editable) return null;
+  if (!Object.prototype.hasOwnProperty.call(timeline.blocks, line.id)) return null;
+  const times = timeline.blocks[line.id];
+  const present = Array.isArray(times) && times.length > 0;
+  const checked = line.mark !== ' ';
+  return {
+    times: present ? times : null,
+    label: present
+      ? `▶ ${timeline.versionShort} ${times.map(formatTime).join(' · ')}`
+      : `${timeline.versionShort} 未出現`,
+    mismatch: checked !== present,
+  };
+}
+
+// 成品時間 → 哪一張卡:起點 ≤ 該時間的最後一個 block。同一 id 出現在 🎬 集錦
+// 與正文時,集錦的時間(成品前段)對到文件裡第一次出現的那列(集錦區),其餘
+// 時間對到最後一次出現的那列(正文)。
+function findLineAtTime(doc, timeline, secs) {
+  if (!timeline || typeof secs !== 'number' || secs < 0) return null;
+  let best = null;
+  for (const [id, times] of Object.entries(timeline.blocks)) {
+    if (!Array.isArray(times)) continue;
+    times.forEach((t, k) => {
+      if (t <= secs && (!best || t > best.t)) best = { t, id, k, n: times.length };
+    });
+  }
+  if (!best) return null;
+  const lines = [];
+  doc.lines.forEach((l, i) => { if (l.editable && l.id === best.id) lines.push(i); });
+  if (!lines.length) return null;
+  if (lines.length > 1 && best.n > 1) {
+    return best.k === 0 ? lines[0] : lines[lines.length - 1];
+  }
+  return lines[lines.length - 1];
+}
+
 const api = {
   parseCutplan,
+  parseTimeline,
+  parseTimeInput,
+  formatTime,
+  timelineStatus,
+  findLineAtTime,
   serializeCutplan,
   toggleCheckbox,
   splitStrikes,

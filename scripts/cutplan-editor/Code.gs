@@ -89,13 +89,32 @@ function listEpisodes() {
   return episodes;
 }
 
+var TIMELINE_FILENAME = 'cutplan.timeline.json';
+
 function loadCutplan(fileId) {
   var file = DriveApp.getFileById(fileId);
   return {
     fileId: fileId,
     name: file.getName(),
     content: file.getBlob().getDataAsString('UTF-8'),
+    timeline: loadTimeline_(file),
   };
+}
+
+/**
+ * 同資料夾的 cutplan.timeline.json(Lifov #1078,cut.py 出片時推上來的成品時間
+ * 對照)。沒有就回 null —— 那只代表還沒出過片或舊版,不是錯誤,不報錯。
+ * 編輯器對它只讀,saveCutplan 不寫它(唯讀護欄不受影響)。
+ */
+function loadTimeline_(file) {
+  try {
+    var parents = file.getParents();
+    if (!parents.hasNext()) return null;
+    var tl = findFileByName_(parents.next(), TIMELINE_FILENAME);
+    return tl ? tl.getBlob().getDataAsString('UTF-8') : null;
+  } catch (e) {
+    return null;
+  }
 }
 
 /**

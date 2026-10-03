@@ -152,6 +152,34 @@
     user-select: text;
   }
   .block-body s { background: var(--strike-bg); text-decoration: line-through; }
+  /* 成品時間對照(#1078):卡片 id 旁的小字;勾選跟實際成品不一致要醒目 */
+  .tl-tag { color: var(--accent); }
+  .tl-tag.absent { color: var(--muted); }
+  .block-card.tl-mismatch { border: 2px solid var(--danger); }
+  .tl-mismatch .tl-tag { color: var(--danger); font-weight: 700; }
+  .block-card.tl-flash { outline: 3px solid var(--accent); outline-offset: 2px; }
+  #tlBar { display: none; margin-top: 8px; gap: 6px; align-items: center; flex-wrap: wrap; }
+  #tlBar.show { display: flex; }
+  #tlInfo { font-size: 12px; color: var(--muted); flex-basis: 100%; }
+  #tlInput {
+    flex: 1;
+    min-width: 0;
+    font-size: 16px; /* iOS 小於 16px 會自動放大頁面 */
+    padding: 8px;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    background: var(--card-bg);
+    color: var(--fg);
+  }
+  #tlGo {
+    font-size: 15px;
+    padding: 8px 14px;
+    border-radius: 8px;
+    border: none;
+    background: var(--accent);
+    color: #04241a;
+    font-weight: 700;
+  }
   /* audio=tracks 的軌開關:每軌一個,觸控目標跟列勾選同大小(22px checkbox)。
      手機一列放得下三個名字;放不下就換行,不縮字。 */
   .track-toggles {
@@ -241,6 +269,11 @@
   <select id="episodeSelect">
     <option value="">載入集數清單中…</option>
   </select>
+  <form id="tlBar" autocomplete="off">
+    <div id="tlInfo"></div>
+    <input id="tlInput" inputmode="decimal" placeholder="成品時間,如 12:34 或 754">
+    <button id="tlGo" type="submit">跳到</button>
+  </form>
 </header>
 
 <div id="status"></div>
@@ -264,6 +297,7 @@
     doc: null,
     dirty: false,
     tracksMode: false, // ⚙ audio=tracks:每張卡片多畫各軌開關
+    timeline: null,    // cutplan.timeline.json(#1078),沒有就是 null
     history: Core.createHistory(), // undo 堆疊(純資料,見 cutplan-core.js)
   };
 
@@ -337,6 +371,9 @@
         state.doc = Core.parseCutplan(res.content);
         // ⚙ 寫了 audio=tracks 才畫軌開關(⚙ 是唯讀行,載入後不會變)
         state.tracksMode = Core.hasTracksAudio(state.doc);
+        // 成品時間對照(#1078):同資料夾沒有 timeline 就不顯示,不報錯
+        state.timeline = Core.parseTimeline(res.timeline);
+        showTimelineBar();
         render();
         setStatus('已載入:' + res.name, 'ok');
       })
@@ -375,6 +412,7 @@
         els.blockList.appendChild(div);
       }
     });
+    if (state.timeline) showTimelineBar(); // 不一致列數跟著勾選變
     if (!shown) {
       var hint = document.createElement('div');
       hint.className = 'empty-hint';
@@ -385,7 +423,9 @@
 
   function renderBlockCard(line, idx) {
     var card = document.createElement('div');
-    card.className = 'block-card' + (line.mark === ' ' ? ' unchecked' : '');
+    var tl = Core.timelineStatus(line, state.timeline);
+    card.className = 'block-card' + (line.mark === ' ' ? ' unchecked' : '')
+      + (tl && tl.mismatch ? ' tl-mismatch' : '');
     card.dataset.lineIndex = String(idx);
 
     var checkbox = document.createElement('input');
@@ -414,6 +454,14 @@
       spk.className = 'speaker-tag';
       spk.textContent = line.prefix.trim();
       meta.appendChild(spk);
+    }
+    if (tl) {
+      // 「▶ v3 12:34」/「v3 未出現」;勾選跟實際成品不一致時加註原因
+      var tag = document.createElement('span');
+      tag.className = 'tl-tag' + (tl.times ? '' : ' absent');
+      tag.textContent = tl.label + (tl.mismatch
+        ? (tl.times ? '(取消了卻仍在成品)' : '(勾了卻不在成品)') : '');
+      meta.appendChild(tag);
     }
     main.appendChild(meta);
 
@@ -760,6 +808,53 @@
     } else {
       hideUndoFloat();
     }
+  });
+
+  // ── 成品時間對照(#1078)────────────────────────────────────────────
+  //
+  // 頁首顯示對照的是哪一版(timeline 的版本＋產生時間);輸入成品時間跳到那張卡。
+  // timeline 只反映「出那一版時」的成品,之後改了勾選要重出片才會更新——所以
+  // 一定要把版本與產生時間寫出來。
+
+  var tlEls = {
+    bar: document.getElementById('tlBar'),
+    info: document.getElementById('tlInfo'),
+    input: document.getElementById('tlInput'),
+  };
+
+  function showTimelineBar() {
+    var tl = state.timeline;
+    tlEls.bar.classList.toggle('show', !!tl);
+    if (!tl) return;
+    var n = 0;
+    state.doc.lines.forEach(function (l) {
+      var s = Core.timelineStatus(l, tl);
+      if (s && s.mismatch) n++;
+    });
+    tlEls.info.textContent = '對照成品 ' + tl.version
+      + (tl.generatedAt ? '(' + tl.generatedAt.replace('T', ' ') + ' 出片)' : '')
+      + (n ? ' · 勾選與成品不一致 ' + n + ' 列' : '');
+  }
+
+  tlEls.bar.addEventListener('submit', function (ev) {
+    ev.preventDefault();
+    var secs = Core.parseTimeInput(tlEls.input.value);
+    if (secs === null) {
+      setStatus('成品時間看不懂:' + tlEls.input.value + '(寫 12:34 或 754)', 'error');
+      return;
+    }
+    var idx = Core.findLineAtTime(state.doc, state.timeline, secs);
+    var card = idx === null ? null
+      : els.blockList.querySelector('.block-card[data-line-index="' + idx + '"]');
+    if (!card) {
+      setStatus('成品 ' + Core.formatTime(secs) + ' 之前沒有任何 block', 'error');
+      return;
+    }
+    tlEls.input.blur();
+    card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    card.classList.add('tl-flash');
+    setTimeout(function () { card.classList.remove('tl-flash'); }, 1600);
+    setStatus('成品 ' + Core.formatTime(secs) + ' → ' + state.doc.lines[idx].id, 'ok');
   });
 
   // ── 儲存 ──────────────────────────────────────────────────────────────

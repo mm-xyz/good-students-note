@@ -1018,6 +1018,59 @@ def measure_lufs(path: Path) -> float | None:
     return float(m[-1]) if m else None
 
 
+# cutplan.timeline.json(Lifov #1078):block 有多少比例被保留才算「在成品裡」。
+# 不用「起點落在保留範圍內」:EP22 實測那樣有兩種假結果——相鄰保留段的邊界
+# snap 進一句沒勾的「嗯」1–19%,被標成「取消卻仍出現」(11 個);開頭幾個字被
+# 刪除線剪掉的勾選列,起點不在範圍裡,被標成「勾了卻未出現」(4 個,實際保留
+# 54–82%)。過半才算,兩種都對;真的被併回的取消列是 100% 在成品裡(EP22 78 個)。
+TIMELINE_MIN_OVERLAP = 0.5
+
+
+def build_timeline(blocks: list[dict], speech: list[dict], inserts: list[dict],
+                   tempo: float = 1.0,
+                   min_overlap: float = TIMELINE_MIN_OVERLAP) -> dict[str, list | None]:
+    """{block id: [成品起點秒數, …] | None}。
+
+    blocks  = [{id, start, end, insert}](insert=補錄檔名 token,S 列才有)
+    speech  = cut_map 的 ranges(src_start/src_end/dst_start,來源時間軸,成品順序)
+    inserts = [{file, a, b, dst_start, tempo}](➕ 補錄段,補錄檔自己的時間軸)
+
+    判定看**實際保留範圍**不看勾選。保留範圍依成品順序走,同一個 block 在連續
+    幾段範圍裡出現(停頓收緊/刪除線把一句切開)算一次「出現」;中間隔了別的
+    範圍再出現(🎬 集錦重播)算另一次。每次出現的保留長度 ≥ min_overlap×block
+    長度才列出,時間取那次出現裡被保留部分的起點。"""
+    out: dict[str, list | None] = {}
+    for b in blocks:
+        if b.get("insert"):
+            rs = [(r["a"], r["b"], r["dst_start"], r.get("tempo", 1.0))
+                  for r in inserts if r["file"] == b["insert"]]
+        else:
+            rs = [(r["src_start"], r["src_end"], r["dst_start"], tempo)
+                  for r in speech]
+        dur = max(b["end"] - b["start"], 1e-6)
+        times = set(out.get(b["id"]) or [])
+        run = None              # 目前這次出現:[保留秒數, 起點成品時間, 上段 src 終點]
+
+        def flush():
+            if run and run[0] >= min_overlap * dur:
+                times.add(round(run[1], 3))
+
+        for a, e, dst, tp in rs:
+            ov = min(b["end"], e) - max(b["start"], a)
+            if ov <= 1e-9:
+                flush()
+                run = None
+                continue
+            if run and a < run[2] - 1e-6:   # 來源時間往回跳=🎬 重播,另一次出現
+                flush()
+                run = None
+            t0 = dst + max(0.0, b["start"] - a) / tp
+            run = [run[0] + ov, run[1], e] if run else [ov, t0, e]
+        flush()
+        out[b["id"]] = sorted(times) or None
+    return out
+
+
 def insert_gain_db(ref_l: float, ins_l: float,
                    bus_l: float | None = None) -> float:
     """➕ 補錄 gain=auto:對鄰段(合軌 source)拉齊,夾 ±12dB。
@@ -1500,6 +1553,11 @@ def main():
                 else cp["blocks"])
     validate_program(v_blocks, program, srt_text, cp.get("gaps"),
                      cp.get("inserts"))
+    # cutplan.timeline.json 要的是節目單上的 B/G/S 列(分軌線之後會把 program
+    # 換成合成的範圍列,所以在這裡先記下來)
+    tl_blocks = [{"id": it["id"], "start": it["block"]["start"],
+                  "end": it["block"]["end"], "insert": it.get("insert")}
+                 for it in program if it["kind"] == "block" and it.get("block")]
 
     # ── 把關:過長 block(2026-08-10 MM 指出,ADR 0011)──
     # block 是「勾選」的最小單位。一個 12s 的 block 代表那 12 秒只能整段留或
@@ -2205,6 +2263,23 @@ def main():
         "ranges": cut_map,
         "music": music_map,
     }, ensure_ascii=False, indent=2), encoding="utf-8")
+    # ── cutplan.timeline.json(Lifov #1078):聽成品時對照 cutplan ──
+    # 放在 cutplan.md 同一層;cut.py 會把 version 改成 vN_ 目錄名並推到 Drive
+    ins_map = [{"file": s["file"], "a": s["a"], "b": s["b"], "dst_start": d,
+                "tempo": s.get("tempo", 1.0)}
+               for s, d in zip(segments, dst_starts)
+               if s["kind"] == "insert" and not s.get("roomtone")]
+    tl_path = plan_path.parent / "cutplan.timeline.json"
+    tl = build_timeline(tl_blocks, cut_map, ins_map, tempo=args.tempo)
+    tl_path.write_text(json.dumps({
+        "version": Path(args.out).stem,
+        "generated_at": dt.datetime.now().isoformat(timespec="seconds"),
+        "plan": args.plan,
+        "final_duration_secs": round(final_dur, 3),
+        "blocks": tl,
+    }, ensure_ascii=False, indent=1), encoding="utf-8")
+    n_in = sum(1 for v in tl.values() if v)
+    print(f"[render] cutplan.timeline.json:{len(tl)} 列,成品裡有 {n_in} 列")
     if chap_lines:
         (ensure_meta_dir(sdir) / "chapters.txt").write_text(
             "\n".join(chap_lines) + "\n",

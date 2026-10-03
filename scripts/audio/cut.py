@@ -184,6 +184,20 @@ def semantic_diff(a: Path, b: Path) -> list[str]:
     return out or ["  (內容有差異但不影響剪輯:註解、理由文字之類)"]
 
 
+TIMELINE = "cutplan.timeline.json"
+
+
+def finalize_timeline(src: Path, vname: str, dests: list[Path]) -> None:
+    """render 寫的 timeline 用輸出檔名當版本;cut.py 知道真正的 vN_ 目錄名,
+    改掉再複製到 Drive 集數根(cutplan.md 旁,編輯器讀得到)與版本目錄(Lifov #1078)。"""
+    d = json.loads(src.read_text(encoding="utf-8"))
+    d["version"] = vname
+    text = json.dumps(d, ensure_ascii=False, indent=1)
+    src.write_text(text, encoding="utf-8")
+    for p in dests:
+        p.write_text(text, encoding="utf-8")
+
+
 def ask(prompt: str, options: str, default: str) -> str:
     if not sys.stdin.isatty():
         print(f"[cut] 非互動環境,採用預設 {default}")
@@ -381,14 +395,27 @@ def main() -> None:
     (lvdir / "render.txt").write_text(note, encoding="utf-8")
     print(f"[cut] ☑️ local:{vname}/(mp3 + cutplan 快照 + render.txt)")
 
-    if ddir and not args.no_push:
+    # cutplan.timeline.json(#1078):版本名換成 vN_ 目錄名;local 版本目錄留一份,
+    # Drive 放集數根(cutplan.md 旁邊,編輯器 loadCutplan 會一起讀)與版本目錄
+    tl_src = local.parent / TIMELINE
+    tl_dests = [lvdir / TIMELINE]
+    push = bool(ddir and not args.no_push)
+    if push:
+        tl_dests += [drive.parent / TIMELINE, ddir / vname / TIMELINE]
+        (ddir / vname).mkdir(parents=True, exist_ok=True)
+    if tl_src.exists():
+        finalize_timeline(tl_src, vname, tl_dests)
+    else:
+        print(f"[cut] ⚠ render 沒產 {TIMELINE},編輯器沒有成品時間可對照")
+
+    if push:
         vdir = ddir / vname
         vdir.mkdir(parents=True, exist_ok=True)
         shutil.copy2(sdir / out, vdir / f"{stem}.mp3")
         shutil.copy2(local, vdir / Path(args.plan).name)
         (vdir / "render.txt").write_text(note, encoding="utf-8")
         shutil.copy2(local, drive)                     # Drive 工作版保持最新
-        print(f"[cut] ☑️ Drive:{vdir.name}/(同上)")
+        print(f"[cut] ☑️ Drive:{vdir.name}/(同上,含 {TIMELINE};集數根也更新)")
 
     # 版本目錄已有逐 byte 相同的快照,session 根不留工作檔——「根目錄乾淨」不能
     # 是一個要定期執行的動作,否則每出一版就髒一次(2026-09-11 MM 清掉 EP18 累積

@@ -30,6 +30,14 @@ podcast `cutplan.md`,只開放兩個動作:
 `Code.gs` 只是呼叫它)一樣只放行翻轉,⚙ 沒寫 `audio=tracks` 時連翻轉都拒絕。
 測試:`tests/tracks.test.js`(含用 `vm` 載入 `Code.gs`、DriveApp 打樁驗 saveCutplan)。
 
+**成品時間對照(Lifov #1078,唯讀)**:出片時 `render_cut.py` 在 cutplan.md 旁產
+`cutplan.timeline.json`(block id → 成品起點秒數,或 null),`cut.py` 把版本名改成
+`vN_` 目錄名並推到 Drive 集數根。`loadCutplan` 同資料夾有它就一起回傳(沒有就不
+顯示、不報錯)。卡片 id 旁顯示「▶ v3 12:34」/「v3 未出現」;**勾選跟實際成品不一
+致**(勾了卻不在、取消了卻仍在)整張卡紅框。頁首顯示對照的是哪一版與出片時間,
+「成品時間」框輸入 12:34 或 754 會捲到那張卡並短暫高亮。timeline 只讀不寫,存檔
+與護欄完全不碰它。測試:`tests/timeline.test.js`(含 vm 載入 Code.gs 驗回傳)。
+
 其餘一切(block id、時間碼、`[Speaker]`、逐字稿文字、`## ✂`/`## 🎵`/`## ⚙`/
 `## ➕`/`## 🎬`/`## 章節`、註解、引言)**唯讀** —— 這不是省事,是護欄:
 `scripts/audio/render_cut.py` 會逐 block 對 SRT 驗證,文字或時間碼被改壞
