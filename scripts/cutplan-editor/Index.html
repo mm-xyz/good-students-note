@@ -647,21 +647,28 @@
   //      debounce 計時器(SETTLE_DEBOUNCE_MS)。這條專門對付鍵盤選取
   //      (桌機 shift+方向鍵)——鍵盤選取沒有 pointerup/mouseup 可以當
   //      完成訊號,只能純靠「一段時間沒有再變化」判定穩定。
-  //   2. `pointerup`/`touchend`/`mouseup`(手指/滑鼠放開)→ 排一個短很多
-  //      的計時器(SETTLE_AFTER_POINTER_MS),取代保底的那個——放開了就是
-  //      有強訊號,不必等那麼久,行動裝置上等 450ms 會感覺明顯delay。
+  //   2. `pointerup`/`touchend`/`mouseup`(手指/滑鼠放開)→ 排計時器
+  //      (SETTLE_AFTER_POINTER_MS),取代保底的那個。
   //   3. `pointerdown`/`touchstart`/`mousedown`(手指/滑鼠再次按下)→
   //      **立刻取消**任何還在等待的計時器。這是本次在兩份 prior art 之外
   //      自己補的一條:文件/issue 討論的是「單次選取何時算完成」,沒有處理
   //      「放開後在很短時間內又抓住 handle 二次調整」這個情境——如果不擋,
-  //      使用者放開手指想拖 handle 微調範圍時,那個 60ms 的短計時器可能在
+  //      使用者放開手指想拖 handle 微調範圍時,放開後的計時器可能在
   //      手指再次按下之前就先套用了,把選取清掉、剛好搗亂使用者正在做的
   //      調整動作。加了這條防線後最壞情況只是「多套用一次、可以直接復原」
   //      (見下方 trySettle 的 try/catch 與 undo 堆疊),不會弄壞資料。
   //   計時器只有一個(pendingSettleTimer),新排程一律先清舊的——不會有兩個
-  //   計時器互相搶跑的問題。
-  var SETTLE_AFTER_POINTER_MS = 60;
-  var SETTLE_DEBOUNCE_MS = 450;
+  //   計時器互相搶跑的問題。所以等待期間只要再動選取(拖把手會連續觸發
+  //   selectionchange)就重新計時,不會提早套用;時間到時選取若已變空,
+  //   trySettle 什麼都不做。
+  //
+  // 兩個都是 1.2 秒(2026-10-03 MM:「反白選擇的時候,時間可以久一點」)。
+  // 原本放開 60ms 就套用:手機上反白後要再拖選取把手調範圍,手指離開螢幕、
+  // 移到把手、按下去,這一來一回本來就要半秒到一秒多,60ms 早就套用、把選取
+  // 清掉了。1.2 秒蓋得住一次「放開→找把手→按下」;按下會立刻取消計時(第 3
+  // 條),拖完再放開才重新計時。鍵盤選取同樣改等 1.2 秒,兩條規則一致好預期。
+  var SETTLE_AFTER_POINTER_MS = 1200;
+  var SETTLE_DEBOUNCE_MS = 1200;
   var pendingSettleTimer = null;
 
   function scheduleSettle(delayMs) {
