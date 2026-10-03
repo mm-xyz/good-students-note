@@ -113,13 +113,20 @@ def semantic_diff(a: Path, b: Path) -> list[str]:
 
     def load(p: Path, tcol: dict) -> tuple[dict, dict, set, dict, dict]:
         keep, strikes, cuts, cfg, mus = {}, {}, set(), {}, {}
+        clip_n: dict[str, int] = {}
         for it in parse_program(p):
             if it["kind"] == "block":
                 keep[it["id"]] = it["keep"]
                 strikes[it["id"]] = it["raw"].count("~~") // 2
-                # audio=tracks 的軌欄(哪幾軌出聲)也是剪輯決定
-                if it.get("tracks") is not None and not it.get("clip"):
-                    tcol[it["id"]] = " ".join(it["tracks"].split())
+                # audio=tracks 的軌欄(哪幾軌出聲)也是剪輯決定。🎬 集錦區的複製
+                # 列 render 照樣吃它自己那一格(驗收 F-1),所以分開記:同一 id
+                # 在集錦區第 n 次出現記成 `B0001@🎬n`,不跟正文那列互相蓋掉
+                if it.get("tracks") is not None:
+                    key = it["id"]
+                    if it.get("clip"):
+                        clip_n[key] = clip_n.get(key, 0) + 1
+                        key = f"{key}@🎬{clip_n[key]}"
+                    tcol[key] = " ".join(it["tracks"].split())
             elif it["kind"] == "cut":
                 cuts.add((round(it["a"], 2), round(it["b"], 2)))
             elif it["kind"] == "config":

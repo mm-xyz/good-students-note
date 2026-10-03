@@ -159,3 +159,62 @@ session 裡被寫入或新增的檔案：
 6. **部署**：編輯器改動要由派工者用 clasp 部署，我沒有執行 clasp。部署前 Code.gs 和 cutplan-core.js 必須一起推，因為 `findIllegalEdit` 住在 core 裡。
 7. **跨 session 搬勾選**：本次沒有寫「從合軌 session 搬標記」的工具。編號對得上，現有的 `migrate_marks.py` 也已經會把軌欄當尾註處理。
 8. 文件線測試（.venv-doc）本機沒有安裝，仍然是 SKIP，這是既有狀態。
+
+---
+
+## 驗收 FAIL 後的修正（codex luna xhigh 對抗性驗收：F-1／F-2／F-3）
+
+三項都照 TDD 做：先寫測試、確認它紅，再修到綠。
+
+### F-1（High）：🎬 集錦列的軌欄變動要算剪輯決定
+
+- **問題**：`cut.py semantic_diff` 只記錄正文列的軌欄，但 render 會讓 🎬 集錦區的複製列各自套用自己的軌欄。所以只改集錦列時，diff 會印「不影響剪輯」。
+- **修法**：集錦列另外用一個 key 記錄，同一個 id 在集錦區第 n 次出現記成 `B0001@🎬n`，不跟正文列互相蓋掉。
+- **紅→綠**：`test_cut.py::TestAudioTracks::test_clip_row_track_toggle_is_visible_in_diff`。修之前 FAIL，修之後 PASS。
+
+### F-2（High）：分軌前提必須強制檢查
+
+- **問題**：刪掉 `3_Kin.wav`、把軌欄改成兩軌後，`--dry-run` 仍然 exit 0。
+- **修法**：新增 `tracks_columns.validate_tracks()`，`tracks_columns.py`（寫檔之前）和 `render_cut.py`（`audio=tracks` 時）都會呼叫。任何一條不成立就 FAIL，並逐條印出原因，不會補零。檢查四件事：
+  - **軌數 = 講者數**：講者數取 speakers.json 的 `num_speakers`（沒有就數 `speakers`）。缺軌、多軌都擋。session 沒有 speakers.json 也 FAIL。
+  - **軌名一致**：speakers.json 有 `tracks` 對照時（ingest_tracks 產的），軌名集合必須跟 `tracks/` 推出來的完全相同。diarize 產的 `SPEAKER_00` 這類標籤沒有對照，只比數量。
+  - **取樣率**：每一軌都要等於 source.wav。
+  - **長度**：每一軌跟 source.wav 的差距要 ≤ `TRACK_LEN_TOL = 0.02 s`。理由寫在程式註解：同一次錄製的多軌實測逐樣本等長（EP22 四個檔都是 3042.915556 s），20 ms 只留給容器或編碼的尾端取整，遠小於任何一個字。
+- **軌欄與 tracks/ 的對應**沿用原本的檢查：同名、同順序，每一個 B／G 列都要符合。
+- **紅→綠**：
+  - `test_tracks_columns.py::TestValidateTracks` 共 10 項：ok、缺 speakers.json、缺軌、多軌、軌名不符、取樣率不符、長度不符、容差內通過、diarize 標籤只比數量、CLI 缺軌時拒絕且不寫檔。
+  - `test_render_tracks.py::TestRouteGuards` 新增 3 項：`test_missing_track_with_two_track_columns_fails`（重現驗收時的情境）、`test_track_length_mismatch_fails`、`test_track_sample_rate_mismatch_fails`。
+  - 以上修之前全部紅（9 ERROR＋4 FAIL），修之後全綠。
+- **真資料**：EP22 照樣通過驗證，`audio=tracks` 的 dry-run 結果跟合軌 dump-ranges 仍然完全相同（56 段）。
+
+### F-3（Medium）：run_all.sh 用錯直譯器
+
+- **修法**：新增 `scripts/tests/pick_python.sh`。依序找 repo 自己的 `.venv-audio/bin/python3.13`，再找 `git rev-parse --git-common-dir` 所在主樹的同一路徑。都找不到就 exit 2 並說明安裝方式，**不會退回系統 python3**。`run_all.sh` 開頭改用它，並印出 `python: <路徑>`，所有音訊測試都用這支跑。原本的 prosody 特例也一併併掉了。
+- **紅→綠**：`test_run_all_python.py::TestPickPython`（4 項）：
+  - 自己的 venv 優先。
+  - worktree 沒有時退回主樹的 venv。
+  - 兩邊都沒有時 FAIL，stdout 為空。
+  - run_all.sh 確實呼叫 picker，不再有 `py=python3`。
+- **`test_precut.py::test_diarize_uses_from_tracks_zero_model` 在 venv 下會失敗：查證結果是測試的假設錯了，程式行為是對的。**
+  - `precut.plan_stages` 讓 `diarize --from-tracks`（零模型）跑 `sys.executable`，讓需要模型的轉錄跑 `AUDIO_VENV`。這是刻意的設計：分軌歸屬不需要模型，任何 python 都能跑。
+  - 舊測試用「cmd[0] 不含 `.venv-audio`」來代表「沒有寫死模型 venv」。一旦 runner 本身就是 venv 的 python，`sys.executable` 就在 `.venv-audio` 裡，於是出現假紅。
+  - 測試已改成直接斷言要鎖的事：diarize 的 `cmd[0] == sys.executable`，同時轉錄那段確實指向 `.venv-audio/bin/python`。改之前在 venv 下紅，改之後在 venv 和系統 python 下都綠。
+
+### 修後測試總結（原文摘要）
+
+```
+bash scripts/tests/run_all.sh
+python: /Users/marslo/GithubRepo_mm-xyz/good-students-note/.venv-audio/bin/python3.13
+PASS  scripts/tests/test_cut.py — Ran 40 tests
+PASS  scripts/tests/test_precut.py — Ran 32 tests
+PASS  scripts/tests/test_render_cut.py — Ran 100 tests
+PASS  scripts/tests/test_render_tracks.py — Ran 16 tests
+PASS  scripts/tests/test_run_all_python.py — Ran 4 tests
+PASS  scripts/tests/test_tracks_columns.py — Ran 31 tests
+…(共 30 個檔全 PASS,616 項,失敗 0)
+SKIP  文件線測試 — .venv-doc 不存在(既有狀態)
+✅ 全部測試通過
+
+node --test "scripts/cutplan-editor/tests/**/*.test.js"
+# tests 93  # pass 93  # fail 0
+```

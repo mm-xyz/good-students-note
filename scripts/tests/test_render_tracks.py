@@ -83,6 +83,10 @@ def make_session(td: str, cfg: str = "## ⚙ line=mixdown max-pause=0",
         for i, n in enumerate(NAMES, 1):
             write_wav(sdir / "tracks" / f"{i}_{n}.wav", sr, sig[n])
     write_wav(sdir / "source.wav", sr, sum(sig.values()), channels=2)
+    (sdir / "speakers.json").write_text(json.dumps({
+        "num_speakers": 3, "speakers": sorted(NAMES),
+        "tracks": {n: {"file": f"tracks/{i}_{n}.wav"}
+                   for i, n in enumerate(NAMES, 1)}}), encoding="utf-8")
     (sdir / "transcript.srt").write_text(
         "1\n00:00:00,000 --> 00:00:02,000\n[Mars] 第一句。\n\n"
         "2\n00:00:02,000 --> 00:00:04,000\n[Kin] 第二句。\n\n"
@@ -213,6 +217,34 @@ class TestRouteGuards(unittest.TestCase):
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("B0002", r.stdout + r.stderr)
 
+    def test_missing_track_with_two_track_columns_fails(self):
+        """驗收 F-2 重現:刪掉 3_Kin、欄位改兩軌,dry-run 原本 exit 0。"""
+        cols = {k: " ".join(v.split()[:2]) for k, v in TR_COLS.items()}
+        with tempfile.TemporaryDirectory() as td:
+            s = make_session(td, cfg=TR_CFG, rows=with_cols(ROWS, cols))
+            (s / "tracks" / "3_Kin.wav").unlink()
+            r = render(s, "--dry-run")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("講者", r.stdout + r.stderr)
+
+    def test_track_length_mismatch_fails(self):
+        with tempfile.TemporaryDirectory() as td:
+            s = make_session(td, cfg=TR_CFG, rows=with_cols(ROWS, TR_COLS))
+            write_wav(s / "tracks" / "2_Sarah.wav", 16000,
+                      np.zeros(int(5.0 * 16000)))
+            r = render(s, "--dry-run")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("長度", r.stdout + r.stderr)
+        self.assertIn("Sarah", r.stdout + r.stderr)
+
+    def test_track_sample_rate_mismatch_fails(self):
+        with tempfile.TemporaryDirectory() as td:
+            s = make_session(td, cfg=TR_CFG, rows=with_cols(ROWS, TR_COLS))
+            write_wav(s / "tracks" / "3_Kin.wav", 8000, np.zeros(6 * 8000))
+            r = render(s, "--dry-run")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("取樣率", r.stdout + r.stderr)
+
     def test_no_tracks_dir_fails(self):
         with tempfile.TemporaryDirectory() as td:
             s = make_session(td, cfg=TR_CFG, rows=with_cols(ROWS, TR_COLS),
@@ -283,6 +315,8 @@ def build_mini_ep22(real: Path, out: Path, t0: float, t1: float) -> list[dict]:
     for p in sorted((real / "tracks").iterdir()):
         crop(p, out / "tracks" / (p.stem + ".wav"), t0, t1)
     crop(real / "source.wav", out / "source.wav", t0, t1)
+    (out / "speakers.json").write_bytes(
+        (real / "_asset" / "speakers.json").read_bytes())
     words = json.loads((real / "_asset" / "words.json").read_text(encoding="utf-8"))
     (out / "words.json").write_text(json.dumps(
         [dict(w, start=w["start"] - t0, end=w["end"] - t0) for w in words

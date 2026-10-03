@@ -1387,6 +1387,13 @@ def main():
             sys.exit(f"[render] FAIL: ⚙ audio=tracks 需要 session 的 tracks/ "
                      f"分軌音檔(.wav/.flac),{sdir / 'tracks'} 沒有")
         names = [n for n, _p in track_list]
+        # 驗收 F-2:軌數=講者數、同取樣率、與 source 等長(容差見
+        # tracks_columns.TRACK_LEN_TOL);不合就 FAIL,不靜默補零
+        from tracks_columns import find_source, validate_tracks
+        terrs = validate_tracks(sdir, track_list, find_source(sdir))
+        if terrs:
+            sys.exit("[render] FAIL: ⚙ audio=tracks 的分軌前提不成立 ——\n  "
+                     + "\n  ".join(terrs))
         missing, bad = [], []
         for it in program:
             if it["kind"] != "block":

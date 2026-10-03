@@ -101,6 +101,88 @@ def track_files(sdir: Path) -> list[tuple[str, Path]]:
             if p.suffix.lower() in AUDIO_EXTS]
 
 
+# 分軌與 source.wav 的長度容差(秒)。規格是「等長、sample-aligned」,錄音機
+# 同一次錄製的多軌實測逐樣本等長(EP22 三軌與合軌都是 3042.915556s);容差
+# 只留給容器/編碼的尾端取整(mp3/flac 轉檔常差幾個 frame),20ms 遠小於任何
+# 一個字,超過就代表不是同一次錄音或被裁過——那樣切出來每個剪點都會偏,FAIL。
+TRACK_LEN_TOL = 0.02
+
+
+def _probe(path: Path) -> tuple[int | None, float | None]:
+    """(取樣率, 秒);讀不到回 (None, None)。"""
+    import subprocess
+    try:
+        out = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "a:0", "-show_entries",
+             "stream=sample_rate:format=duration", "-of", "json", str(path)],
+            capture_output=True, text=True, check=True).stdout
+        d = json.loads(out)
+        return (int(d["streams"][0]["sample_rate"]),
+                float(d["format"]["duration"]))
+    except Exception:
+        return None, None
+
+
+def validate_tracks(sdir: Path, tracks: list[tuple[str, Path]],
+                    source: Path | None, tol: float = TRACK_LEN_TOL) -> list[str]:
+    """audio=tracks 的分軌前提(驗收 F-2)。回傳錯誤清單,空的才可以用。
+
+    · 軌數 = speakers.json 的講者數(缺軌、多軌都擋;不靜默補零)
+    · speakers.json 有 `tracks` 對照(ingest_tracks 產的)時,軌名集合必須相同
+      (diarize 產的 SPEAKER_00 這種標籤沒有對照,只比數量)
+    · 每一軌取樣率 = source.wav,長度與 source 差 ≤ tol 秒
+    """
+    errs: list[str] = []
+    names = [n for n, _p in tracks]
+    sj = work_dir(Path(sdir)) / "speakers.json"
+    if not sj.is_file():
+        errs.append(f"找不到 speakers.json({sj})—— 無法確認講者數與分軌數一致")
+    else:
+        try:
+            sp = json.loads(sj.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as e:
+            sp = None
+            errs.append(f"speakers.json 讀不了:{e}")
+        if sp is not None:
+            n_spk = sp.get("num_speakers") or len(sp.get("speakers") or [])
+            if n_spk != len(names):
+                errs.append(f"講者數 {n_spk}(speakers.json)≠ 分軌數 "
+                            f"{len(names)}(tracks/:{'、'.join(names) or '無'})")
+            tmap = sp.get("tracks")
+            if isinstance(tmap, dict) and tmap:
+                want = set(tmap)
+                if want != set(names):
+                    miss = sorted(want - set(names))
+                    extra = sorted(set(names) - want)
+                    errs.append("分軌軌名與 speakers.json 的 tracks 對照不符"
+                                + (f";缺 {'、'.join(miss)}" if miss else "")
+                                + (f";多 {'、'.join(extra)}" if extra else ""))
+    if source is None or not Path(source).exists():
+        errs.append("找不到 source.wav —— 無法確認分軌與合軌等長")
+        return errs
+    src_sr, src_dur = _probe(Path(source))
+    if src_sr is None:
+        errs.append(f"量不到 {Path(source).name} 的取樣率/長度")
+        return errs
+    for n, p in tracks:
+        sr, dur = _probe(p)
+        if sr is None:
+            errs.append(f"{n}:量不到 {p.name} 的取樣率/長度")
+            continue
+        if sr != src_sr:
+            errs.append(f"{n}:取樣率 {sr}Hz ≠ source {src_sr}Hz({p.name})")
+        if abs(dur - src_dur) > tol:
+            errs.append(f"{n}:長度 {dur:.3f}s 與 source {src_dur:.3f}s 差 "
+                        f"{abs(dur - src_dur):.3f}s > 容差 {tol}s({p.name})")
+    return errs
+
+
+def find_source(sdir: Path) -> Path | None:
+    hits = [p for p in sorted(Path(sdir).glob("source.*"))
+            if p.suffix.lower() not in (".srt", ".md", ".json", ".txt")]
+    return hits[0] if hits else None
+
+
 # ── 加欄位(純文字轉換)─────────────────────────────────────────────────
 def _with_audio_key(cfg_line: str) -> tuple[str, bool]:
     body = CONFIG_RE.match(cfg_line.strip()).group(1)
@@ -277,6 +359,11 @@ def main() -> int:
     names = [n for n, _p in tracks]
     if len(set(names)) != len(names):
         print(f"[tracks] FAIL: 軌名重複:{names}", file=sys.stderr)
+        return 2
+    errs = validate_tracks(sdir, tracks, find_source(sdir))
+    if errs:
+        print("[tracks] FAIL: 分軌前提不成立 ——\n  " + "\n  ".join(errs),
+              file=sys.stderr)
         return 2
     plan = work_dir(sdir) / args.plan
     cp = json.loads((work_dir(sdir) / "cutplan.json").read_text(encoding="utf-8"))

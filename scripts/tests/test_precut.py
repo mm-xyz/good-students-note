@@ -230,7 +230,12 @@ class TestPlanStagesTracks(unittest.TestCase):
         _, stages = plan_stages(self.d, args_ns())
         cmd = stages[2].cmd
         self.assertIn("--from-tracks", cmd)
-        self.assertNotIn(".venv-audio", cmd[0])  # 零模型,任何 python 可跑
+        # 零模型:跑「目前這支 python」,不寫死模型 venv。原本用「路徑不含
+        # .venv-audio」當代理判準,run_all 改用 venv 跑之後 sys.executable 本身
+        # 就在 .venv-audio 裡,假紅(驗收 F-3)。要鎖的是「沒有指名 AUDIO_VENV」。
+        self.assertEqual(cmd[0], sys.executable)
+        model_cmd = stages[1].cmd                      # 轉錄=要模型的那一段
+        self.assertTrue(model_cmd[0].endswith(".venv-audio/bin/python"), model_cmd)
 
     def test_force_passes_force_down_to_ingest(self) -> None:
         _, stages = plan_stages(self.d, args_ns(force=True))
