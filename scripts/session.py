@@ -274,8 +274,8 @@ def new_session(args):
 
     if not is_doc:
         # 4. 轉錄 → transcript.srt(IMMUTABLE)
-        # 2026-07-27 MM 拍板:主線=本地 mlx-whisper(--asr local,零雲端零 key);
-        # Groq 降為選配(--asr groq,要 GROQ_API_KEY)。
+        # 主線=llm-node whisper.cpp(--asr llm-node);次要=本地 mlx-whisper(--asr local);
+        # Groq 為選配(--asr groq,要 GROQ_API_KEY)。
         t0 = time.time()
         transcript = work_dir(sdir) / "transcript.srt"
         asr_engine = args.asr
@@ -1012,11 +1012,11 @@ def main():
                      help="圖片資料夾:copy 進 sessions/<slug>/images/ 並啟用"
                           "圖片理解(describe_images.py)+ 自動插圖(insert_images.py)"
                           " stages(§ S4.5.11);marker 鏈 phase-d→images→image-insert")
-    new.add_argument("--asr", choices=["local", "groq", "llm-node"], default="local",
-                     help="轉錄引擎(僅音檔/影片線適用)。local(預設):mlx-whisper "
-                          "本地零雲端零 key,需 .venv-audio;llm-node:whisper.cpp "
+    new.add_argument("--asr", choices=["local", "groq", "llm-node"], default="llm-node",
+                     help="轉錄引擎(僅音檔/影片線適用)。llm-node(預設):whisper.cpp "
                           "跑在 llm-node(CPU,約 2.75x realtime),Mac 不占資源,"
-                          "同樣零雲端零 key;groq:Groq API(需 .env GROQ_API_KEY)")
+                          "零雲端零 key;local:mlx-whisper 本地(次要,llm-node 不可用時),"
+                          "需 .venv-audio;groq:Groq API(需 .env GROQ_API_KEY)")
     new.add_argument("--vlm", action="store_true",
                      help="文件線限定,僅對 .pdf 有意義:先跑 scripts/doc/figures.py "
                           "渲染圖表/掃描頁進 images/,再複用既有 --images 的 "

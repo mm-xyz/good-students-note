@@ -1,6 +1,6 @@
 ---
 name: good-student
-description: 給一個路徑就一次跑完：原始檔（EPUB/PDF/音檔/影片/TXT）自動前置轉檔＋圖說入語料，再切成概念級、好記憶的知識點——一概念一檔、自足可檢索、帶視角類比與記憶鉤（RAG-ready 的 Obsidian 知識庫）。啟動時必先與使用者討論切分軸與視角，auto mode 也要先試切 5 張驗收後才可批量。**Step 0 圖片閘門是強制的**：先實測數圖，有圖一律先轉完再切卡（避免整批卡切在殘缺語料上）。Use when 使用者要把長文本或一本書變成知識點／知識庫／概念卡，或說「切知識點」「chunk 這份材料」「幫我把這課變成好記的筆記」。
+description: 給一個路徑就一次跑完：原始檔（EPUB/PDF/音檔/影片/TXT）自動前置轉檔＋圖說入語料，再切成概念級、好記憶的知識點——一概念一檔、自足可檢索、帶視角類比與記憶鉤（RAG-ready 的 Obsidian 知識庫）。啟動時必先與使用者討論切分軸與視角，試切 5 張驗收後才可批量；MM 明示 unattended 時改由 reviewer 對照過去的卡驗收試切、跑完全程，收尾詢問要不要做 dot-skill。**Step 0 圖片閘門是強制的**：先實測數圖，有圖一律先轉完再切卡（避免整批卡切在殘缺語料上）。Use when 使用者要把長文本或一本書變成知識點／知識庫／概念卡，或說「切知識點」「chunk 這份材料」「幫我把這課變成好記的筆記」。
 argument-hint: <原始檔或長文本（EPUB/PDF/音檔/影片/TXT 皆可，會自動前置轉檔）> [--out <輸出目錄>]
 allowed-tools: Bash, Read, Write, Glob, Grep, Edit, Agent
 ---
@@ -36,8 +36,8 @@ flowchart TD
     I --> J["驗收 checklist<br/>＋重跑 canvas"]
 ```
 
-**兩道 gate 都是鐵門，auto mode 也不能跳**：
-Step 0 的圖片閘門（沒轉完不准切）、試切 5 張的驗收（沒 GO 不准批量）。
+**兩道 gate 都是鐵門**：Step 0 的圖片閘門（沒轉完不准切）、試切 5 張的驗收（沒 GO 不准批量）。
+互動模式由使用者把關；unattended 模式由 reviewer 把關（見「Unattended 模式」節），gate 本身不跳。
 
 ---
 
@@ -119,13 +119,13 @@ iPhone 語音備忘錄是 `.qta`（QuickTime 容器）。第一軌 `aac` stereo 
 
 #### 轉錄：三條 ASR 路徑，先選對再動手
 
-**預設走 `transcribe_local.py`（Mac 的 mlx-whisper）。** 2026-07-27 MM 拍板轉錄主線改本地，
-裝在 `.venv-audio`（mlx-whisper 0.4.3 ＋ mlx-metal）。**39.5 分鐘音檔實測約 84 秒。**
+**預設走 llm-node（`transcribe_llmnode.py`，whisper.cpp）；llm-node 不可用時才用 Mac 本地的 mlx-whisper（`transcribe_local.py`）。**
+`session.py new` 的 `--asr` 預設就是 `llm-node`。
 
 | 路徑 | 引擎 | 跑在哪 | 速度 | 什麼時候用 |
 | :--- | :--- | :--- | :--- | :--- |
-| `scripts/audio/transcribe_local.py` | mlx-whisper | Mac（Apple Silicon MLX） | 39.5 分 → **84 秒** | **預設** |
-| `scripts/audio/transcribe_llmnode.py` | whisper.cpp | llm-node（Intel Linux 14 核） | 約 2.75x realtime | 材料本來就在 llm-node；或 Mac 要留著做別的事 |
+| `scripts/audio/transcribe_llmnode.py` | whisper.cpp | llm-node（Intel Linux 14 核） | 約 2.75x realtime | **預設** |
+| `scripts/audio/transcribe_local.py` | mlx-whisper | Mac（Apple Silicon MLX，`.venv-audio`） | 39.5 分 → 84 秒 | 次要：llm-node 連不上或被占用 |
 | llm-node 上手動 `whisper-cli` | whisper.cpp ＋ **VAD** | llm-node | RTF 0.29 | **只有這條有 VAD**——重複迴圈時的唯一解，見下方備案 |
 
 兩支腳本**同契約**（同 CLI、同產物：SRT ＋ `words.json`），差別只在推理跑在哪，
@@ -133,16 +133,15 @@ iPhone 語音備忘錄是 `.qta`（QuickTime 容器）。第一軌 `aac` stereo 
 
 ```bash
 # 預設
-.venv-audio/bin/python scripts/audio/transcribe_local.py <media> -o transcript.srt \
-    [--context context.txt] [--language zh]
-
-# 材料已在 llm-node，或 Mac 要留著做別的事
 .venv-audio/bin/python scripts/audio/transcribe_llmnode.py <media> -o transcript.srt \
     [--context context.txt] [--language zh] [--remote-media <llm-node 上的路徑>]
+
+# 次要：llm-node 不可用
+.venv-audio/bin/python scripts/audio/transcribe_local.py <media> -o transcript.srt \
+    [--context context.txt] [--language zh]
 ```
 
-⚠️ **Mac 上沒有 whisper.cpp**（沒有 `~/whisper.cpp`，homebrew 也沒裝）。
-本檔舊版寫的那條裸 `whisper-cli … --vad …` 指令**在 Mac 上跑不起來**——whisper.cpp 只在 llm-node。
+⚠️ **Mac 上沒有 whisper.cpp**。裸 `whisper-cli … --vad …` 指令只能在 llm-node 上跑。
 
 ⚠️ **VAD 只有 whisper.cpp 有，而上面兩支腳本都沒有帶 VAD、也沒帶 `-mc 0`。**
 所以重複迴圈要靠 VAD 解時，得手動走 llm-node（備案那節），或把 VAD 參數加進腳本。
@@ -333,8 +332,8 @@ ASR 重複幻覺段要用明確錨點切除並標註省略。切完必須核對�
 
 私人錄音（諮商、命理、醫療）走這條線時：
 
-- 全程跑在自有機器（llm-node 的 whisper.cpp ＋ Mac 的 pyannote），不要送任何雲端 ASR。
-  ⚠️ 轉錄會把音檔 scp 到 llm-node 的 `/tmp`——腳本預設收工自己刪，用了 `--keep-remote` 要自己清。
+- 全程跑在自有機器（llm-node 的 whisper.cpp／Mac 的 mlx-whisper ＋ Mac 的 pyannote），不要送任何雲端 ASR。
+  ⚠️ 走 llm-node 時音檔會 scp 到 llm-node 的 `/tmp`——腳本預設收工自己刪，用了 `--keep-remote` 要自己清。
 - 產物不進版控（`sessions/` 已 gitignore）。
 - 為了轉錄而複製到其他機器的音檔與中間產物，收工時要刪掉並核對。
 - 要派 subagent 在這個 repo 工作前，先把 `sessions/` 下的私人產物移出 repo。
@@ -355,9 +354,9 @@ python3 <good-students-note>/scripts/session.py new <file> --engine=none
 
 ---
 
-## 啟動儀式（強制，auto mode 也不可跳過）
+## 啟動儀式（強制）
 
-開工前必須跟使用者把三件事談定。使用者沒回答就往下切＝違規。
+開工前必須跟使用者把三件事談定，使用者沒回答就不往下切（unattended 模式例外，見下節）。
 
 1. **切分軸**：這份材料的天然概念單位是什麼？domain 結構就是 chunk 邊界
    （占星＝行星×星座×宮位×相位；談判課＝策略×情境；技術課＝概念×機制×實作⋯⋯）。
@@ -386,8 +385,24 @@ python3 <good-students-note>/scripts/session.py new <file> --engine=none
   「這張的內容你原本就知道嗎？讀起來吃力嗎？」（深度檢查——原本就知道＝太淺、
   吃力＝太深，兩者都要回報，批量前調整落點）
 - 使用者說 GO 才進批量；說改就改完**重新試切**（可只補差異張）再驗。
-- auto mode／unattended 也一樣：試切 5 張後**停下等驗收**，沒有驗收就沒有批量。
-  這是鐵門，不是建議。
+- 互動模式：試切 5 張後**停下等使用者驗收**，沒有驗收就沒有批量。
+  unattended 模式：驗收改派 reviewer（見「Unattended 模式」），一樣沒有 PASS 就沒有批量。
+
+## Unattended 模式（MM 明示自主作業／unattended 才啟用）
+
+MM 不在場時照樣跑完全程，人工驗收換成 reviewer 驗收；兩道 gate 照過，只是換人把關。
+
+1. **啟動儀式改用預設＋前例**：視角用預設生活類比；切分軸、type 受控值、目錄結構參照
+   `MarsDots/good-student/` 底下同類材料既有的 `_vocab.md` 與卡片（例：紫微類參照 `簡少年紫微/`、`大耕/`）。
+   使用者現有程度沒問到就照「高中生都能懂」落點。取捨寫進輸出目錄的 `_decisions.md`，MM 事後否決＝重切。
+2. **試切 5 張照做，驗收派 fresh reviewer**（執行體照 orchestrator「執行體選型」，做的人不驗自己）。
+   委派 prompt 附：5 張試切卡、本節格式規範與驗收 checklist、
+   2–3 個 MM 已收過的同類庫路徑當基準（`MarsDots/good-student/<課>/`）。
+   reviewer 逐張對照基準回報 PASS／FAIL＋具體缺陷：鉤子能否複述、深度是否「多一步」、格式與前例是否一致。
+3. **FAIL 退改重驗，最多 2 輪**；第 2 輪仍 FAIL 就停在試切，寫報告等 MM，不進批量。
+4. **PASS 才批量**，批量後跑完整驗收 checklist＋重建 canvas。
+5. **收尾回報**：產出位置、張數、`_decisions.md` 摘要、reviewer 結論，最後一行問 MM：
+   「要不要用 `/dot-skill` 把這位講者蒸餾成 persona skill？」——只問不做，蒸餾等 MM 回答。
 
 ## 知識點格式
 
@@ -446,7 +461,7 @@ mermaid、其餘才是敘述 prose**（見下方「列點優先」規則）。�
   `author`/`source` 承載。講者的比喻、口訣、關鍵措辭照收（可用引號標示原話），
   但不冠名。理由：冠名讓 chunk 讀起來像課程轉述而非自足知識，
   講者名也會污染 embedding。
-- **列點優先於 prose**（MM 2026-08-01 四修，李佳達批拍板；已多次糾正，違者重寫）：
+- **列點優先於 prose**：
   凡**可枚舉結構一律列點**——要素（四要素）、類型（五型）、清單（六偏誤）、
   權力來源、工具箱、步驟拆解⋯⋯每點格式 `**名稱**：機制／例子`，
   階層照遞迴列點規則往下拆。**流程與順序鏈畫 mermaid**（```mermaid fence，
@@ -608,7 +623,7 @@ python3 .claude/skills/good-student/scripts/build_canvas.py <輸出目錄> \
 
 轉錄、批量切卡這種以「小時」計的工作，**不要**用 in-process 背景任務或 `setsid nohup … &`：
 
-- harness 的背景 bash 任務有 **10 分鐘上限**，到點就被收掉，長工作的完成通知永遠等不到。
+- harness 的背景 bash 任務有時間上限（預設 30 分、最長 2 小時），到點就被收掉；以小時計的工作會等不到完成通知。
 - `ssh host 'setsid nohup cmd &'` 在你這端的 ssh 被工具逾時砍掉時，**子行程一起死**，
   而且是靜默的——你以為在跑，其實沒有。2026-09-07 為此連續浪費三次啟動。
 
