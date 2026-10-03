@@ -32,6 +32,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from session_paths import ensure_meta_dir, work_dir  # noqa: E402
 from srt_utils import (find_source_media, parse_srt, pick_transcript,
                        fmt_mmss, sec_to_ts)
+from tracks_columns import split_col  # noqa: E402 — audio=tracks 的行尾軌欄
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 # 2026-08-10 MM:節目音樂用 v1(三首各自的正式曲——開場 Park Avenue、
@@ -139,7 +140,8 @@ CONFIG_KEYS = {"clip_gap", "clip_fade_in", "clip_fade_out", "music_speech_fade",
                "bgm_duck", "bgm_solo", "bgm_predrop", "bgm_rise",
                "max_pause", "pause_keep", "crossfade", "snap_window", "fade",
                "tempo", "music_lead_max", "roomtone_word_margin",
-               "roomtone_max_db", "roomtone_voice_db", "roomtone_track_db"}
+               "roomtone_max_db", "roomtone_voice_db", "roomtone_track_db",
+               "tracks_lead"}
 
 
 class RoomtoneError(ValueError):
@@ -571,11 +573,15 @@ def parse_program(path: Path) -> list[dict]:
         if not m:
             continue
         mark, bid, body = m.group(1), m.group(2), m.group(4)
+        # audio=tracks 的行尾軌欄 ` ⟦Mars● Sarah○ Kin○⟧` 先切掉,其餘照舊——
+        # 文字驗證、理由、speaker 前綴的切法都跟沒有軌欄時逐字相同
+        body, tracks_col = split_col(body)
         body = body.rsplit(" ← ", 1)[0]
         body = re.sub(r"^\[[^\]]{1,20}\]\s*", "", body).strip()  # speaker 前綴
         program.append({"kind": "block", "id": bid, "keep": mark.lower() == "x",
                         "raw": body, "clip": clip_mode,
-                        "insert": cur_insert if INSERT_ID_RE.match(bid) else None})
+                        "insert": cur_insert if INSERT_ID_RE.match(bid) else None,
+                        "tracks": tracks_col})
     return program
 
 
@@ -1012,6 +1018,70 @@ def measure_lufs(path: Path) -> float | None:
     return float(m[-1]) if m else None
 
 
+# cutplan.timeline.json(Lifov #1078):block 有多少比例被保留才算「在成品裡」。
+# 不用「起點落在保留範圍內」:EP22 實測那樣有兩種假結果——相鄰保留段的邊界
+# snap 進一句沒勾的「嗯」1–19%,被標成「取消卻仍出現」(11 個);開頭幾個字被
+# 刪除線剪掉的勾選列,起點不在範圍裡,被標成「勾了卻未出現」(4 個,實際保留
+# 54–82%)。過半才算,兩種都對;真的被併回的取消列是 100% 在成品裡(EP22 78 個)。
+TIMELINE_MIN_OVERLAP = 0.5
+
+
+def build_timeline(blocks: list[dict], speech: list[dict], inserts: list[dict],
+                   tempo: float = 1.0,
+                   min_overlap: float = TIMELINE_MIN_OVERLAP) -> dict[str, list | None]:
+    """{block id: [成品起點秒數, …] | None}。
+
+    blocks  = [{id, start, end, insert}](insert=補錄檔名 token,S 列才有)
+    speech  = cut_map 的 ranges(src_start/src_end/dst_start,來源時間軸,成品順序)
+    inserts = [{file, a, b, dst_start, tempo}](➕ 補錄段,補錄檔自己的時間軸)
+
+    判定看**實際保留範圍**不看勾選。保留範圍依成品順序走,同一個 block 在連續
+    幾段範圍裡出現(停頓收緊/刪除線把一句切開)算一次「出現」;中間隔了別的
+    範圍再出現(🎬 集錦重播)算另一次。每次出現的保留長度 ≥ min_overlap×block
+    長度才列出,時間取那次出現裡被保留部分的起點。"""
+    out: dict[str, list | None] = {}
+    for b in blocks:
+        if b.get("insert"):
+            rs = [(r["a"], r["b"], r["dst_start"], r.get("tempo", 1.0))
+                  for r in inserts if r["file"] == b["insert"]]
+        else:
+            rs = [(r["src_start"], r["src_end"], r["dst_start"], tempo)
+                  for r in speech]
+        dur = max(b["end"] - b["start"], 1e-6)
+        times = set(out.get(b["id"]) or [])
+        run = None              # 目前這次出現:[保留秒數, 起點成品時間, 上段 src 終點]
+
+        def flush():
+            if run and run[0] >= min_overlap * dur:
+                times.add(round(run[1], 3))
+
+        for a, e, dst, tp in rs:
+            ov = min(b["end"], e) - max(b["start"], a)
+            if ov <= 1e-9:
+                flush()
+                run = None
+                continue
+            if run and a < run[2] - 1e-6:   # 來源時間往回跳=🎬 重播,另一次出現
+                flush()
+                run = None
+            t0 = dst + max(0.0, b["start"] - a) / tp
+            run = [run[0] + ov, run[1], e] if run else [ov, t0, e]
+        flush()
+        out[b["id"]] = sorted(times) or None
+    return out
+
+
+def insert_gain_db(ref_l: float, ins_l: float,
+                   bus_l: float | None = None) -> float:
+    """➕ 補錄 gain=auto:對鄰段(合軌 source)拉齊,夾 ±12dB。
+
+    audio=tracks 時成品取自分軌 bus,另外補上 bus 與 source 在同一批鄰段的
+    實測落差(bus_l − ref_l,不夾)——夾住它會讓補錄比正片大聲(EP22 實測
+    bus 比合軌小 20dB,夾在 −12 → 成品補錄段大聲 3.4 LU)。"""
+    g = max(-12.0, min(12.0, ref_l - ins_l))
+    return g + (bus_l - ref_l if bus_l is not None else 0.0)
+
+
 def ffprobe_duration(path: Path) -> float:
     out = subprocess.run(
         ["ffprobe", "-v", "error", "-show_entries", "format=duration",
@@ -1273,6 +1343,13 @@ def main():
                          "(不混 speech bus)。分軌 bus 音質不理想時用;代價是"
                          "「留住時間、只靜音某一軌」做不到,那些串音會回來。"
                          "cutplan 裡寫 `## ⚙ audio=mixdown` 是同一件事")
+    ap.add_argument("--tracks-lead", type=float, default=0.15,
+                    help="audio=tracks:某軌在下一個 block 才新開時提早幾秒開"
+                         "(SRT 起點常比字頭晚;不早於前一個 block 結尾)。"
+                         "關掉的軌照 hold 規則開到下一個 block 起點")
+    ap.add_argument("--keep-tracks-bus", action="store_true",
+                    help="audio=tracks:保留混好的分軌 bus(<out>.tracks_bus.wav)"
+                         "與段落對照表(<out>.tracks_bus.json),測試/除錯用")
     ap.add_argument("--dry-run", action="store_true", help="只印剪輯範圍,不跑 ffmpeg")
     ap.add_argument("--dump-ranges", type=Path,
                     help="把保留區間(原始時間軸,毫秒精度)寫成 JSON — "
@@ -1328,6 +1405,7 @@ def main():
     # 自己的合軌難聽,而人審的 1800 多個勾選只長在分軌節目單上,重做一份混音
     # 節目單會把人審整批丟掉。代價寫明:分軌能做到的「留住時間、只靜音某一軌」
     # 在合軌上做不到(EP18 實測 176 個 cell、31.8s,占保留 2.9%),那些串音會回來。
+    audio_tracks = False
     for it in program:
         if it["kind"] != "config":
             continue
@@ -1338,6 +1416,91 @@ def main():
                          "但這份節目單本來就是混音線 — 拿掉 audio= 這個鍵")
             args.mixdown_audio = (want == "mixdown")
             print(f"[render] ⚙ audio={want}(cutplan 指定)")
+        elif want == "tracks":
+            # ADR-2026-10-03-audio-tracks-line:反過來的那一條 —— 合軌節目單
+            # 決定時間、tracks/ 分軌出聲,每個 block 的軌欄決定哪幾軌開
+            if pertrack:
+                sys.exit("[render] FAIL: ⚙ audio=tracks 只在 line=mixdown"
+                         "(合軌決定層)有意義;分軌決定層本來就吃分軌")
+            audio_tracks = True
+
+    # ── audio=tracks:軌欄(行尾 ⟦Mars● Sarah○ Kin○⟧)──
+    track_list: list[tuple[str, Path]] = []
+    col_items = [it for it in program
+                 if it["kind"] == "block" and it.get("tracks") is not None]
+    if col_items and not audio_tracks:
+        sys.exit(f"[render] FAIL: 節目單有 {len(col_items)} 列帶軌欄 ⟦…⟧"
+                 f"(例如 {col_items[0]['id']}),但 ⚙ 沒寫 audio=tracks —— "
+                 f"要走分軌音源就在 ⚙ 補 audio=tracks,不要就把軌欄拿掉;"
+                 f"不靜默忽略")
+    if audio_tracks:
+        from tracks_columns import ColumnError, parse_col, track_files
+        track_list = track_files(sdir)
+        if not track_list:
+            sys.exit(f"[render] FAIL: ⚙ audio=tracks 需要 session 的 tracks/ "
+                     f"分軌音檔(.wav/.flac),{sdir / 'tracks'} 沒有")
+        names = [n for n, _p in track_list]
+        # 驗收 F-2:軌數=講者數、同取樣率、與 source 等長(容差見
+        # tracks_columns.TRACK_LEN_TOL);不合就 FAIL,不靜默補零
+        from tracks_columns import (ALIGN_SPREAD_MAX, find_source,
+                                    format_alignment, validate_tracks)
+        align_info: dict = {}
+        terrs = validate_tracks(sdir, track_list, find_source(sdir),
+                                report=align_info)
+        if align_info:
+            print("[render] 分軌對齊(相對 source.wav,互相關多窗中位數):"
+                  + format_alignment(align_info))
+        if terrs:
+            sys.exit("[render] FAIL: ⚙ audio=tracks 的分軌前提不成立 ——\n  "
+                     + "\n  ".join(terrs))
+        if args.track_offset != "auto":
+            # (c) 明寫 offset 跟實測差很多:**警告不擋**。走到這裡實測已在
+            # ALIGN_SRC_MAX 內(超過的上面就 FAIL 了),切點偏幾 ms 會落在 snap
+            # 過的靜音裡聽不出來;明寫是人的刻意選擇(測試、診斷),照它的值
+            given = float(args.track_offset)
+            off_by = {n: v - given for n, v in align_info["offsets"].items()
+                      if abs(v - given) > ALIGN_SPREAD_MAX}
+            if off_by:
+                print(f"[render] ⚠ --track-offset {given:g} 與實測位移差 "
+                      + "、".join(f"{n} {d * 1000:+.2f}ms"
+                                 for n, d in off_by.items())
+                      + " —— 照明寫的值;要自動補償請用 --track-offset auto")
+        missing, bad = [], []
+        for it in program:
+            if it["kind"] != "block":
+                continue
+            if INSERT_ID_RE.match(it["id"]):
+                if it.get("tracks") is not None:
+                    bad.append(f"{it['id']}(➕ 補錄的 S 列不分軌,拿掉軌欄)")
+                continue
+            if it.get("tracks") is None:
+                missing.append(it["id"])
+                continue
+            try:
+                it["tstate"] = parse_col(it["tracks"], names)
+            except ColumnError as e:
+                bad.append(f"{it['id']}({e})")
+        if missing or bad:
+            sys.exit("[render] FAIL: ⚙ audio=tracks 但軌欄不完整 —— "
+                     + (f"缺軌欄 {len(missing)} 列:{'、'.join(missing[:8])}"
+                        + (" …" if len(missing) > 8 else "") + ";"
+                        if missing else "")
+                     + (f"格式錯 {len(bad)} 列:{'、'.join(bad[:5])};"
+                        if bad else "")
+                     + f"先跑 scripts/audio/tracks_columns.py --session "
+                       f"{args.session}(冪等,不蓋人工改過的欄)")
+        body_b = [it for it in program if it["kind"] == "block"
+                  and it["id"].startswith("B") and not it["clip"]]
+        n_on = [sum(it["tstate"].values()) for it in body_b]
+        print(f"[render] ⚙ audio=tracks(cutplan 指定):決定層=合軌節目單、"
+              f"音源=tracks/ 分軌({'/'.join(names)}),欄沒勾的軌 "
+              f"{args.duck_db:g}dB")
+        print(f"[render] 軌欄:B 列只開一軌 {n_on.count(1)}、開兩軌以上 "
+              f"{sum(1 for k in n_on if k > 1)}、全關 {n_on.count(0)}")
+        for it in program:
+            if it["kind"] == "insert":
+                print(f"[render] ⚙ audio=tracks:➕ {it['file']} 維持用補錄的"
+                      f"合軌檔(這版不做分軌補錄)")
 
     # ── ⚙ template=<kit>:節目樣板 ──
     # 樣板只供「省略時的預設」——素材庫位置、🎵 各段參數、🔇 秒數、⚙ 旋鈕。
@@ -1390,6 +1553,11 @@ def main():
                 else cp["blocks"])
     validate_program(v_blocks, program, srt_text, cp.get("gaps"),
                      cp.get("inserts"))
+    # cutplan.timeline.json 要的是節目單上的 B/G/S 列(分軌線之後會把 program
+    # 換成合成的範圍列,所以在這裡先記下來)
+    tl_blocks = [{"id": it["id"], "start": it["block"]["start"],
+                  "end": it["block"]["end"], "insert": it.get("insert")}
+                 for it in program if it["kind"] == "block" and it.get("block")]
 
     # ── 把關:過長 block(2026-08-10 MM 指出,ADR 0011)──
     # block 是「勾選」的最小單位。一個 12s 的 block 代表那 12 秒只能整段留或
@@ -1713,10 +1881,16 @@ def main():
             for a, b in ranges:
                 segments.append(dict(u, a=a, b=b))
             continue
+        # audio=tracks:這個 unit 的保留 block 與各自的軌欄,segment 都帶著,
+        # bus 包絡在 segment 範圍內照 hold/lead 規則算(tracks_columns.on_intervals)
+        titems = ([{"start": it["block"]["start"], "end": it["block"]["end"],
+                    "on": it["tstate"]} for it in u["items"]]
+                  if audio_tracks else None)
         if u.get("raw"):  # G 空白列:保留原聲原長,不 snap/不收停頓/不精剪
             unit_first_seg[ui] = len(segments)
             segments.append({"kind": "speech", "a": u["start"], "b": u["end"],
-                             "clip": u["clip"]})
+                             "clip": u["clip"],
+                             **({"titems": titems} if audio_tracks else {})})
             continue
         if words:
             extend_unit_edges(u, words)
@@ -1759,7 +1933,8 @@ def main():
         if ranges and u.get("end_exact"):
             ranges[-1][1] = u["end"]
         unit_first_seg[ui] = len(segments)
-        segs = [{"kind": "speech", "a": a, "b": b, "clip": u["clip"]}
+        segs = [{"kind": "speech", "a": a, "b": b, "clip": u["clip"],
+                 **({"titems": titems} if audio_tracks else {})}
                 for a, b in ranges]
         if segs:
             if u["clip"]:  # 🎬 集錦:頭尾烘 2s 淡入/淡出(unit 級,不是每個小段)
@@ -1926,6 +2101,84 @@ def main():
             off += n_s
         src = bus
 
+    tracks_bus = None
+    src_mix = src          # 合軌 source(audio=tracks 時 ➕ 電平基準仍要用它)
+    if audio_tracks:
+        # 時間已經由合軌決定層算完(segments 跟 line=mixdown 逐毫秒相同),
+        # 這裡只換「從哪裡取聲音」:三軌照同一組區間切、各軌套軌欄包絡,
+        # 混成 bus,之後的 dynaudnorm → BGM → loudnorm 照舊走 run_ffmpeg。
+        import pertrack_render as ptr
+        from types import SimpleNamespace
+        from pertrack_cells import KEEP
+        from tracks_columns import segment_envelopes
+        sp = [s for s in segments if s["kind"] == "speech"]
+        bus_ranges = [[s["a"], s["b"]] for s in sp]
+        bus_sr = int(subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "a:0", "-show_entries",
+             "stream=sample_rate", "-of", "default=nw=1:nk=1",
+             str(track_list[0][1])], capture_output=True, text=True,
+            check=True).stdout.strip())
+        envs = segment_envelopes(sp, [n for n, _p in track_list], args.duck_db,
+                                 args.tracks_lead, bus_sr)
+        # static gain(D5 沿用):各軌「只有自己開」的保留 block 量 LUFS 拉齊
+        solo_cells = [{"a": it["block"]["start"], "b": it["block"]["end"],
+                       "state": {n: (KEEP if v else "duck")
+                                 for n, v in it["tstate"].items()}}
+                      for it in program if it["kind"] == "block"
+                      and it.get("tstate") and it["keep"] and not it["clip"]
+                      and sum(it["tstate"].values()) == 1]
+        static = ptr.measure_static_gains(
+            sdir, [SimpleNamespace(name=n, file=str(p)) for n, p in track_list],
+            solo_cells)
+        if static:
+            print("[render] 分軌 static gain(各軌單獨開的 block 量 LUFS 拉齊):"
+                  + " ".join(f"{n}{v:+.1f}dB" for n, v in static.items()))
+        pan = {kv.split("=")[0]: float(kv.split("=")[1])
+               for kv in args.pan.split(",") if "=" in kv}
+        if args.track_offset == "auto":
+            # 用 validate_tracks 量好的(主導窗才採信);不再用
+            # ptr.measure_track_offset —— 它在 EP22 被串音帶偏、量不到時回 0.0
+            toff = dict(align_info["offsets"])
+        else:
+            toff = {n: float(args.track_offset) for n, _p in track_list}
+        print("[render] 分軌時間補償(讀分軌時加上):"
+              + " ".join(f"{n}{v * 1000:+.2f}ms" for n, v in toff.items()))
+        out_path = sdir / args.out
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        tracks_bus = (out_path.with_name(out_path.stem + ".tracks_bus.wav")
+                      if args.keep_tracks_bus
+                      else out_path.parent / ".tracks_bus.wav")
+        print(f"[render] 混分軌 bus:{len(bus_ranges)} 段 × {len(track_list)} 軌"
+              f" @ {bus_sr}Hz …")
+        info = ptr.mix_ranges(track_list, bus_ranges, envs, tracks_bus,
+                              sr=bus_sr, gate_fade=args.gate_fade,
+                              static_db=static, pan=pan,
+                              duck_default_db=args.duck_db, track_offset=toff)
+        print(f"[render] 分軌 bus {info['frames'] / bus_sr:.1f}s"
+              f"、peak {20 * math.log10(max(info['peak'], 1e-9)):.1f}dBFS"
+              f"、削頂 {info['clipped']} 樣本")
+        if info["clipped"]:
+            print("[render] ⚠ 分軌 bus 有削頂 — 調 --duck-db 或各軌 static gain")
+        off = 0
+        segmap = []
+        for s in sp:
+            n_s = int(round(s["b"] * bus_sr)) - int(round(s["a"] * bus_sr))
+            s["src_a"], s["src_b"] = s["a"], s["b"]
+            s["a"], s["b"] = off / bus_sr, (off + n_s) / bus_sr
+            segmap.append({"src_a": s["src_a"], "src_b": s["src_b"],
+                           "bus_a": s["a"], "bus_b": s["b"]})
+            off += n_s
+        if args.keep_tracks_bus:
+            out_path.with_name(out_path.stem + ".tracks_bus.json").write_text(
+                json.dumps(segmap), encoding="utf-8")
+        for s in segments:
+            if s["kind"] == "insert" and not s.get("roomtone"):
+                print(f"[render] ➕ 補錄 {s['path'].name} 維持用補錄的合軌檔"
+                      f"(audio=tracks 不分軌補錄;軌欄只管正片)")
+            elif s["kind"] == "insert":
+                print("[render] 🔇 室噪照舊取自合軌 source(不分軌)")
+        src = tracks_bus
+
     # ➕ 補錄的電平對齊要等 src 就緒才量得了(正片響度是比較基準)
     for si, s in enumerate(segments):
         if s["kind"] != "insert":
@@ -1946,21 +2199,39 @@ def main():
                 acc += take
                 if acc >= args.insert_ref:
                     break
-        ref_l = measure_lufs_ranges(src, nb)
+        bus_l = None
+        if tracks_bus is not None:
+            # audio=tracks:src 是分軌 bus(EP22 實測比合軌小聲 ~20dB)。基準照
+            # 合軌線的語意對 source 量,再補 bus 與 source 在同一批鄰段的落差
+            bus_l = measure_lufs_ranges(src, nb)
+            nb_src = []
+            for a_, b_ in nb:
+                seg = next(t for t in segments if t["kind"] == "speech"
+                           and t["a"] - 1e-6 <= a_ and b_ <= t["b"] + 1e-6)
+                nb_src.append([seg["src_a"] + a_ - seg["a"],
+                               seg["src_a"] + b_ - seg["a"]])
+            ref_l = measure_lufs_ranges(src_mix, nb_src)
+        else:
+            ref_l = measure_lufs_ranges(src, nb)
         ins_l = measure_lufs(s["path"])
-        if ref_l is None or ins_l is None:
+        if ref_l is None or ins_l is None or (tracks_bus is not None
+                                              and bus_l is None):
             print(f"[render] ⚠ {s['path'].name} 量不到響度,gain 退回 0dB"
                   f"(要手動指定就在 cutplan 寫 gain=+3)")
             continue
-        s["gain_db"] = max(-12.0, min(12.0, ref_l - ins_l))
+        s["gain_db"] = insert_gain_db(ref_l, ins_l, bus_l)
         print(f"[render] ➕ {s['path'].name} 電平對齊(鄰近 {args.insert_ref:.0f}s"
               f"×2 保留語音):鄰段 {ref_l:.1f} LUFS / 補錄 {ins_l:.1f} LUFS"
-              f" → {s['gain_db']:+.1f}dB")
+              + (f" / 分軌 bus 鄰段 {bus_l:.1f} LUFS" if bus_l is not None
+                 else "")
+              + f" → {s['gain_db']:+.1f}dB")
 
     out = sdir / args.out
     dst_starts, final_dur = run_ffmpeg(src, segments, musics, out, args.fade,
                                        args.loudnorm or None, args.crossfade,
                                        args.dynaudnorm or None, args.tempo)
+    if tracks_bus is not None and not args.keep_tracks_bus:
+        tracks_bus.unlink(missing_ok=True)
 
     cut_map = [{"src_start": round(s.get("src_a", s["a"]), 3),
                 "src_end": round(s.get("src_b", s["b"]), 3),
@@ -1992,6 +2263,23 @@ def main():
         "ranges": cut_map,
         "music": music_map,
     }, ensure_ascii=False, indent=2), encoding="utf-8")
+    # ── cutplan.timeline.json(Lifov #1078):聽成品時對照 cutplan ──
+    # 放在 cutplan.md 同一層;cut.py 會把 version 改成 vN_ 目錄名並推到 Drive
+    ins_map = [{"file": s["file"], "a": s["a"], "b": s["b"], "dst_start": d,
+                "tempo": s.get("tempo", 1.0)}
+               for s, d in zip(segments, dst_starts)
+               if s["kind"] == "insert" and not s.get("roomtone")]
+    tl_path = plan_path.parent / "cutplan.timeline.json"
+    tl = build_timeline(tl_blocks, cut_map, ins_map, tempo=args.tempo)
+    tl_path.write_text(json.dumps({
+        "version": Path(args.out).stem,
+        "generated_at": dt.datetime.now().isoformat(timespec="seconds"),
+        "plan": args.plan,
+        "final_duration_secs": round(final_dur, 3),
+        "blocks": tl,
+    }, ensure_ascii=False, indent=1), encoding="utf-8")
+    n_in = sum(1 for v in tl.values() if v)
+    print(f"[render] cutplan.timeline.json:{len(tl)} 列,成品裡有 {n_in} 列")
     if chap_lines:
         (ensure_meta_dir(sdir) / "chapters.txt").write_text(
             "\n".join(chap_lines) + "\n",

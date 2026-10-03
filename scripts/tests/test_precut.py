@@ -230,7 +230,12 @@ class TestPlanStagesTracks(unittest.TestCase):
         _, stages = plan_stages(self.d, args_ns())
         cmd = stages[2].cmd
         self.assertIn("--from-tracks", cmd)
-        self.assertNotIn(".venv-audio", cmd[0])  # 零模型,任何 python 可跑
+        # 零模型:跑「目前這支 python」,不寫死模型 venv。原本用「路徑不含
+        # .venv-audio」當代理判準,run_all 改用 venv 跑之後 sys.executable 本身
+        # 就在 .venv-audio 裡,假紅(驗收 F-3)。要鎖的是「沒有指名 AUDIO_VENV」。
+        self.assertEqual(cmd[0], sys.executable)
+        model_cmd = stages[1].cmd                      # 轉錄=要模型的那一段
+        self.assertTrue(model_cmd[0].endswith(".venv-audio/bin/python"), model_cmd)
 
     def test_force_passes_force_down_to_ingest(self) -> None:
         _, stages = plan_stages(self.d, args_ns(force=True))
@@ -355,6 +360,52 @@ class TestMixdownIsTheDefault(unittest.TestCase):
             touch(d2 / "source.wav")
             with self.assertRaises(SystemExit):
                 plan_stages(d2, args_ns(line="pertrack"))
+
+
+class TestFindAudioVenv(unittest.TestCase):
+    """驗收 F-5:worktree 沒有自己的 .venv-audio 時,precut 要找主樹的
+    (同 scripts/tests/pick_python.sh 的 fallback);都沒有就回 repo 自己的
+    路徑,讓既有的「.venv-audio 不存在」FAIL 照舊觸發。"""
+
+    def setUp(self):
+        import subprocess
+        self._td = tempfile.TemporaryDirectory()
+        t = Path(self._td.name).resolve()
+        self.main, self.wt = t / "main", t / "wt"
+        self.main.mkdir()
+        env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+               "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+        for cmd in (["init", "-q"], ["commit", "-q", "--allow-empty", "-m", "i"],
+                    ["worktree", "add", "-q", str(self.wt)]):
+            subprocess.run(["git", *cmd], cwd=self.main, check=True,
+                           capture_output=True, env=env)
+
+    def tearDown(self):
+        self._td.cleanup()
+
+    def mk(self, root: Path) -> Path:
+        p = root / ".venv-audio" / "bin" / "python"
+        p.parent.mkdir(parents=True)
+        p.write_text("#!/bin/sh\n")
+        p.chmod(0o755)
+        return p
+
+    def test_worktree_uses_main_tree_venv(self):
+        from precut import find_audio_venv
+        main_py = self.mk(self.main)
+        self.assertEqual(find_audio_venv(self.wt), main_py)
+
+    def test_own_venv_wins(self):
+        from precut import find_audio_venv
+        self.mk(self.main)
+        own = self.mk(self.wt)
+        self.assertEqual(find_audio_venv(self.wt), own)
+
+    def test_none_returns_own_path_so_existing_fail_fires(self):
+        from precut import find_audio_venv
+        got = find_audio_venv(self.wt)
+        self.assertEqual(got, self.wt / ".venv-audio" / "bin" / "python")
+        self.assertFalse(got.exists())
 
 
 if __name__ == "__main__":

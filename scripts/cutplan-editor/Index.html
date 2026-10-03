@@ -152,6 +152,58 @@
     user-select: text;
   }
   .block-body s { background: var(--strike-bg); text-decoration: line-through; }
+  /* 成品時間對照(#1078):卡片 id 旁的小字;勾選跟實際成品不一致要醒目 */
+  .tl-tag { color: var(--accent); }
+  .tl-tag.absent { color: var(--muted); }
+  .block-card.tl-mismatch { border: 2px solid var(--danger); }
+  .tl-mismatch .tl-tag { color: var(--danger); font-weight: 700; }
+  .block-card.tl-flash { outline: 3px solid var(--accent); outline-offset: 2px; }
+  #tlBar { display: none; margin-top: 8px; gap: 6px; align-items: center; flex-wrap: wrap; }
+  #tlBar.show { display: flex; }
+  #tlInfo { font-size: 12px; color: var(--muted); flex-basis: 100%; }
+  #tlInput {
+    flex: 1;
+    min-width: 0;
+    font-size: 16px; /* iOS 小於 16px 會自動放大頁面 */
+    padding: 8px;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    background: var(--card-bg);
+    color: var(--fg);
+  }
+  #tlGo {
+    font-size: 15px;
+    padding: 8px 14px;
+    border-radius: 8px;
+    border: none;
+    background: var(--accent);
+    color: #04241a;
+    font-weight: 700;
+  }
+  /* audio=tracks 的軌開關:每軌一個,觸控目標跟列勾選同大小(22px checkbox)。
+     手機一列放得下三個名字;放不下就換行,不縮字。 */
+  .track-toggles {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px 14px;
+    margin-top: 6px;
+  }
+  .track-toggles label {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 14px;
+    color: var(--muted);
+    -webkit-user-select: none;
+    user-select: none;
+  }
+  .track-toggles label.on { color: var(--fg); font-weight: 600; }
+  .track-toggles input[type="checkbox"] {
+    width: 22px;
+    height: 22px;
+    margin: 0;
+    flex: none;
+  }
   .block-card.unchecked .block-body { opacity: .55; }
   /* 復原按鈕:絕對定位(不是 fixed)——JS 用「選取範圍的 client rect +
      window.scrollX/scrollY」換算文件座標,讓按鈕跟著頁面內容一起捲動,
@@ -217,6 +269,11 @@
   <select id="episodeSelect">
     <option value="">載入集數清單中…</option>
   </select>
+  <form id="tlBar" autocomplete="off">
+    <div id="tlInfo"></div>
+    <input id="tlInput" inputmode="decimal" placeholder="成品時間,如 12:34 或 754">
+    <button id="tlGo" type="submit">跳到</button>
+  </form>
 </header>
 
 <div id="status"></div>
@@ -239,6 +296,9 @@
     fileId: null,
     doc: null,
     dirty: false,
+    tracksMode: false, // ⚙ audio=tracks:每張卡片多畫各軌開關
+    timeline: null,    // cutplan.timeline.json(#1078),沒有就是 null
+    timelineBad: false, // 有檔但格式不合格(整份不採信)
     history: Core.createHistory(), // undo 堆疊(純資料,見 cutplan-core.js)
   };
 
@@ -310,6 +370,13 @@
       .withSuccessHandler(function (res) {
         state.fileId = res.fileId;
         state.doc = Core.parseCutplan(res.content);
+        // ⚙ 寫了 audio=tracks 才畫軌開關(⚙ 是唯讀行,載入後不會變)
+        state.tracksMode = Core.hasTracksAudio(state.doc);
+        // 成品時間對照(#1078):同資料夾沒有 timeline 就不顯示,不報錯
+        state.timeline = Core.parseTimeline(res.timeline);
+        // 有檔案但格式不合格:整份不採信,頁首講清楚(驗收 TL-2)
+        state.timelineBad = Core.timelineFileState(res.timeline) === 'bad'; // 空白檔也算(TL-2-2)
+        showTimelineBar();
         render();
         setStatus('已載入:' + res.name, 'ok');
       })
@@ -348,6 +415,7 @@
         els.blockList.appendChild(div);
       }
     });
+    if (state.timeline) showTimelineBar(); // 不一致列數跟著勾選變
     if (!shown) {
       var hint = document.createElement('div');
       hint.className = 'empty-hint';
@@ -358,7 +426,9 @@
 
   function renderBlockCard(line, idx) {
     var card = document.createElement('div');
-    card.className = 'block-card' + (line.mark === ' ' ? ' unchecked' : '');
+    var tl = Core.timelineStatus(line, state.timeline);
+    card.className = 'block-card' + (line.mark === ' ' ? ' unchecked' : '')
+      + (tl && tl.mismatch ? ' tl-mismatch' : '');
     card.dataset.lineIndex = String(idx);
 
     var checkbox = document.createElement('input');
@@ -388,6 +458,14 @@
       spk.textContent = line.prefix.trim();
       meta.appendChild(spk);
     }
+    if (tl) {
+      // 「▶ v3 12:34」/「v3 未出現」;勾選跟實際成品不一致時加註原因
+      var tag = document.createElement('span');
+      tag.className = 'tl-tag' + (tl.times ? '' : ' absent');
+      tag.textContent = tl.label + (tl.mismatch
+        ? (tl.times ? '(取消了卻仍在成品)' : '(勾了卻不在成品)') : '');
+      meta.appendChild(tag);
+    }
     main.appendChild(meta);
 
     var body = document.createElement('div');
@@ -405,6 +483,36 @@
       }
     });
     main.appendChild(body);
+
+    // audio=tracks:這段哪幾軌出聲(列勾選＝留不留這段時間,語意不變)。
+    // 只能翻 ●/○;欄位本身(哪幾軌、順序)唯讀,伺服端護欄也只放行翻轉。
+    var cells = state.tracksMode ? Core.parseTracks(line.tracksRaw) : null;
+    if (cells) {
+      var tt = document.createElement('div');
+      tt.className = 'track-toggles';
+      tt.dataset.lineIndex = String(idx);
+      cells.forEach(function (c) {
+        var lab = document.createElement('label');
+        lab.className = c.on ? 'on' : '';
+        lab.dataset.track = c.name;
+        var cb = document.createElement('input');
+        cb.type = 'checkbox';
+        cb.checked = c.on;
+        cb.setAttribute('aria-label', c.name + (c.on ? ' 出聲' : ' 壓低'));
+        cb.addEventListener('change', function () {
+          var r = Core.toggleTrackWithHistory(state.doc, state.history, idx, c.name);
+          state.doc = r.doc;
+          state.history = r.history;
+          setDirty(true);
+          render();
+          positionUndoAtTrack(idx, c.name);
+        });
+        lab.appendChild(cb);
+        lab.appendChild(document.createTextNode(c.name));
+        tt.appendChild(lab);
+      });
+      main.appendChild(tt);
+    }
 
     // 「在這一句之後留白」—— `## 🔇` 是編輯器裡唯一可新增的結構行(見 core 註解)。
     // 秒數只給固定檔位:手機上打錯的成本遠高於少幾個選項。
@@ -542,21 +650,28 @@
   //      debounce 計時器(SETTLE_DEBOUNCE_MS)。這條專門對付鍵盤選取
   //      (桌機 shift+方向鍵)——鍵盤選取沒有 pointerup/mouseup 可以當
   //      完成訊號,只能純靠「一段時間沒有再變化」判定穩定。
-  //   2. `pointerup`/`touchend`/`mouseup`(手指/滑鼠放開)→ 排一個短很多
-  //      的計時器(SETTLE_AFTER_POINTER_MS),取代保底的那個——放開了就是
-  //      有強訊號,不必等那麼久,行動裝置上等 450ms 會感覺明顯delay。
+  //   2. `pointerup`/`touchend`/`mouseup`(手指/滑鼠放開)→ 排計時器
+  //      (SETTLE_AFTER_POINTER_MS),取代保底的那個。
   //   3. `pointerdown`/`touchstart`/`mousedown`(手指/滑鼠再次按下)→
   //      **立刻取消**任何還在等待的計時器。這是本次在兩份 prior art 之外
   //      自己補的一條:文件/issue 討論的是「單次選取何時算完成」,沒有處理
   //      「放開後在很短時間內又抓住 handle 二次調整」這個情境——如果不擋,
-  //      使用者放開手指想拖 handle 微調範圍時,那個 60ms 的短計時器可能在
+  //      使用者放開手指想拖 handle 微調範圍時,放開後的計時器可能在
   //      手指再次按下之前就先套用了,把選取清掉、剛好搗亂使用者正在做的
   //      調整動作。加了這條防線後最壞情況只是「多套用一次、可以直接復原」
   //      (見下方 trySettle 的 try/catch 與 undo 堆疊),不會弄壞資料。
   //   計時器只有一個(pendingSettleTimer),新排程一律先清舊的——不會有兩個
-  //   計時器互相搶跑的問題。
-  var SETTLE_AFTER_POINTER_MS = 60;
-  var SETTLE_DEBOUNCE_MS = 450;
+  //   計時器互相搶跑的問題。所以等待期間只要再動選取(拖把手會連續觸發
+  //   selectionchange)就重新計時,不會提早套用;時間到時選取若已變空,
+  //   trySettle 什麼都不做。
+  //
+  // 兩個都是 1.2 秒(2026-10-03 MM:「反白選擇的時候,時間可以久一點」)。
+  // 原本放開 60ms 就套用:手機上反白後要再拖選取把手調範圍,手指離開螢幕、
+  // 移到把手、按下去,這一來一回本來就要半秒到一秒多,60ms 早就套用、把選取
+  // 清掉了。1.2 秒蓋得住一次「放開→找把手→按下」;按下會立刻取消計時(第 3
+  // 條),拖完再放開才重新計時。鍵盤選取同樣改等 1.2 秒,兩條規則一致好預期。
+  var SETTLE_AFTER_POINTER_MS = 1200;
+  var SETTLE_DEBOUNCE_MS = 1200;
   var pendingSettleTimer = null;
 
   function scheduleSettle(delayMs) {
@@ -662,6 +777,28 @@
     els.undoFloat.style.display = 'none';
   }
 
+  // 軌欄切換沒有選取範圍,復原按鈕貼在那顆開關旁邊(同樣是文件座標)。
+  function positionUndoAtTrack(lineIndex, track) {
+    var lab = els.blockList.querySelector(
+      '.track-toggles[data-line-index="' + lineIndex + '"] label[data-track="'
+      + String(track).replace(/"/g, '\\"') + '"]');
+    if (!lab) { hideUndoFloat(); return; }
+    var rect = lab.getBoundingClientRect();
+    var el = els.undoFloat;
+    el.style.visibility = 'hidden';
+    el.style.display = 'block';
+    var w = el.offsetWidth;
+    var h = el.offsetHeight;
+    var left = Math.max(VIEWPORT_MARGIN,
+      Math.min(rect.right + UNDO_GAP, window.innerWidth - w - VIEWPORT_MARGIN));
+    var top = rect.top - h - UNDO_GAP;
+    if (top < VIEWPORT_MARGIN) top = rect.bottom + UNDO_GAP;
+    top = Math.max(VIEWPORT_MARGIN, Math.min(top, window.innerHeight - h - VIEWPORT_MARGIN));
+    el.style.left = (left + window.scrollX) + 'px';
+    el.style.top = (top + window.scrollY) + 'px';
+    el.style.visibility = 'visible';
+  }
+
   els.undoBtn.addEventListener('click', function () {
     var result = Core.undo(state.doc, state.history);
     if (!result.undone) {
@@ -673,12 +810,75 @@
     setDirty(true);
     render();
     var next = Core.peekHistory(state.history);
-    if (next) {
+    if (next && next.kind === 'tracks') {
+      positionUndoAtTrack(next.lineIndex, next.track);
+    } else if (next) {
       // 點一次撤一步,按鈕跳到「再上一步」操作的位置(還有東西可以復原)。
       positionUndoFloat(next.lineIndex, next.start, next.end);
     } else {
       hideUndoFloat();
     }
+  });
+
+  // ── 成品時間對照(#1078)────────────────────────────────────────────
+  //
+  // 頁首顯示對照的是哪一版(timeline 的版本＋產生時間);輸入成品時間跳到那張卡。
+  // timeline 只反映「出那一版時」的成品,之後改了勾選要重出片才會更新——所以
+  // 一定要把版本與產生時間寫出來。
+
+  var tlEls = {
+    bar: document.getElementById('tlBar'),
+    info: document.getElementById('tlInfo'),
+    input: document.getElementById('tlInput'),
+  };
+
+  function showTimelineBar() {
+    var tl = state.timeline;
+    tlEls.bar.classList.toggle('show', !!tl || !!state.timelineBad);
+    tlEls.input.style.display = tl ? '' : 'none';
+    document.getElementById('tlGo').style.display = tl ? '' : 'none';
+    if (!tl) {
+      tlEls.info.textContent = state.timelineBad
+        ? 'cutplan.timeline.json 格式錯誤,未啟用成品時間對照' : '';
+      return;
+    }
+    var n = 0;
+    state.doc.lines.forEach(function (l) {
+      var s = Core.timelineStatus(l, tl);
+      if (s && s.mismatch) n++;
+    });
+    tlEls.info.textContent = '對照成品 ' + tl.version
+      + (tl.generatedAt ? '(' + tl.generatedAt.replace('T', ' ') + ' 出片)' : '')
+      + (n ? ' · 勾選與成品不一致 ' + n + ' 列' : '');
+  }
+
+  tlEls.bar.addEventListener('submit', function (ev) {
+    ev.preventDefault();
+    var secs = Core.parseTimeInput(tlEls.input.value);
+    if (secs === null) {
+      setStatus('成品時間看不懂:' + tlEls.input.value + '(寫 12:34 或 754)', 'error');
+      return;
+    }
+    var idx = Core.findLineAtTime(state.doc, state.timeline, secs);
+    if (idx === Core.OUT_OF_RANGE) {
+      var dur = state.timeline.finalDuration;
+      setStatus((secs < 0 ? '成品時間不能是負數' : '')
+        + (dur !== null && dur !== undefined
+          ? (secs < 0 ? ';' : '') + '成品只有 ' + Core.formatTime(dur) : '')
+        + ',' + tlEls.input.value.trim() + ' 超出範圍', 'error');
+      return;
+    }
+    var card = idx === null ? null
+      : els.blockList.querySelector('.block-card[data-line-index="' + idx + '"]');
+    if (!card) {
+      setStatus('成品 ' + Core.formatTime(secs) + ' 之前沒有任何 block', 'error');
+      return;
+    }
+    tlEls.input.blur();
+    card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    card.classList.add('tl-flash');
+    setTimeout(function () { card.classList.remove('tl-flash'); }, 1600);
+    setStatus('成品 ' + Core.formatTime(secs) + ' → ' + state.doc.lines[idx].id, 'ok');
   });
 
   // ── 儲存 ──────────────────────────────────────────────────────────────

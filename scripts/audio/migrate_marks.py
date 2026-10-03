@@ -25,6 +25,7 @@ from srt_utils import rel
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from session_paths import work_dir  # noqa: E402
+from tracks_columns import split_col  # noqa: E402
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 # 兩碼前綴 = 分軌 block(MR/SR/KN…);單碼 B/G/S/I = 混音線/補錄
@@ -48,8 +49,11 @@ def parse_blocks(md_lines: list[str]):
             continue
         prefix, body = m.group("prefix"), m.group("body")
         mark, spk = m.group("mark"), m.group("spk")
-        body, sep, reason = body.partition(" ← ")
-        suffix = sep + reason if sep else ""
+        # audio=tracks 行尾軌欄 ⟦…⟧ 跟理由一樣是尾註,不進字元流
+        rest, _col = split_col(body)
+        col_tail = body[len(rest):]            # 原樣保留(含前導空白)
+        body, sep, reason = rest.partition(" ← ")
+        suffix = (sep + reason if sep else "") + col_tail
         plain = []
         pos = 0
         cur = 0  # plain 內游標

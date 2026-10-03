@@ -96,6 +96,14 @@ const REASON_SEP = ' ← ';
 // 行尾符號(保留 CRLF/LF/CR 與「無結尾換行」四種狀態)。
 const EOL_RE = /(\r\n|\r|\n)/;
 
+// `## ⚙ line=mixdown audio=tracks` 的行尾軌欄 ` ⟦Mars● Sarah○ Kin○⟧`
+// (ADR-2026-10-03-audio-tracks-line)——對齊 scripts/audio/tracks_columns.py 的
+// COL_RE / CELL_RE。先於 ` ← 理由` 切掉,所以理由與逐字稿都看不到它。
+const TRACKS_COL_RE = /\s*⟦([^⟦⟧]*)⟧\s*$/;
+const TRACK_ON = '●';
+const TRACK_OFF = '○';
+const TRACK_CELL_RE = /^(\S+?)([●○])$/;
+
 // ── 行層級解析 ──────────────────────────────────────────────────────────
 
 function parseLine(content, term) {
@@ -103,7 +111,10 @@ function parseLine(content, term) {
   if (!m) {
     return { editable: false, raw: content, term };
   }
-  const [, mark, id, timecode, restFull] = m;
+  const [, mark, id, timecode, restAll] = m;
+  const cm = TRACKS_COL_RE.exec(restAll);
+  const tracksRaw = cm ? restAll.slice(cm.index) : '';
+  const restFull = cm ? restAll.slice(0, cm.index) : restAll;
   const sepIdx = restFull.lastIndexOf(REASON_SEP);
   let rest = restFull;
   let reason = '';
@@ -118,12 +129,13 @@ function parseLine(content, term) {
     prefix = sm[0];
     bodyRaw = rest.slice(sm[0].length);
   }
-  return { editable: true, term, mark, id, timecode, prefix, bodyRaw, reason };
+  return { editable: true, term, mark, id, timecode, prefix, bodyRaw, reason, tracksRaw };
 }
 
 function serializeLine(line) {
   if (!line.editable) return line.raw;
-  return `- [${line.mark}] ${line.id} [${line.timecode}] ${line.prefix}${line.bodyRaw}${line.reason}`;
+  return `- [${line.mark}] ${line.id} [${line.timecode}] ${line.prefix}${line.bodyRaw}${line.reason}`
+    + (line.tracksRaw || '');
 }
 
 // ── 文件層級 parse / serialize ────────────────────────────────────────────
@@ -355,7 +367,13 @@ function canUndo(history) {
 function peekHistory(history) {
   if (history.stack.length === 0) return null;
   const top = history.stack[history.stack.length - 1];
-  return { lineIndex: top.lineIndex, start: top.start, end: top.end };
+  const out = { lineIndex: top.lineIndex, start: top.start, end: top.end };
+  // 軌欄切換沒有「選取範圍」可以貼復原按鈕,UI 要改貼在那顆開關旁邊
+  if (top.kind) {
+    out.kind = top.kind;
+    out.track = top.track;
+  }
+  return out;
 }
 
 // applyStrike + 自動推入歷史的便利包裝。選取不合法一樣丟錯(沿用
@@ -462,8 +480,247 @@ function removeRoomtoneWithHistory(doc, history, lineIndex) {
   };
 }
 
+// ── 軌欄切換(`## ⚙ … audio=tracks`)──────────────────────────────────
+//
+// **第二個刻意開的口**,只開「翻 ●/○」這一個動作:欄位有沒有、哪幾軌、順序、
+// 格式全部唯讀(那是 tracks_columns.py 產的,改壞了 render 會 FAIL,MM 在手機
+// 上不會發現)。開它的理由跟 🔇 同一組條件:①「這段哪幾軌該出聲」只有耳朵
+// 聽得出來(串音、笑聲、搶話),預設值只是猜;②翻錯一定看得到(開關就畫在
+// 卡片上)、也翻得回來(吃既有的復原)。
+
+function parseTracks(tracksRaw) {
+  const m = TRACKS_COL_RE.exec(tracksRaw || '');
+  if (!m) return null;
+  const out = [];
+  const seen = new Set();
+  for (const tok of m[1].split(/\s+/).filter(Boolean)) {
+    const c = TRACK_CELL_RE.exec(tok);
+    if (!c || seen.has(c[1])) return null;
+    seen.add(c[1]);
+    out.push({ name: c[1], on: c[2] === TRACK_ON });
+  }
+  return out.length ? out : null;
+}
+
+function hasTracksAudio(doc) {
+  return doc.lines.some((l) => !l.editable
+    && /^##\s*⚙/.test(l.raw || '') && /(^|\s)audio=tracks(\s|$)/.test(l.raw));
+}
+
+function toggleTrack(doc, lineIndex, name) {
+  const line = requireEditableLine(doc, lineIndex, 'toggleTrack');
+  const cells = parseTracks(line.tracksRaw);
+  if (!cells) {
+    throw new Error(`cutplan-core: toggleTrack — 第 ${lineIndex} 行(${line.id})沒有軌欄`);
+  }
+  if (!cells.some((c) => c.name === name)) {
+    throw new Error(`cutplan-core: toggleTrack — ${line.id} 的軌欄沒有「${name}」這一軌`);
+  }
+  // 只換那一格的 ●/○ 一個字元,欄位其餘 byte(空白、括號)原樣保留
+  const re = new RegExp(`(^|[\\s⟦])(${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})([●○])`);
+  const tracksRaw = line.tracksRaw.replace(re, (_all, pre, n, mk) =>
+    pre + n + (mk === TRACK_ON ? TRACK_OFF : TRACK_ON));
+  const lines = doc.lines.slice();
+  lines[lineIndex] = { ...line, tracksRaw };
+  return { ...doc, lines };
+}
+
+function toggleTrackWithHistory(doc, history, lineIndex, name) {
+  const nextDoc = toggleTrack(doc, lineIndex, name);
+  return {
+    doc: nextDoc,
+    history: pushHistory(history, {
+      doc, lineIndex, start: 0, end: 0, kind: 'tracks', track: name,
+    }),
+  };
+}
+
+// ── 唯讀護欄(伺服端第二道防線;Code.gs 的 saveCutplan 呼叫它)────────
+//
+// 逐行比對 oldContent → newContent,回傳第一個「超出允許編輯範圍」的說明字串,
+// 沒問題回 null。允許:block 行的 mark、block 內文「拿掉 ~~ 之後的文字不變」、
+// (⚙ 有 audio=tracks 時)軌欄只翻 ●/○;其他任何差異一律不合法。
+// 從 Code.gs 搬來這裡是為了讓 Node 測試守得到(規則本身沒改)。
+
+function trackSkeleton(tracksRaw) {
+  return (tracksRaw || '').replace(/[●○]/g, '?');
+}
+
+function findIllegalEdit(oldContent, newContent) {
+  const oldDoc = parseCutplan(oldContent);
+  const newDoc = parseCutplan(newContent);
+  if (oldDoc.lines.length !== newDoc.lines.length) {
+    return `行數不一致(${oldDoc.lines.length} → ${newDoc.lines.length})`;
+  }
+  const tracksOk = hasTracksAudio(oldDoc);
+  for (let i = 0; i < oldDoc.lines.length; i++) {
+    const a = oldDoc.lines[i];
+    const b = newDoc.lines[i];
+    const n = i + 1;
+    if (a.editable !== b.editable) {
+      return `第 ${n} 行的可編輯性改變了(唯讀 ↔ 可編輯)`;
+    }
+    if (!a.editable) {
+      if (a.raw !== b.raw || a.term !== b.term) {
+        return `第 ${n} 行是唯讀行,但內容被改動了`;
+      }
+      continue;
+    }
+    if (a.id !== b.id || a.timecode !== b.timecode
+        || a.prefix !== b.prefix || a.reason !== b.reason || a.term !== b.term) {
+      return `第 ${n} 行(${a.id})的 id/時間碼/speaker/理由被改動了`;
+    }
+    if (a.tracksRaw !== b.tracksRaw) {
+      if (!a.tracksRaw || !b.tracksRaw) {
+        return `第 ${n} 行(${a.id})的軌欄被新增或刪除了(只能切換 ●/○)`;
+      }
+      if (!tracksOk) {
+        return `第 ${n} 行(${a.id})的軌欄被改動了,但 ⚙ 沒寫 audio=tracks`;
+      }
+      if (trackSkeleton(a.tracksRaw) !== trackSkeleton(b.tracksRaw)
+          || !parseTracks(b.tracksRaw)) {
+        return `第 ${n} 行(${a.id})的軌欄軌名/順序/格式被改動了(只能切換 ●/○)`;
+      }
+    }
+    if (a.bodyRaw !== b.bodyRaw) {
+      const cleanA = splitStrikes(a.bodyRaw).clean;
+      const cleanB = splitStrikes(b.bodyRaw).clean;
+      if (cleanA !== cleanB) {
+        return `第 ${n} 行(${a.id})的逐字稿文字被改動了(只能加/去刪除線)`;
+      }
+    }
+  }
+  return null;
+}
+
+// ── 成品時間對照(cutplan.timeline.json,Lifov #1078)──────────────────
+//
+// render 出片時在 cutplan.md 旁產 timeline:block id → 成品起點秒數陣列,或
+// null=成品裡沒有。判定是 render 看**實際保留範圍**算的,不是看勾選——所以
+// 「勾了卻沒出現」「取消卻仍出現」在這裡才看得到。timeline 是另一個檔,編輯器
+// 只讀不寫,唯讀護欄不受影響。
+
+function parseTimeline(text) {
+  if (!text || typeof text !== 'string') return null;
+  let d;
+  try {
+    d = JSON.parse(text);
+  } catch (e) {
+    return null;
+  }
+  if (!d || typeof d !== 'object' || !d.blocks || typeof d.blocks !== 'object'
+      || Array.isArray(d.blocks)) {
+    return null;
+  }
+  // 每一列都要合格(null 或有限非負數字陣列),任一不合格整份不採信(驗收 TL-2):
+  // 部分採信會讓「v3 未出現」這種結論建立在壞資料上,MM 看不出哪幾列是假的
+  const okNum = (v) => typeof v === 'number' && Number.isFinite(v) && v >= 0;
+  for (const v of Object.values(d.blocks)) {
+    if (v !== null && !(Array.isArray(v) && v.every(okNum))) return null;
+  }
+  // 欄位不存在=舊版 timeline,走舊行為;明寫了就必須合法(null 也不行,TL-2-1)
+  const hasFd = Object.prototype.hasOwnProperty.call(d, 'final_duration_secs');
+  const fd = d.final_duration_secs;
+  if (hasFd && !okNum(fd)) return null;
+  const version = String(d.version || '');
+  return {
+    version,
+    versionShort: version.split('_')[0] || version,
+    generatedAt: String(d.generated_at || ''),
+    finalDuration: hasFd ? fd : null,
+    blocks: d.blocks,
+  };
+}
+
+// loadCutplan 回來的 timeline 字串 → 'absent'(沒有這個檔)/'bad'(有檔但空白
+// 或格式不合格)/'ok'。空白檔也是「有檔」,要顯示格式錯誤(TL-2-2),不能當沒檔。
+function timelineFileState(text) {
+  if (text === null || text === undefined) return 'absent';
+  return parseTimeline(text) ? 'ok' : 'bad';
+}
+
+// findLineAtTime 的「超出成品長度」結果(驗收 TL-1):UI 要說「成品只有 43:28」,
+// 不能默默跳到最後一張卡讓人以為那裡就是。
+const OUT_OF_RANGE = 'out-of-range';
+
+// 「12:34」「754」「1:02:03」「12:34.5」→ 秒;格式看不懂回 null(不猜)。
+// 前面帶一個負號(「-1」「-0:10」)照樣解析成負數 —— 那是「超出範圍」,不是
+// 「看不懂」,UI 要講對原因(驗收 TL-1-1)。
+function parseTimeInput(text) {
+  let s = String(text == null ? '' : text).trim();
+  const neg = s.startsWith('-');
+  if (neg) s = s.slice(1);
+  if (!/^\d+(?:\.\d+)?$|^\d+:\d{1,2}(?:\.\d+)?$|^\d+:\d{1,2}:\d{1,2}(?:\.\d+)?$/.test(s)) {
+    return null;
+  }
+  const parts = s.split(':').map(Number);
+  for (let i = 1; i < parts.length; i++) {
+    if (parts[i] >= 60) return null;
+  }
+  const v = parts.reduce((acc, x) => acc * 60 + x, 0);
+  return neg ? -v : v;
+}
+
+function formatTime(secs) {
+  const t = Math.floor(Math.max(0, secs));
+  const h = Math.floor(t / 3600);
+  const m = Math.floor((t % 3600) / 60);
+  const s = String(t % 60).padStart(2, '0');
+  return h ? `${h}:${String(m).padStart(2, '0')}:${s}` : `${m}:${s}`;
+}
+
+// 卡片上的小字與不一致判定;timeline 沒有這一列(或沒有 timeline)回 null。
+function timelineStatus(line, timeline) {
+  if (!timeline || !line || !line.editable) return null;
+  if (!Object.prototype.hasOwnProperty.call(timeline.blocks, line.id)) return null;
+  const times = timeline.blocks[line.id];
+  const present = Array.isArray(times) && times.length > 0;
+  const checked = line.mark !== ' ';
+  return {
+    times: present ? times : null,
+    label: present
+      ? `▶ ${timeline.versionShort} ${times.map(formatTime).join(' · ')}`
+      : `${timeline.versionShort} 未出現`,
+    mismatch: checked !== present,
+  };
+}
+
+// 成品時間 → 哪一張卡:起點 ≤ 該時間的最後一個 block。同一 id 出現在 🎬 集錦
+// 與正文時,集錦的時間(成品前段)對到文件裡第一次出現的那列(集錦區),其餘
+// 時間對到最後一次出現的那列(正文)。
+function findLineAtTime(doc, timeline, secs) {
+  if (!timeline || typeof secs !== 'number' || Number.isNaN(secs)) return null;
+  if (secs < 0) return OUT_OF_RANGE;          // 負數永遠超出(TL-1-1)
+  if (timeline.finalDuration !== null && timeline.finalDuration !== undefined
+      && secs > timeline.finalDuration) {
+    return OUT_OF_RANGE;
+  }
+  let best = null;
+  for (const [id, times] of Object.entries(timeline.blocks)) {
+    if (!Array.isArray(times)) continue;
+    times.forEach((t, k) => {
+      if (t <= secs && (!best || t > best.t)) best = { t, id, k, n: times.length };
+    });
+  }
+  if (!best) return null;
+  const lines = [];
+  doc.lines.forEach((l, i) => { if (l.editable && l.id === best.id) lines.push(i); });
+  if (!lines.length) return null;
+  if (lines.length > 1 && best.n > 1) {
+    return best.k === 0 ? lines[0] : lines[lines.length - 1];
+  }
+  return lines[lines.length - 1];
+}
+
 const api = {
   parseCutplan,
+  parseTimeline,
+  parseTimeInput,
+  formatTime,
+  timelineStatus,
+  findLineAtTime,
+  OUT_OF_RANGE,
+  timelineFileState,
   serializeCutplan,
   toggleCheckbox,
   splitStrikes,
@@ -489,6 +746,12 @@ const api = {
   removeRoomtoneWithHistory,
   SPEAKER_PREFIX_RE,
   REASON_SEP,
+  TRACKS_COL_RE,
+  parseTracks,
+  hasTracksAudio,
+  toggleTrack,
+  toggleTrackWithHistory,
+  findIllegalEdit,
 };
 
 if (typeof module !== 'undefined' && module.exports) {

@@ -113,6 +113,20 @@ class TestBuildTranscript(unittest.TestCase):
         # 錨點=前一個正片 block(B0005,無 dst)→ 不硬掰時間戳,但內容要在
         self.assertNotIn("(00:00:03)", out, "補錄時間碼不可直接當成品時間")
 
+    def test_tracks_column_never_leaks_into_transcript(self):
+        """audio=tracks 的行尾軌欄 ⟦Mars● …⟧ 是 render 參數,不是講的話。"""
+        md = self.sdir / "cutplan.md"
+        txt = md.read_text(encoding="utf-8")
+        out_lines = []
+        for line in txt.splitlines():
+            if line.startswith("- ["):
+                line += " ⟦Mars○ Sarah● Kin○⟧"
+            out_lines.append(line)
+        md.write_text("\n".join(out_lines) + "\n", encoding="utf-8")
+        out = build_transcript(self.sdir)
+        self.assertNotIn("⟦", out)
+        self.assertIn("(00:00:10) Sarah:哈囉嗯大家歡迎收聽", out)
+
     def test_clip_section_excluded(self):
         # 🎬 集錦區的重複 B0002 不進逐字稿(只出現在正文合併句裡一次)
         out = build_transcript(self.sdir)

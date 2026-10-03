@@ -108,12 +108,25 @@ def find_drive_dir(sdir: Path, override: Path | None) -> Path | None:
 def semantic_diff(a: Path, b: Path) -> list[str]:
     """兩份 cutplan 的**語意**差異(不是逐行 diff):勾選翻轉、刪除線增減、
     ✂ 手動剪除、⚙ 參數。逐行 diff 對這種一行幾百字的檔案沒有可讀性。"""
-    def load(p: Path) -> tuple[dict, dict, set, dict, dict]:
+    tcol_a: dict = {}
+    tcol_b: dict = {}
+
+    def load(p: Path, tcol: dict) -> tuple[dict, dict, set, dict, dict]:
         keep, strikes, cuts, cfg, mus = {}, {}, set(), {}, {}
+        clip_n: dict[str, int] = {}
         for it in parse_program(p):
             if it["kind"] == "block":
                 keep[it["id"]] = it["keep"]
                 strikes[it["id"]] = it["raw"].count("~~") // 2
+                # audio=tracks 的軌欄(哪幾軌出聲)也是剪輯決定。🎬 集錦區的複製
+                # 列 render 照樣吃它自己那一格(驗收 F-1),所以分開記:同一 id
+                # 在集錦區第 n 次出現記成 `B0001@🎬n`,不跟正文那列互相蓋掉
+                if it.get("tracks") is not None:
+                    key = it["id"]
+                    if it.get("clip"):
+                        clip_n[key] = clip_n.get(key, 0) + 1
+                        key = f"{key}@🎬{clip_n[key]}"
+                    tcol[key] = " ".join(it["tracks"].split())
             elif it["kind"] == "cut":
                 cuts.add((round(it["a"], 2), round(it["b"], 2)))
             elif it["kind"] == "config":
@@ -126,9 +139,17 @@ def semantic_diff(a: Path, b: Path) -> list[str]:
                                     "lead", "tail")}
         return keep, strikes, cuts, cfg, mus
 
-    ka, sa, ca, ga, ma = load(a)
-    kb, sb, cb, gb, mb = load(b)
+    ka, sa, ca, ga, ma = load(a, tcol_a)
+    kb, sb, cb, gb, mb = load(b, tcol_b)
     out = []
+    dt = [i for i in tcol_a.keys() | tcol_b.keys()
+          if tcol_a.get(i) != tcol_b.get(i)]
+    if dt:
+        dt.sort()
+        out.append(f"  軌欄變動 {len(dt)} 個:"
+                   + "、".join(f"{i}({tcol_a.get(i, '無')}→{tcol_b.get(i, '無')})"
+                               for i in dt[:8])
+                   + (" …" if len(dt) > 8 else ""))
     flipped = [i for i in ka if i in kb and ka[i] != kb[i]]
     if flipped:
         out.append(f"  勾選翻轉 {len(flipped)} 個:"
@@ -163,6 +184,20 @@ def semantic_diff(a: Path, b: Path) -> list[str]:
     return out or ["  (內容有差異但不影響剪輯:註解、理由文字之類)"]
 
 
+TIMELINE = "cutplan.timeline.json"
+
+
+def finalize_timeline(src: Path, vname: str, dests: list[Path]) -> None:
+    """render 寫的 timeline 用輸出檔名當版本;cut.py 知道真正的 vN_ 目錄名,
+    改掉再複製到 Drive 集數根(cutplan.md 旁,編輯器讀得到)與版本目錄(Lifov #1078)。"""
+    d = json.loads(src.read_text(encoding="utf-8"))
+    d["version"] = vname
+    text = json.dumps(d, ensure_ascii=False, indent=1)
+    src.write_text(text, encoding="utf-8")
+    for p in dests:
+        p.write_text(text, encoding="utf-8")
+
+
 def ask(prompt: str, options: str, default: str) -> str:
     if not sys.stdin.isatty():
         print(f"[cut] 非互動環境,採用預設 {default}")
@@ -193,7 +228,8 @@ def route_label(plan: Path) -> str:
         # 兩碼前綴(MR/SR/KN)=逐軌 block,單碼(B/G/S/I)=混音線
         line = "pertrack" if any(i[:2].isalpha() for i in ids) else "mixdown"
     if line == "mixdown":
-        return "混音"
+        # ADR-2026-10-03-audio-tracks-line:合軌節目單決定時間、分軌出聲
+        return "合軌決定＋分軌音源" if cfg.get("audio") == "tracks" else "混音"
     return "分軌決定＋合軌音源" if cfg.get("audio") == "mixdown" else "分軌"
 
 
@@ -359,14 +395,27 @@ def main() -> None:
     (lvdir / "render.txt").write_text(note, encoding="utf-8")
     print(f"[cut] ☑️ local:{vname}/(mp3 + cutplan 快照 + render.txt)")
 
-    if ddir and not args.no_push:
+    # cutplan.timeline.json(#1078):版本名換成 vN_ 目錄名;local 版本目錄留一份,
+    # Drive 放集數根(cutplan.md 旁邊,編輯器 loadCutplan 會一起讀)與版本目錄
+    tl_src = local.parent / TIMELINE
+    tl_dests = [lvdir / TIMELINE]
+    push = bool(ddir and not args.no_push)
+    if push:
+        tl_dests += [drive.parent / TIMELINE, ddir / vname / TIMELINE]
+        (ddir / vname).mkdir(parents=True, exist_ok=True)
+    if tl_src.exists():
+        finalize_timeline(tl_src, vname, tl_dests)
+    else:
+        print(f"[cut] ⚠ render 沒產 {TIMELINE},編輯器沒有成品時間可對照")
+
+    if push:
         vdir = ddir / vname
         vdir.mkdir(parents=True, exist_ok=True)
         shutil.copy2(sdir / out, vdir / f"{stem}.mp3")
         shutil.copy2(local, vdir / Path(args.plan).name)
         (vdir / "render.txt").write_text(note, encoding="utf-8")
         shutil.copy2(local, drive)                     # Drive 工作版保持最新
-        print(f"[cut] ☑️ Drive:{vdir.name}/(同上)")
+        print(f"[cut] ☑️ Drive:{vdir.name}/(同上,含 {TIMELINE};集數根也更新)")
 
     # 版本目錄已有逐 byte 相同的快照,session 根不留工作檔——「根目錄乾淨」不能
     # 是一個要定期執行的動作,否則每出一版就髒一次(2026-09-11 MM 清掉 EP18 累積
