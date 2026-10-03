@@ -616,7 +616,7 @@ python3 .claude/skills/good-student/scripts/build_canvas.py <輸出目錄> \
   **深度基準（使用者現有程度描述＋太淺/太深判準）**＋受控詞彙表＋
   預期產出檔名清單。不留「格式自行調整」空間——深淺沒鎖，平行 agent 會各切各的落點。
 - 每個 agent 只處理一個來源檔；回報「建立檔案清單＋沒切出來的預期單位＋新發現錯字」。
-- 語意改寫派 sonnet；不派 haiku（會照抄贅詞或腦補）。
+- 批量切卡派 luna MAX（codex 不可用時派 Claude sonnet）；不派 haiku（會照抄贅詞或腦補）。
 - 試切 5 張由主線自己做，不派工——gate 的意義是校準格式，派出去就校不到了。
 
 ### 長工作一律用 orca-cli 派，不要用背景 shell（2026-09-07 MM 拍板）
