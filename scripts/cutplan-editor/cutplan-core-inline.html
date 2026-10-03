@@ -618,25 +618,38 @@ function parseTimeline(text) {
   for (const v of Object.values(d.blocks)) {
     if (v !== null && !(Array.isArray(v) && v.every(okNum))) return null;
   }
+  // 欄位不存在=舊版 timeline,走舊行為;明寫了就必須合法(null 也不行,TL-2-1)
+  const hasFd = Object.prototype.hasOwnProperty.call(d, 'final_duration_secs');
   const fd = d.final_duration_secs;
-  if (fd !== undefined && fd !== null && !okNum(fd)) return null;
+  if (hasFd && !okNum(fd)) return null;
   const version = String(d.version || '');
   return {
     version,
     versionShort: version.split('_')[0] || version,
     generatedAt: String(d.generated_at || ''),
-    finalDuration: okNum(fd) ? fd : null,
+    finalDuration: hasFd ? fd : null,
     blocks: d.blocks,
   };
+}
+
+// loadCutplan 回來的 timeline 字串 → 'absent'(沒有這個檔)/'bad'(有檔但空白
+// 或格式不合格)/'ok'。空白檔也是「有檔」,要顯示格式錯誤(TL-2-2),不能當沒檔。
+function timelineFileState(text) {
+  if (text === null || text === undefined) return 'absent';
+  return parseTimeline(text) ? 'ok' : 'bad';
 }
 
 // findLineAtTime 的「超出成品長度」結果(驗收 TL-1):UI 要說「成品只有 43:28」,
 // 不能默默跳到最後一張卡讓人以為那裡就是。
 const OUT_OF_RANGE = 'out-of-range';
 
-// 「12:34」「754」「1:02:03」「12:34.5」→ 秒;不合法回 null(不猜)。
+// 「12:34」「754」「1:02:03」「12:34.5」→ 秒;格式看不懂回 null(不猜)。
+// 前面帶一個負號(「-1」「-0:10」)照樣解析成負數 —— 那是「超出範圍」,不是
+// 「看不懂」,UI 要講對原因(驗收 TL-1-1)。
 function parseTimeInput(text) {
-  const s = String(text == null ? '' : text).trim();
+  let s = String(text == null ? '' : text).trim();
+  const neg = s.startsWith('-');
+  if (neg) s = s.slice(1);
   if (!/^\d+(?:\.\d+)?$|^\d+:\d{1,2}(?:\.\d+)?$|^\d+:\d{1,2}:\d{1,2}(?:\.\d+)?$/.test(s)) {
     return null;
   }
@@ -644,7 +657,8 @@ function parseTimeInput(text) {
   for (let i = 1; i < parts.length; i++) {
     if (parts[i] >= 60) return null;
   }
-  return parts.reduce((acc, v) => acc * 60 + v, 0);
+  const v = parts.reduce((acc, x) => acc * 60 + x, 0);
+  return neg ? -v : v;
 }
 
 function formatTime(secs) {
@@ -676,11 +690,11 @@ function timelineStatus(line, timeline) {
 // 時間對到最後一次出現的那列(正文)。
 function findLineAtTime(doc, timeline, secs) {
   if (!timeline || typeof secs !== 'number' || Number.isNaN(secs)) return null;
+  if (secs < 0) return OUT_OF_RANGE;          // 負數永遠超出(TL-1-1)
   if (timeline.finalDuration !== null && timeline.finalDuration !== undefined
-      && (secs < 0 || secs > timeline.finalDuration)) {
+      && secs > timeline.finalDuration) {
     return OUT_OF_RANGE;
   }
-  if (secs < 0) return null;
   let best = null;
   for (const [id, times] of Object.entries(timeline.blocks)) {
     if (!Array.isArray(times)) continue;
@@ -706,6 +720,7 @@ const api = {
   timelineStatus,
   findLineAtTime,
   OUT_OF_RANGE,
+  timelineFileState,
   serializeCutplan,
   toggleCheckbox,
   splitStrikes,

@@ -63,7 +63,7 @@ test('parseTimeInput:12:34、754、1:02:03、12:34.5;不合法回 null', () => {
   assert.equal(parseTimeInput(' 1:02:03 '), 3723);
   assert.equal(parseTimeInput('12:34.5'), 754.5);
   assert.equal(parseTimeInput('12:３4'), null);
-  for (const bad of ['', 'abc', '1:2:3:4', '-5', '12:', '12:61']) {
+  for (const bad of ['', 'abc', '1:2:3:4', '12:', '12:61', '--5', '- 5']) {
     assert.equal(parseTimeInput(bad), null, bad);
   }
 });
@@ -102,7 +102,8 @@ test('findLineAtTime:找起點 ≤ 該時間的最後一列;集錦時間回集�
   assert.equal(findLineAtTime(doc, tl, 11.2), idx('- [ ] B0002'));
   assert.equal(findLineAtTime(doc, tl, 25), idx('- [x] B0003', 1));
   assert.equal(findLineAtTime(doc, tl, 3), idx('- [x] B0003', 0));
-  assert.equal(findLineAtTime(doc, tl, -1), null);
+  // 負數=超出範圍(第五輪 TL-1-1 起;原本回 null 會被 UI 講成「之前沒有 block」)
+  assert.equal(findLineAtTime(doc, tl, -1), require('../cutplan-core.js').OUT_OF_RANGE);
   assert.equal(findLineAtTime(doc, null, 3), null);
 });
 
@@ -182,4 +183,33 @@ test('TL-2 parseTimeline:任一 block 值不是 null 或有限非負數字陣列
   assert.ok(parseTimeline(TL));
   assert.equal(parseTimeline(JSON.stringify({ version: 'v1', blocks: [] })), null);
   assert.equal(parseTimeline(JSON.stringify({ ...base, final_duration_secs: -3 })), null);
+});
+
+// ── 第五輪驗收 TL-1-1 / TL-2-1 / TL-2-2 ─────────────────────────────────
+const { timelineFileState } = require('../cutplan-core.js');
+
+test('TL-1-1 parseTimeInput:負數解析成負數(交給「超出範圍」),不是「看不懂」', () => {
+  assert.equal(parseTimeInput('-1'), -1);
+  assert.equal(parseTimeInput('-0:10'), -10);
+  assert.equal(parseTimeInput(' -1:02:03 '), -3723);
+  const doc = parseCutplan(PLAN);
+  // 有成品長度 → OUT_OF_RANGE;沒有成品長度一樣 OUT_OF_RANGE(負數永遠超出)
+  const withDur = parseTimeline(JSON.stringify({ ...JSON.parse(TL), final_duration_secs: 30 }));
+  assert.equal(findLineAtTime(doc, withDur, parseTimeInput('-0:10')), OUT_OF_RANGE);
+  assert.equal(findLineAtTime(doc, parseTimeline(TL), -1), OUT_OF_RANGE);
+});
+
+test('TL-2-1 final_duration_secs 明寫 null → 格式錯誤;欄位不存在才走舊行為', () => {
+  const base = JSON.parse(TL);
+  assert.equal(parseTimeline(JSON.stringify({ ...base, final_duration_secs: null })), null);
+  assert.ok(parseTimeline(TL));
+});
+
+test('TL-2-2 timelineFileState:沒檔 absent;空白/壞掉 bad;合格 ok', () => {
+  assert.equal(timelineFileState(null), 'absent');
+  assert.equal(timelineFileState(undefined), 'absent');
+  assert.equal(timelineFileState(''), 'bad');
+  assert.equal(timelineFileState('   \n\t'), 'bad');
+  assert.equal(timelineFileState('{nope'), 'bad');
+  assert.equal(timelineFileState(TL), 'ok');
 });

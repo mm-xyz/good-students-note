@@ -375,7 +375,7 @@
         // 成品時間對照(#1078):同資料夾沒有 timeline 就不顯示,不報錯
         state.timeline = Core.parseTimeline(res.timeline);
         // 有檔案但格式不合格:整份不採信,頁首講清楚(驗收 TL-2)
-        state.timelineBad = !!res.timeline && !state.timeline;
+        state.timelineBad = Core.timelineFileState(res.timeline) === 'bad'; // 空白檔也算(TL-2-2)
         showTimelineBar();
         render();
         setStatus('已載入:' + res.name, 'ok');
@@ -861,8 +861,11 @@
     }
     var idx = Core.findLineAtTime(state.doc, state.timeline, secs);
     if (idx === Core.OUT_OF_RANGE) {
-      setStatus('成品只有 ' + Core.formatTime(state.timeline.finalDuration)
-        + ',' + tlEls.input.value + ' 超出範圍', 'error');
+      var dur = state.timeline.finalDuration;
+      setStatus((secs < 0 ? '成品時間不能是負數' : '')
+        + (dur !== null && dur !== undefined
+          ? (secs < 0 ? ';' : '') + '成品只有 ' + Core.formatTime(dur) : '')
+        + ',' + tlEls.input.value.trim() + ' 超出範圍', 'error');
       return;
     }
     var card = idx === null ? null
