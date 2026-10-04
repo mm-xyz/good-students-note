@@ -909,10 +909,15 @@ def snap_boundaries(ranges: list[list[float]], silences: list[dict],
     貼近端前先過 clamp_silence:靜音段的頭尾常含小聲字尾,直接貼會把字切掉
     (EP16「那你先說」的「說」被切 0.3s)。夾完仍算長靜音才貼,否則照中點走。
     """
+    def dist(s: dict, t: float) -> float:
+        return max(s["start"] - t, t - s["end"], 0.0)
+
     def snap(t: float, is_start: bool) -> float:
-        for s in silences:
-            if not (s["start"] - window <= t <= s["end"] + window):
-                continue
+        # 挑**最近**的靜音(EP22 B0013:窗內兩段時,舊版挑第一段 → 尾端跑到頭前)
+        near = sorted((s for s in silences
+                       if s["start"] - window <= t <= s["end"] + window),
+                      key=lambda s: dist(s, t))
+        for s in near[:1]:
             if s["end"] - s["start"] > long_silence:
                 c = clamp_silence(s, words)
                 if c and c[1] - c[0] > long_silence:
@@ -921,7 +926,11 @@ def snap_boundaries(ranges: list[list[float]], silences: list[dict],
                     return t          # 字橫跨整段:根本不是停頓,別動邊界
             return (s["start"] + s["end"]) / 2
         return t
-    return [[snap(a, True), snap(b, False)] for a, b in ranges]
+    out = []
+    for a, b in ranges:
+        sa, sb = snap(a, True), snap(b, False)
+        out.append([sa, sb] if sb > sa else [a, b])   # 不准翻成負長度
+    return out
 
 
 def merge_ranges(ranges: list[list[float]], min_gap: float = 0.2) -> list[list[float]]:
@@ -1763,6 +1772,7 @@ def main():
                          f"標頭之前 — S 行必須排在它所屬的 ➕ 標頭底下")
             last = units[-1] if units else None
             if (last and last["kind"] == "insert" and last["file"] == it["insert"]
+                    and not last.get("sealed")
                     and 0 <= b["start"] - last["b"] < 2.0):
                 last["b"] = b["end"]
                 last["items"].append(it)
@@ -1776,6 +1786,7 @@ def main():
                         and not it.get("pertrack")
                         and not last.get("raw") and not it.get("gap")
                         and last["clip"] == it["clip"]
+                        and not last.get("sealed")
                         and 0 <= b["start"] - last["end"] < 2.0)
             if joinable:
                 last["end"] = b["end"]
@@ -1789,6 +1800,10 @@ def main():
                               "end": b["end"], "items": [it],
                               "clip": it["clip"], "raw": it.get("gap", False),
                               "pertrack": it.get("pertrack", False)})
+        elif it["kind"] == "block" and not it.get("gap") and units:
+            # 沒勾的 B/S 列=剪(#1079):封住前一個 unit,下一個保留列即使 <2s
+            # 也另起一段——否則併段會把中間這列連同聲音一起吞回成品
+            units[-1]["sealed"] = True
 
     # ── 🎵 music unit → overlay 疊接:中段換成獨奏長度的 silence gap,
     #    音樂本體記進 musics,render 時 adelay+amix 疊上語音軌 ──
@@ -1833,6 +1848,20 @@ def main():
            for it in u["items"]) and not words:
         sys.exit("[render] FAIL: cutplan 有 ~~刪除線~~ 但缺 words.json — "
                  "用新版 transcribe_local.py 重轉錄一次產生")
+
+    # 沒勾的正片列=人審點名剪除(#1079):跟 ✂ 一樣在 word 保護**之後**套。
+    # 緊貼保留列的沒勾列(字連字),snap 會把切點拉進它字裡的 RMS 靜音,
+    # word_guard 再推到字尾外 → 整個字被塞回去(EP22 過夜段開頭漏 1s)。
+    # 扣掉保留列自己的時間,搶話重疊的部分不誤剪。
+    def _row_span(it):
+        return [it["block"]["start"], it["block"]["end"]]
+    main_rows = [it for it in program if it["kind"] == "block" and it.get("block")
+                 and not it.get("insert") and not it.get("gap")
+                 and not it.get("pertrack")]
+    unchecked_cuts = subtract(
+        merge_ranges([_row_span(it) for it in main_rows if not it["keep"]],
+                     min_gap=0.0),
+        [_row_span(it) for it in main_rows if it["keep"]], min_frag=0.0)
 
     # ── 每個 speech unit:snap → 字級精剪/停頓收緊 → 谷底 → word 保護 ──
     segments = []
@@ -1932,6 +1961,10 @@ def main():
             ranges[0][0] = u["start"]
         if ranges and u.get("end_exact"):
             ranges[-1][1] = u["end"]
+        if unchecked_cuts and not u.get("pertrack"):
+            # 放在 *_exact 覆寫之後:extend_unit_edges 只比對字元,「。」會對上
+            # 隔壁沒勾列的「呃。」(EP22 B0095→B0096),覆寫又把它塞回來
+            ranges = subtract(ranges, unchecked_cuts)
         unit_first_seg[ui] = len(segments)
         segs = [{"kind": "speech", "a": a, "b": b, "clip": u["clip"],
                  **({"titems": titems} if audio_tracks else {})}
