@@ -390,6 +390,17 @@ class TestRangeMath(unittest.TestCase):
                              max_pause=1.5, keep=0.6, words=words)
         self.assertEqual(out, [])   # 不是真停頓,放棄
 
+    def test_pause_removals_tightens_word_free_gap_inside_silence(self):
+        """EP22 0:38:RMS 靜音 38.02–40.22 尾段有小聲的「Fuji」(39.6–40.24),
+        舊版整段放棄 → 前面 1.5s 真空白收不掉。字切開的每段空隙各自收緊。"""
+        words = [w(37.84, 38.1, "Rock。"), w(39.6, 40.08, "F"),
+                 w(40.08, 40.1, "u"), w(40.1, 40.24, "ji"), w(40.24, 40.42, "Rock")]
+        out = pause_removals([[30.0, 45.0]], [{"start": 38.016, "end": 40.224}],
+                             max_pause=0.9, keep=0.6, words=words)
+        self.assertEqual(len(out), 1)
+        self.assertAlmostEqual(out[0][0], 38.15 + 0.3)
+        self.assertAlmostEqual(out[0][1], 39.55 - 0.3)
+
 
 class TestStrikeRemovals(unittest.TestCase):
     BLOCK = {"start": 1.0, "end": 3.0, "text": "第二句。"}

@@ -726,13 +726,29 @@ def pause_removals(ranges: list[list[float]], silences: list[dict],
         for s in silences:
             if not (s["start"] > a + 0.3 and s["end"] < b - 0.3):
                 continue
-            c = clamp_silence(s, words)
-            if not c:
-                continue
-            lo, hi = c
-            if hi - lo > max_pause:
-                out.append([lo + keep / 2, hi - keep / 2])
+            for lo, hi in silence_gaps(s, words):
+                if hi - lo > max_pause:
+                    out.append([lo + keep / 2, hi - keep / 2])
     return out
+
+
+def silence_gaps(s: dict, words: list[dict] | None,
+                 margin: float = 0.05) -> list[tuple[float, float]]:
+    """靜音段裡「真正沒有字」的空隙(字前後各讓 margin)。
+
+    與 clamp_silence 不同:字落在靜音中間時不整段放棄,而是被字切成幾段各自
+    回傳——EP22 0:38 的 RMS 靜音尾段夾著講得小聲的「Fuji」,整段放棄會讓前面
+    1.5s 的真空白收不掉。"""
+    cuts = sorted((w["start"] - margin, w["end"] + margin) for w in words or []
+                  if w["end"] > s["start"] and w["start"] < s["end"])
+    gaps, lo = [], s["start"]
+    for ws, we in cuts:
+        if ws > lo:
+            gaps.append((lo, min(ws, s["end"])))
+        lo = max(lo, we)
+    if s["end"] > lo:
+        gaps.append((lo, s["end"]))
+    return gaps
 
 
 def word_guard(ranges: list[list[float]], words: list[dict],
