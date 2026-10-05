@@ -19,6 +19,7 @@ const {
   formatTime,
   timelineStatus,
   findLineAtTime,
+  findLineById,
 } = require('../cutplan-core.js');
 
 const PLAN = [
@@ -105,6 +106,21 @@ test('findLineAtTime:找起點 ≤ 該時間的最後一列;集錦時間回集�
   // 負數=超出範圍(第五輪 TL-1-1 起;原本回 null 會被 UI 講成「之前沒有 block」)
   assert.equal(findLineAtTime(doc, tl, -1), require('../cutplan-core.js').OUT_OF_RANGE);
   assert.equal(findLineAtTime(doc, null, 3), null);
+});
+
+test('findLineById:用 Block ID 跳(2026-10-05 MM);大小寫、省略前導零、試聽檔名都認', () => {
+  const doc = parseCutplan(PLAN);
+  assert.equal(findLineById(doc, 'B0001'), idx('- [x] B0001'));
+  assert.equal(findLineById(doc, ' b1 '), idx('- [x] B0001'));
+  assert.equal(findLineById(doc, 'b0004'), idx('- [x] B0004'));
+  // 改動試聽檔名直接貼:取第一個 ID
+  assert.equal(findLineById(doc, 'B0002+B0003.mp3'), idx('- [ ] B0002'));
+  // 同一個 ID 在 🎬 集錦也出現:跳正片那一列(最後一個)
+  assert.equal(findLineById(doc, 'B0003'), idx('- [x] B0003', 1));
+  assert.equal(findLineById(doc, 'B0099'), null);
+  // 純數字是成品時間,不是 ID
+  assert.equal(findLineById(doc, '754'), null);
+  assert.equal(findLineById(doc, '12:34'), null);
 });
 
 function loadCodeGs(files) {
