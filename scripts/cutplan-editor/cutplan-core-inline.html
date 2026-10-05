@@ -712,6 +712,21 @@ function findLineAtTime(doc, timeline, secs) {
   return lines[lines.length - 1];
 }
 
+// 「B0059」「b59」「B0101+B0106.mp3」(改動試聽檔名直接貼)→ 那一列的 index。
+// 要有字母前綴:純數字是成品時間(findLineAtTime 的事)。同一個 ID 出現多次
+// (🎬 集錦在前、正片在後)跳最後一個=正片。找不到回 null。
+function findLineById(doc, text) {
+  const m = /^\s*([A-Za-z]{1,2})0*(\d+)/.exec(String(text == null ? '' : text));
+  if (!m) return null;
+  const want = m[1].toUpperCase() + ':' + Number(m[2]);
+  let hit = null;
+  doc.lines.forEach((l, i) => {
+    const k = l.editable && l.id && /^([A-Z]{1,2})0*(\d+)$/.exec(l.id);
+    if (k && k[1] + ':' + Number(k[2]) === want) hit = i;
+  });
+  return hit;
+}
+
 const api = {
   parseCutplan,
   parseTimeline,
@@ -719,6 +734,7 @@ const api = {
   formatTime,
   timelineStatus,
   findLineAtTime,
+  findLineById,
   OUT_OF_RANGE,
   timelineFileState,
   serializeCutplan,

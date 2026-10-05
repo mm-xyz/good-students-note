@@ -271,7 +271,7 @@
   </select>
   <form id="tlBar" autocomplete="off">
     <div id="tlInfo"></div>
-    <input id="tlInput" inputmode="decimal" placeholder="成品時間,如 12:34 或 754">
+    <input id="tlInput" autocapitalize="characters" placeholder="成品時間 12:34 或 Block ID B0059">
     <button id="tlGo" type="submit">跳到</button>
   </form>
 </header>
@@ -834,9 +834,8 @@
 
   function showTimelineBar() {
     var tl = state.timeline;
-    tlEls.bar.classList.toggle('show', !!tl || !!state.timelineBad);
-    tlEls.input.style.display = tl ? '' : 'none';
-    document.getElementById('tlGo').style.display = tl ? '' : 'none';
+    // 跳到 Block ID 不需要 timeline,輸入框一律顯示(有載入 cutplan 就有)
+    tlEls.bar.classList.toggle('show', !!state.doc);
     if (!tl) {
       tlEls.info.textContent = state.timelineBad
         ? 'cutplan.timeline.json 格式錯誤,未啟用成品時間對照' : '';
@@ -854,9 +853,29 @@
 
   tlEls.bar.addEventListener('submit', function (ev) {
     ev.preventDefault();
+    // Block ID(有字母前綴,含改動試聽的檔名)→ 直接跳那一列
+    if (/^\s*[A-Za-z]/.test(tlEls.input.value)) {
+      var li = Core.findLineById(state.doc, tlEls.input.value);
+      var idCard = li === null ? null
+        : els.blockList.querySelector('.block-card[data-line-index="' + li + '"]');
+      if (!idCard) {
+        setStatus('找不到 ' + tlEls.input.value.trim() + '(這份 cutplan 沒有這個 ID)', 'error');
+        return;
+      }
+      tlEls.input.blur();
+      idCard.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      idCard.classList.add('tl-flash');
+      setTimeout(function () { idCard.classList.remove('tl-flash'); }, 1600);
+      setStatus('→ ' + state.doc.lines[li].id, 'ok');
+      return;
+    }
     var secs = Core.parseTimeInput(tlEls.input.value);
     if (secs === null) {
-      setStatus('成品時間看不懂:' + tlEls.input.value + '(寫 12:34 或 754)', 'error');
+      setStatus('看不懂:' + tlEls.input.value + '(成品時間寫 12:34 或 754,Block ID 寫 B0059)', 'error');
+      return;
+    }
+    if (!state.timeline) {
+      setStatus('這一集還沒有 cutplan.timeline.json,只能用 Block ID 跳', 'error');
       return;
     }
     var idx = Core.findLineAtTime(state.doc, state.timeline, secs);

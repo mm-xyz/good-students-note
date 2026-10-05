@@ -349,6 +349,22 @@ class TestRangeMath(unittest.TestCase):
         out = word_guard([[1.0, 2.0]], [w(3.0, 4.0, "遠")])
         self.assertEqual(out, [[1.0, 2.0]])
 
+    def test_snap_picks_nearest_silence_and_never_inverts(self):
+        """EP22 B0013「哈囉」18.76–19.16:頭尾都落在同一段靜音(18.21–18.94)的
+        窗內,舊版兩端都 snap 到中點 18.58 → 範圍變負長度、整句消失。
+        snap 會翻轉時保留原邊界;窗內多段靜音時挑最近的那段。"""
+        silences = [{"start": 18.208, "end": 18.944},
+                    {"start": 19.424, "end": 20.032}]
+        out = snap_boundaries([[18.76, 19.16]], silences, window=0.4)
+        self.assertEqual(out, [[18.76, 19.16]])
+        # 尾端離第二段較近 → snap 到第二段中點,不是第一段
+        out = snap_boundaries([[18.0, 19.3]], silences, window=0.4)
+        self.assertAlmostEqual(out[0][1], 19.728)
+        # 只有身後一段靜音可 snap 時,不准把範圍翻轉成負長度
+        out = snap_boundaries([[18.95, 19.05]], [{"start": 18.2, "end": 18.94}],
+                              window=0.4)
+        self.assertGreater(out[0][1], out[0][0])
+
     def test_snap_boundaries_to_silence_mid(self):
         silences = [{"start": 1.0, "end": 1.4}]
         out = snap_boundaries([[0.8, 3.0]], silences, window=0.4)
@@ -373,6 +389,17 @@ class TestRangeMath(unittest.TestCase):
         out = pause_removals([[0.0, 10.0]], [{"start": 3.0, "end": 6.0}],
                              max_pause=1.5, keep=0.6, words=words)
         self.assertEqual(out, [])   # 不是真停頓,放棄
+
+    def test_pause_removals_tightens_word_free_gap_inside_silence(self):
+        """EP22 0:38:RMS 靜音 38.02–40.22 尾段有小聲的「Fuji」(39.6–40.24),
+        舊版整段放棄 → 前面 1.5s 真空白收不掉。字切開的每段空隙各自收緊。"""
+        words = [w(37.84, 38.1, "Rock。"), w(39.6, 40.08, "F"),
+                 w(40.08, 40.1, "u"), w(40.1, 40.24, "ji"), w(40.24, 40.42, "Rock")]
+        out = pause_removals([[30.0, 45.0]], [{"start": 38.016, "end": 40.224}],
+                             max_pause=0.9, keep=0.6, words=words)
+        self.assertEqual(len(out), 1)
+        self.assertAlmostEqual(out[0][0], 38.15 + 0.3)
+        self.assertAlmostEqual(out[0][1], 39.55 - 0.3)
 
 
 class TestStrikeRemovals(unittest.TestCase):
@@ -591,6 +618,109 @@ class TestDryRunE2E(unittest.TestCase):
         # B0001+B0002 併一個 unit,刪「二」切成兩段;B0003 沒勾不出現
         self.assertEqual(len(speech), 2)
 
+    def test_word_guard_does_not_pull_back_unchecked_row_words(self):
+        """#1079 第二條路:沒勾的列緊貼保留列(字連字、沒有靜音),切點被
+        snap/谷底推進它的字裡,word_guard 再推到字尾外 → 整個字被塞回去。
+        EP22 B0685→B0686/B0687(過夜段開頭「囉 就是」漏 1s)。"""
+        with tempfile.TemporaryDirectory() as td:
+            sdir = self._make_session(td)
+            cp = json.loads((sdir / "cutplan.json").read_text(encoding="utf-8"))
+            cp["blocks"][1].update(start=1.0, end=2.0)
+            (sdir / "cutplan.json").write_text(json.dumps(cp, ensure_ascii=False),
+                                               encoding="utf-8")
+            (sdir / "words.json").write_text(json.dumps([
+                w(0.0, 0.3, "第"), w(0.3, 0.6, "一"), w(0.6, 1.0, "句。"),
+                w(1.0, 1.6, "第二"), w(1.6, 2.0, "句。"),
+                w(5.0, 6.0, "剪掉段。"),
+            ], ensure_ascii=False), encoding="utf-8")
+            # 「第二」中間有一段 RMS 靜音(whisper 把停頓吃進字裡,EP22 的
+            # 「就是」1099.72–1100.50 就是這樣):snap 把切點拉進去,word_guard
+            # 再推到字尾外
+            write_wav(sdir / "audio16k.wav", 6.0,
+                      bursts=[(0.0, 1.0), (1.0, 1.2), (1.5, 2.0), (5.0, 6.0)])
+            (sdir / "prosody.json").write_text(json.dumps(
+                {"silences": [{"start": 1.2, "end": 1.5},
+                              {"start": 2.0, "end": 5.0}]}), encoding="utf-8")
+            (sdir / "cutplan.md").write_text(
+                "# Cutplan — ep-test\n\n"
+                "## ⚙ max-pause=0\n\n"
+                "- [x] B0001 [0:00–0:01] [Sarah] 第一句。\n"
+                "- [ ] B0002 [0:01–0:02] [Sarah] 第二句。\n"
+                "- [x] B0003 [0:05–0:06] [Sarah] 剪掉段。\n",
+                encoding="utf-8")
+            dump = Path(td) / "ranges.json"
+            proc = self._render(sdir, "--dump-ranges", str(dump),
+                                "--snap-window", "0.4")
+            self.assertEqual(proc.returncode, 0, proc.stderr or proc.stdout)
+            ranges = json.loads(dump.read_text(encoding="utf-8"))
+        self.assertEqual([r for r in ranges if r[0] < 1.1 < r[1] or r[0] < 1.55 < r[1]], [],
+                         f"B0002「第二」1.0–1.6s 不該在成品裡:{ranges}")
+        self.assertTrue(any(r[0] <= 0.5 <= r[1] for r in ranges), ranges)
+
+    def test_edge_extension_does_not_reach_into_unchecked_row(self):
+        """extend_unit_edges 只比對末字元:保留列以「。」結尾、隔壁沒勾列
+        「呃。」也是「。」→ 尾端延伸過去、end_exact 覆寫再塞回成品(EP22 B0096)。"""
+        with tempfile.TemporaryDirectory() as td:
+            sdir = self._make_session(td)
+            cp = json.loads((sdir / "cutplan.json").read_text(encoding="utf-8"))
+            cp["blocks"][1].update(start=1.2, end=1.6, text="嗯。")
+            (sdir / "cutplan.json").write_text(json.dumps(cp, ensure_ascii=False),
+                                               encoding="utf-8")
+            (sdir / "words.json").write_text(json.dumps([
+                w(0.0, 0.3, "第"), w(0.3, 0.6, "一"), w(0.6, 1.0, "句。"),
+                w(1.2, 1.6, "嗯。"), w(5.0, 6.0, "剪掉段。"),
+            ], ensure_ascii=False), encoding="utf-8")
+            write_wav(sdir / "audio16k.wav", 6.0,
+                      bursts=[(0.0, 1.0), (1.2, 1.6), (5.0, 6.0)])
+            (sdir / "cutplan.md").write_text(
+                "# Cutplan — ep-test\n\n"
+                "## ⚙ max-pause=0\n\n"
+                "- [x] B0001 [0:00–0:01] [Sarah] 第一句。\n"
+                "- [ ] B0002 [0:01–0:02] [Sarah] 嗯。\n"
+                "- [x] B0003 [0:05–0:06] [Sarah] 剪掉段。\n",
+                encoding="utf-8")
+            dump = Path(td) / "ranges.json"
+            proc = self._render(sdir, "--dump-ranges", str(dump))
+            self.assertEqual(proc.returncode, 0, proc.stderr or proc.stdout)
+            ranges = json.loads(dump.read_text(encoding="utf-8"))
+        self.assertEqual([r for r in ranges if r[0] < 1.4 < r[1]], [],
+                         f"B0002「嗯。」1.2–1.6s 不該在成品裡:{ranges}")
+
+    def test_unchecked_row_between_close_neighbours_is_cut(self):
+        """#1079:沒勾的 B 列夾在兩個 <2s 的保留列之間,不能被併回成品。
+        EP22 B0066/B0067(1.26s)、B0012/B0014 都是這樣漏進去的。"""
+        with tempfile.TemporaryDirectory() as td:
+            sdir = self._make_session(td)
+            md = sdir / "cutplan.md"
+            # B0001 留、B0002 剪、B0003 留;B0003 搬到 2.5s(與 B0001 結尾差 1.5s)
+            cp = json.loads((sdir / "cutplan.json").read_text(encoding="utf-8"))
+            cp["blocks"][2].update(start=2.5, end=3.5)
+            cp["gaps"] = []
+            (sdir / "cutplan.json").write_text(json.dumps(cp, ensure_ascii=False),
+                                               encoding="utf-8")
+            (sdir / "words.json").write_text(json.dumps([
+                w(0.0, 0.3, "第"), w(0.3, 0.6, "一"), w(0.6, 1.0, "句。"),
+                w(1.2, 1.4, "第"), w(1.4, 1.6, "二"), w(1.6, 2.0, "句。"),
+                w(2.5, 3.5, "剪掉段。"),
+            ], ensure_ascii=False), encoding="utf-8")
+            write_wav(sdir / "audio16k.wav", 6.0,
+                      bursts=[(0.0, 1.0), (1.2, 2.0), (2.5, 3.5)])
+            md.write_text(
+                "# Cutplan — ep-test\n\n"
+                "## ⚙ max-pause=0\n\n"
+                "- [x] B0001 [0:00–0:01] [Sarah] 第一句。\n"
+                "- [ ] B0002 [0:01–0:02] [Sarah] 第二句。\n"
+                "- [x] B0003 [0:02–0:03] [Sarah] 剪掉段。\n",
+                encoding="utf-8")
+            dump = Path(td) / "ranges.json"
+            proc = self._render(sdir, "--dump-ranges", str(dump))
+            self.assertEqual(proc.returncode, 0, proc.stderr or proc.stdout)
+            ranges = json.loads(dump.read_text(encoding="utf-8"))
+        covered = [r for r in ranges if r[0] < 1.6 < r[1]]
+        self.assertEqual(covered, [], f"B0002 中點 1.6s 不該在成品裡:{ranges}")
+        self.assertTrue(any(r[0] <= 0.5 <= r[1] for r in ranges), ranges)
+        self.assertTrue(any(r[0] <= 3.0 <= r[1] for r in ranges), ranges)
+
     def test_roomtone_follows_document_order_and_reuses_source_window(self):
         with tempfile.TemporaryDirectory() as td:
             sdir = self._make_session(td)
@@ -804,6 +934,36 @@ class TestInsertRender(TestDryRunE2E):
             one = self._render(sdir)
         self.assertEqual(one.returncode, 0, one.stderr or one.stdout)
         self.assertIn("1 個 S block", one.stdout)
+
+    def test_unchecked_s_block_between_close_neighbours_is_cut(self):
+        """#1079 的補錄版:S 列的「相鄰 <2s 併段」同樣不能吞掉中間沒勾的列。
+        時間軸推到 10s 後,避開正片 0–6s 的 --dump-ranges 區間。"""
+        with tempfile.TemporaryDirectory() as td:
+            sdir = self._make_session(td)
+            write_wav(sdir / "補錄.wav", 4.0, bursts=[(0.1, 3.9)])
+            cj = sdir / "cutplan.json"
+            data = json.loads(cj.read_text(encoding="utf-8"))
+            data["inserts"] = [{"file": "補錄.wav", "speaker": "Sarah", "blocks": [
+                {"id": f"S000{i + 1}", "start": 10.1 + i, "end": 10.9 + i,
+                 "text": f"補錄{t}句。", "speaker": "Sarah", "keep": True}
+                for i, t in enumerate("一二三")]}]
+            cj.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+            md = sdir / "cutplan.md"
+            md.write_text(md.read_text(encoding="utf-8").replace(
+                "- [x] B0002",
+                "## ➕ 補錄.wav gain=0  補錄說明\n"
+                "- [x] S0001 [0:00–0:01] [Sarah] 補錄一句。\n"
+                "- [ ] S0002 [0:01–0:02] [Sarah] 補錄二句。\n"
+                "- [x] S0003 [0:02–0:03] [Sarah] 補錄三句。\n"
+                "- [x] B0002"), encoding="utf-8")
+            dump = Path(td) / "ranges.json"
+            proc = self._render(sdir, "--dump-ranges", str(dump))
+            self.assertEqual(proc.returncode, 0, proc.stderr or proc.stdout)
+            ranges = json.loads(dump.read_text(encoding="utf-8"))
+        self.assertEqual([r for r in ranges if r[0] < 11.5 < r[1]], [],
+                         f"S0002 中點 11.5s 不該在成品裡:{ranges}")
+        self.assertTrue(any(r[0] <= 10.5 <= r[1] for r in ranges), ranges)
+        self.assertTrue(any(r[0] <= 12.5 <= r[1] for r in ranges), ranges)
 
     def test_s_block_text_tampering_fails(self):
         """補錄 block 只准改勾選與加刪除線,不准改字(同正片的防幻覺規則)。"""
