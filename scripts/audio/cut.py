@@ -34,6 +34,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from render_cut import parse_program  # noqa: E402
 from session_paths import work_dir  # noqa: E402
+import change_preview  # noqa: E402
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 DRIVE_ROOT = (Path.home() / "Library/CloudStorage"
@@ -408,12 +409,27 @@ def main() -> None:
     else:
         print(f"[cut] ⚠ render 沒產 {TIMELINE},編輯器沒有成品時間可對照")
 
+    # 改動試聽(2026-10-05 MM):跟上一版比,改到的地方一處一檔、檔名=Block ID。
+    # 附加功能,失敗只警告不擋出片
+    preview = None
+    prev = change_preview.previous_version(sdir, lvdir)
+    if prev and (lvdir / TIMELINE).exists():
+        try:
+            preview = change_preview.make(prev, lvdir, lvdir / f"{stem}.mp3")
+            print(f"[cut] ☑️ 改動試聽:{preview[1]} 個檔(跟 {prev.name} 比)"
+                  f"→ {vname}/{preview[0].name}/" if preview else
+                  f"[cut] 跟 {prev.name} 比沒有改動,不出改動試聽")
+        except Exception as e:  # noqa: BLE001
+            print(f"[cut] ⚠ 改動試聽沒做出來({e}),出片不受影響")
+
     if push:
         vdir = ddir / vname
         vdir.mkdir(parents=True, exist_ok=True)
         shutil.copy2(sdir / out, vdir / f"{stem}.mp3")
         shutil.copy2(local, vdir / Path(args.plan).name)
         (vdir / "render.txt").write_text(note, encoding="utf-8")
+        if preview:
+            shutil.copytree(preview[0], vdir / preview[0].name, dirs_exist_ok=True)
         shutil.copy2(local, drive)                     # Drive 工作版保持最新
         print(f"[cut] ☑️ Drive:{vdir.name}/(同上,含 {TIMELINE};集數根也更新)")
 
