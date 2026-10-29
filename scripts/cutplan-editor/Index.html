@@ -75,6 +75,35 @@
     color: var(--muted);
   }
   #status:empty { display: none; }
+  #diffStrip {
+    position: relative;
+    height: 26px;
+    margin-top: 8px;
+    border-radius: 6px;
+    background: var(--card-bg);
+    border: 1px solid var(--border);
+    cursor: pointer;
+    touch-action: manipulation;
+  }
+  #diffStrip i {
+    position: absolute;
+    top: 3px;
+    bottom: 3px;
+    width: 3px;
+    margin-left: -1px;
+    border-radius: 2px;
+    background: var(--danger);
+    pointer-events: none;
+  }
+  #diffStrip i.cur { width: 5px; background: var(--accent); }
+  #diffStrip span {
+    position: absolute;
+    right: 6px;
+    top: 4px;
+    font-size: 11px;
+    color: var(--muted);
+    pointer-events: none;
+  }
   #lastEditBtn {
     margin-top: 8px;
     font-size: 14px;
@@ -288,6 +317,7 @@
     <input id="tlInput" autocapitalize="characters" placeholder="成品時間 12:34 或 Block ID B0059">
     <button id="tlGo" type="submit">跳到</button>
   </form>
+  <div id="diffStrip" hidden title="紅色=勾選跟最新成品不一致(還沒 apply),點一下跳過去"></div>
   <div id="status"></div>
 </header>
 
@@ -486,6 +516,12 @@
   // 有測試守著;放這裡的話新增標記時沒有任何東西會叫。
 
   function render() {
+    renderBlocks();
+    showTimelineBar();   // 編輯後不一致的列數、橫軸都要跟著更新
+    renderDiffStrip();
+  }
+
+  function renderBlocks() {
     els.blockList.innerHTML = '';
     if (!state.doc) return;
     var shown = 0;
@@ -923,6 +959,49 @@
     info: document.getElementById('tlInfo'),
     input: document.getElementById('tlInput'),
   };
+
+  // ── 橫軸:目前 cutplan 跟最新成品(timeline)還沒 apply 的列 ─────────────
+  // 橫向位置 = 該列在文件裡的相對位置;紅線 = 勾選跟成品不一致。點橫軸任一處
+  // 跳到最近的一條紅線。刪除線(字級)timeline 沒記,所以不會出現在這裡。
+  var diffMarks = [];   // [{ idx, pct }]
+  function jumpToLine(li) {
+    var card = els.blockList.querySelector('[data-line-index="' + li + '"]');
+    if (!card) return false;
+    card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    card.classList.add('tl-flash');
+    setTimeout(function () { card.classList.remove('tl-flash'); }, 1600);
+    return true;
+  }
+  function renderDiffStrip() {
+    var strip = document.getElementById('diffStrip');
+    diffMarks = [];
+    strip.innerHTML = '';
+    if (!state.doc || !state.timeline) { strip.hidden = true; return; }
+    var n = state.doc.lines.length;
+    state.doc.lines.forEach(function (l, idx) {
+      var st = Core.timelineStatus(l, state.timeline);
+      if (st && st.mismatch) diffMarks.push({ idx: idx, pct: n > 1 ? idx / (n - 1) * 100 : 0 });
+    });
+    strip.hidden = false;
+    diffMarks.forEach(function (m) {
+      var t = document.createElement('i');
+      t.style.left = m.pct + '%';
+      strip.appendChild(t);
+    });
+    var lab = document.createElement('span');
+    lab.textContent = diffMarks.length ? diffMarks.length + ' 處未 apply' : '全部已 apply';
+    strip.appendChild(lab);
+  }
+  document.getElementById('diffStrip').addEventListener('click', function (ev) {
+    if (!diffMarks.length) return;
+    var r = this.getBoundingClientRect();
+    var pct = (ev.clientX - r.left) / r.width * 100, best = diffMarks[0];
+    diffMarks.forEach(function (m) {
+      if (Math.abs(m.pct - pct) < Math.abs(best.pct - pct)) best = m;
+    });
+    var id = state.doc.lines[best.idx].id;
+    if (jumpToLine(best.idx)) setStatus('未 apply → ' + id, 'ok');
+  });
 
   function showTimelineBar() {
     var tl = state.timeline;
