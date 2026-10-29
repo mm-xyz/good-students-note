@@ -229,3 +229,16 @@ test('TL-2-2 timelineFileState:沒檔 absent;空白/壞掉 bad;合格 ok', () =>
   assert.equal(timelineFileState('{nope'), 'bad');
   assert.equal(timelineFileState(TL), 'ok');
 });
+
+test('timelineStatus:P 停頓列勾或不勾成品都有(只差收緊),不算「與成品不一致」', () => {
+  const core = require('../cutplan-core.js');
+  const doc = core.parseCutplan(
+    '- [ ] P0010 [3:02–3:03] ⏸ 停頓 0.9s（不勾＝收緊到 0.6s，勾＝原長保留）\n'
+    + '- [ ] B0001 [0:00–0:02] [A] 你好\n');
+  const tl = core.parseTimeline(JSON.stringify({
+    version: 'v7_x', generated_at: '2026-10-30T00:00:00', plan: 'cutplan.md',
+    final_duration_secs: 10, blocks: { P0010: [1.0], B0001: [2.0] },
+  }));
+  assert.equal(core.timelineStatus(doc.lines[0], tl), null);
+  assert.equal(core.timelineStatus(doc.lines[1], tl).mismatch, true);
+});

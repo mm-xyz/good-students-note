@@ -452,6 +452,38 @@ function insertRoomtone(doc, lineIndex, seconds) {
   return { ...doc, lines };
 }
 
+// ── 音樂版本(`## ⚙ … template=<節目>_vN`)───────────────────────────────
+//
+// 樣板名尾巴的 _vN 決定 opening/break/ending 用 branding-kit 的哪一組音樂
+// (show-kit/v1、v2)。編輯器只開這一個口:在 ⚙ 行把 _vN 換成另一個版本;
+// 行裡其他任何東西(旋鈕、其他 key)仍唯讀,護欄比對時只忽略這一個數字。
+const TEMPLATE_VER_RE = /(template=\S*?_v)(\d+)/;
+const TEMPLATE_VERSIONS = ['1', '2'];
+
+function findTemplateLine(doc) {
+  for (let i = 0; i < doc.lines.length; i++) {
+    const l = doc.lines[i];
+    if (!l.editable && /^##\s*⚙/.test(l.raw || '') && TEMPLATE_VER_RE.test(l.raw)) return i;
+  }
+  return -1;
+}
+
+function getTemplateVersion(doc) {
+  const i = findTemplateLine(doc);
+  return i < 0 ? null : TEMPLATE_VER_RE.exec(doc.lines[i].raw)[2];
+}
+
+function setTemplateVersion(doc, version) {
+  if (!TEMPLATE_VERSIONS.includes(String(version))) {
+    throw new Error(`cutplan-core: setTemplateVersion — 版本只能是 ${TEMPLATE_VERSIONS.join('/')},拿到「${version}」`);
+  }
+  const i = findTemplateLine(doc);
+  if (i < 0) throw new Error('cutplan-core: setTemplateVersion — 這份 cutplan 沒有 `## ⚙ … template=…_vN`');
+  const lines = doc.lines.slice();
+  lines[i] = { ...lines[i], raw: lines[i].raw.replace(TEMPLATE_VER_RE, `$1${version}`) };
+  return { ...doc, lines };
+}
+
 // ── 插入間奏(`## 🎵 break`)——編輯器第二個、也是最後一個可增刪的結構行 ──
 //
 // 只認「整行就是 `## 🎵 break`」:參數(fadein/fadeout/end=…)一律取
@@ -621,7 +653,11 @@ function findIllegalEdit(oldContent, newContent) {
       return `第 ${n} 行的可編輯性改變了(唯讀 ↔ 可編輯)`;
     }
     if (!a.editable) {
-      if (a.raw !== b.raw || a.term !== b.term) {
+      const sameRaw = a.raw === b.raw || (
+        TEMPLATE_VER_RE.test(a.raw) && TEMPLATE_VER_RE.test(b.raw)
+        && a.raw.replace(TEMPLATE_VER_RE, '$1#') === b.raw.replace(TEMPLATE_VER_RE, '$1#')
+        && TEMPLATE_VERSIONS.includes(TEMPLATE_VER_RE.exec(b.raw)[2]));
+      if (!sameRaw || a.term !== b.term) {
         return `第 ${n} 行是唯讀行,但內容被改動了`;
       }
       continue;
@@ -732,6 +768,9 @@ function formatTime(secs) {
 // 卡片上的小字與不一致判定;timeline 沒有這一列(或沒有 timeline)回 null。
 function timelineStatus(line, timeline) {
   if (!timeline || !line || !line.editable) return null;
+  // P 停頓列:不勾=收緊、勾=原長保留,兩種狀態成品裡都有,只差長度——不是「剪掉/留下」
+  // 的二元決定,比對有沒有出現沒有意義(EP22 v7 的 32 筆假「未 apply」都是它)。
+  if (/^P\d/.test(line.id)) return null;
   if (!Object.prototype.hasOwnProperty.call(timeline.blocks, line.id)) return null;
   const times = timeline.blocks[line.id];
   const present = Array.isArray(times) && times.length > 0;
@@ -818,6 +857,9 @@ const api = {
   ROOMTONE_SECONDS,
   isRoomtoneLine,
   isBreakLine,
+  getTemplateVersion,
+  setTemplateVersion,
+  TEMPLATE_VERSIONS,
   insertBreak,
   removeBreak,
   insertBreakWithHistory,

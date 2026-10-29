@@ -264,3 +264,19 @@ test('護欄:帶參數的 break、opening、ending 仍唯讀;插間奏同時改�
   assert.match(findIllegalEdit(PLAN, ins('## 🎵 ending')) || '', /行數/);
   assert.match(findIllegalEdit(PLAN, ins('## 🎵 break').replace('大家好我是', '大家好我們是')) || '', /逐字稿文字/);
 });
+
+// ── 音樂版本(## ⚙ template=…_vN)──────────────────────────────────────
+
+test('音樂版本:v1→v2 只改那一個數字,護欄放行;改其他旋鈕/不明版本照拒', () => {
+  const plan = PLAN.replace('template=x ', 'template=水星貓_v1 ');
+  const doc = parseCutplan(plan);
+  assert.equal(core.getTemplateVersion(doc), '1');
+  const v2 = core.setTemplateVersion(doc, '2');
+  assert.equal(core.getTemplateVersion(v2), '2');
+  assert.equal(findIllegalEdit(plan, serializeCutplan(v2)), null);
+  assert.equal(serializeCutplan(core.setTemplateVersion(v2, '1')), plan);
+  assert.throws(() => core.setTemplateVersion(doc, '3'), /只能是/);
+  assert.match(findIllegalEdit(plan, plan.replace('audio=tracks', 'audio=mixdown')) || '', /唯讀/);
+  assert.match(findIllegalEdit(plan, plan.replace('_v1', '_v3')) || '', /唯讀/);
+  assert.match(findIllegalEdit(plan, plan.replace('template=水星貓_v1', 'template=別的_v2')) || '', /唯讀/);
+});

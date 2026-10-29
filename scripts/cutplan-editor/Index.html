@@ -104,6 +104,24 @@
     color: var(--muted);
     pointer-events: none;
   }
+  #player { margin-top: 8px; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  #player[hidden] { display: none; }
+  #pickAudio {
+    font-size: 14px; padding: 8px 12px; border-radius: 8px; cursor: pointer;
+    border: 1px solid var(--border); background: var(--card-bg); color: var(--fg);
+  }
+  #pickAudio input { display: none; }
+  #musicWrap { font-size: 13px; color: var(--muted); display: flex; gap: 4px; align-items: center; }
+  #musicWrap select { width: auto; font-size: 14px; padding: 4px 6px; }
+  #followWrap { font-size: 13px; color: var(--muted); display: flex; gap: 4px; align-items: center; }
+  #playInfo { font-size: 12px; color: var(--accent); flex: 1; min-width: 0; }
+  #audio { width: 100%; height: 36px; }
+  #audio[hidden] { display: none; }
+  #diffStrip b {
+    position: absolute; top: 0; bottom: 0; width: 2px; margin-left: -1px;
+    background: var(--accent); pointer-events: none; display: none;
+  }
+  .block-card.playing { outline: 2px solid var(--accent); outline-offset: 1px; }
   #lastEditBtn {
     margin-top: 8px;
     font-size: 14px;
@@ -318,6 +336,13 @@
     <button id="tlGo" type="submit">跳到</button>
   </form>
   <div id="diffStrip" hidden title="紅色=勾選跟最新成品不一致(還沒 apply),點一下跳過去"></div>
+  <div id="player" hidden>
+    <label id="pickAudio">載入成品音檔<input id="audioFile" type="file" accept="audio/*,.mp3,.m4a,.wav"></label>
+    <label id="musicWrap">音樂版本 <select id="musicVer"><option value="1">v1</option><option value="2">v2</option></select></label>
+    <label id="followWrap"><input id="follow" type="checkbox" checked>自動捲動</label>
+    <span id="playInfo"></span>
+    <audio id="audio" controls preload="metadata" hidden></audio>
+  </div>
   <div id="status"></div>
 </header>
 
@@ -365,7 +390,7 @@
   }
 
   var AUTOSAVE_MS = 3000;   // 最後一次編輯後等這麼久才自動存
-  var SAVE_TIMEOUT_MS = 30000;
+  var SAVE_TIMEOUT_MS = 20000;
   var rev = 0;              // 每次編輯 +1;存檔回來時用來判斷「存的途中又改了」
   var saving = false;
   var autoTimer = null;
@@ -997,6 +1022,78 @@
     input: document.getElementById('tlInput'),
   };
 
+  // ── 網頁內播放:成品音檔 + 橫軸播放頭 + 自動捲動 ───────────────────────
+  // 音檔由使用者從裝置選(不經 Apps Script 傳 60MB);成品時間 → 哪一張卡
+  // 用的是 timeline 對照(Core.findLineAtTime),所以必須載入跟 timeline 同一版的成品。
+  var musicSel = document.getElementById('musicVer');
+  function refreshMusicVer() {
+    var v = state.doc ? Core.getTemplateVersion(state.doc) : null;
+    musicSel.parentNode.hidden = v === null;
+    if (v !== null) musicSel.value = v;
+  }
+  musicSel.addEventListener('change', function () {
+    state.doc = Core.setTemplateVersion(state.doc, musicSel.value);
+    setDirty(true);
+    setStatus('音樂改用 v' + musicSel.value + '(opening / break / ending),下次出片生效', 'ok');
+  });
+  var playerRow = document.getElementById('player');
+  var audio = document.getElementById('audio');
+  var playInfo = document.getElementById('playInfo');
+  var playhead = document.createElement('b');
+  var playingLine = null;
+  var followPausedUntil = 0;
+  var audioUrl = null;
+  function pauseFollow() { followPausedUntil = Date.now() + 5000; }   // 手動滑動後 5 秒不搶畫面
+  window.addEventListener('wheel', pauseFollow, { passive: true });
+  window.addEventListener('touchmove', pauseFollow, { passive: true });
+  function clearPlaying() {
+    var old = els.blockList.querySelector('.block-card.playing');
+    if (old) old.classList.remove('playing');
+    playingLine = null;
+    playhead.style.display = 'none';
+  }
+  document.getElementById('audioFile').addEventListener('change', function () {
+    var f = this.files && this.files[0];
+    if (!f) return;
+    if (audioUrl) URL.revokeObjectURL(audioUrl);
+    audioUrl = URL.createObjectURL(f);
+    audio.src = audioUrl;
+    audio.hidden = false;
+    clearPlaying();
+    var vs = state.timeline && state.timeline.versionShort;
+    if (vs && f.name.indexOf(vs) === -1) {
+      setStatus('注意:檔名沒有「' + vs + '」,跟對照的成品版本可能不同,橫軸跟捲動會對不上', 'error');
+    } else {
+      setStatus('已載入 ' + f.name, 'ok');
+    }
+  });
+  audio.addEventListener('error', function () {
+    setStatus('音檔無法播放(格式不支援或檔案太大),可改選 mp3', 'error');
+  });
+  audio.addEventListener('timeupdate', function () {
+    if (!state.doc || !state.timeline) return;
+    var t = audio.currentTime;
+    var li = Core.findLineAtTime(state.doc, state.timeline, t);
+    if (typeof li !== 'number') { playInfo.textContent = Core.formatTime(t); return; }
+    var n = state.doc.lines.length;
+    playhead.style.display = 'block';
+    playhead.style.left = (n > 1 ? li / (n - 1) * 100 : 0) + '%';
+    playInfo.textContent = Core.formatTime(t) + ' → ' + (state.doc.lines[li].id || '');
+    if (li === playingLine) return;
+    clearPlayingCard();
+    playingLine = li;
+    var card = els.blockList.querySelector('[data-line-index="' + li + '"]');
+    if (!card) return;
+    card.classList.add('playing');
+    if (document.getElementById('follow').checked && Date.now() > followPausedUntil) {
+      card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
+  });
+  function clearPlayingCard() {
+    var old = els.blockList.querySelector('.block-card.playing');
+    if (old) old.classList.remove('playing');
+  }
+
   // ── 橫軸:目前 cutplan 跟最新成品(timeline)還沒 apply 的列 ─────────────
   // 橫向位置 = 該列在文件裡的相對位置;紅線 = 勾選跟成品不一致。點橫軸任一處
   // 跳到最近的一條紅線。刪除線(字級)timeline 沒記,所以不會出現在這裡。
@@ -1013,6 +1110,8 @@
     var strip = document.getElementById('diffStrip');
     diffMarks = [];
     strip.innerHTML = '';
+    refreshMusicVer();
+    playerRow.hidden = !(state.doc && (state.timeline || Core.getTemplateVersion(state.doc) !== null));
     if (!state.doc || !state.timeline) { strip.hidden = true; return; }
     var n = state.doc.lines.length;
     state.doc.lines.forEach(function (l, idx) {
@@ -1020,6 +1119,7 @@
       if (st && st.mismatch) diffMarks.push({ idx: idx, pct: n > 1 ? idx / (n - 1) * 100 : 0 });
     });
     strip.hidden = false;
+    strip.appendChild(playhead);
     diffMarks.forEach(function (m) {
       var t = document.createElement('i');
       t.style.left = m.pct + '%';
@@ -1110,47 +1210,65 @@
 
   // ── 儲存 ──────────────────────────────────────────────────────────────
 
+  var SAVE_RETRIES = 3;
   function doSave(auto) {
     clearTimeout(autoTimer);
     if (!state.doc || !state.fileId || !state.dirty || saving) return;
     saving = true;
     els.saveBtn.disabled = true;
-    setSaveMsg(auto ? '自動儲存中…' : '儲存中…');
     var content = Core.serializeCutplan(state.doc);
     var savedRev = rev;
-    var done = false;
-    var timer = setTimeout(function () {
-      if (done) return;
-      done = true; saving = false;
+
+    function finishFail(msg) {
+      saving = false;
       els.saveBtn.disabled = false;
-      setSaveMsg('儲存沒有回應(超過 30 秒),編輯還在頁面上', 'error');
-      saveCopyFallback(content, '儲存沒有回應');
-    }, SAVE_TIMEOUT_MS);
-    google.script.run
-      .withSuccessHandler(function () {
-        if (done) return;
-        done = true; clearTimeout(timer); saving = false;
-        state.history = Core.createHistory(); // 已落地就不需要再回頭復原
-        hideUndoFloat();
-        if (rev === savedRev) {
-          setDirty(false);
-          setSaveMsg('已儲存 ✓ ' + new Date().toLocaleTimeString('zh-TW', { hour12: false }), 'ok');
+      setSaveMsg(msg, 'error');
+      saveCopyFallback(content, msg);
+      // 不重排 autosave:等下一次編輯或手動按
+    }
+
+    // attempt 從 0 起算;網路/逾時錯誤最多重試 SAVE_RETRIES 次,
+    // 護欄拒絕(「儲存被拒絕」)重試只會一直失敗,直接進另存副本。
+    function attempt(k) {
+      setSaveMsg((auto ? '自動儲存中…' : '儲存中…') + (k ? '(重試 ' + k + '/' + SAVE_RETRIES + ')' : ''));
+      var done = false;
+      function retryOrFail(msg, rejected) {
+        if (!rejected && k < SAVE_RETRIES) {
+          setSaveMsg(msg + ',' + (k + 1) + ' 秒後重試 ' + (k + 1) + '/' + SAVE_RETRIES, 'error');
+          setTimeout(function () { attempt(k + 1); }, (k + 1) * 1000);
         } else {
-          els.saveBtn.disabled = false;   // 存的途中又改了:下一輪 autosave 會接手
-          setSaveMsg('已儲存一部分,繼續編輯中…', 'ok');
-          autoTimer = setTimeout(function () { doSave(true); }, AUTOSAVE_MS);
+          finishFail(msg + (rejected ? '' : '(已重試 ' + SAVE_RETRIES + ' 次)'));
         }
-      })
-      .withFailureHandler(function (err) {
+      }
+      var timer = setTimeout(function () {
         if (done) return;
-        done = true; clearTimeout(timer); saving = false;
-        els.saveBtn.disabled = false;
-        var why = '儲存失敗:' + (err && err.message ? err.message : err);
-        setSaveMsg(why, 'error');
-        saveCopyFallback(content, why);
-        // 不重排 autosave:被護欄拒絕時重試只會一直失敗,等下一次編輯或手動按
-      })
-      .saveCutplan(state.fileId, content);
+        done = true;
+        retryOrFail('儲存沒有回應(超過 ' + (SAVE_TIMEOUT_MS / 1000) + ' 秒)', false);
+      }, SAVE_TIMEOUT_MS);
+      google.script.run
+        .withSuccessHandler(function () {
+          if (done) return;
+          done = true; clearTimeout(timer); saving = false;
+          state.history = Core.createHistory(); // 已落地就不需要再回頭復原
+          hideUndoFloat();
+          if (rev === savedRev) {
+            setDirty(false);
+            setSaveMsg('已儲存 ✓ ' + new Date().toLocaleTimeString('zh-TW', { hour12: false }), 'ok');
+          } else {
+            els.saveBtn.disabled = false;   // 存的途中又改了:下一輪 autosave 會接手
+            setSaveMsg('已儲存一部分,繼續編輯中…', 'ok');
+            autoTimer = setTimeout(function () { doSave(true); }, AUTOSAVE_MS);
+          }
+        })
+        .withFailureHandler(function (err) {
+          if (done) return;
+          done = true; clearTimeout(timer);
+          var m = err && err.message ? err.message : String(err);
+          retryOrFail('儲存失敗:' + m, m.indexOf('儲存被拒絕') !== -1);
+        })
+        .saveCutplan(state.fileId, content);
+    }
+    attempt(0);
   }
 
   els.saveBtn.addEventListener('click', function () { doSave(false); });
