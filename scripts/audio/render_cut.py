@@ -1260,7 +1260,7 @@ def run_ffmpeg(src: Path, segments: list[dict], musics: list[dict], out: Path,
     cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(src)]
     for mp in music_paths:
         cmd += ["-i", str(mp)]
-    cmd += ["-filter_complex_script", str(script), "-map", "[out]", *codec, str(out)]
+    cmd += ["-/filter_complex", str(script), "-map", "[out]", *codec, str(out)]
     print(f"[render] ffmpeg {n} 段語音/靜音 + {len(musics)} 首疊接音樂 → {out.name}")
     subprocess.run(cmd, check=True)
     script.unlink()
