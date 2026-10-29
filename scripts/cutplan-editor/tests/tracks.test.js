@@ -222,3 +222,19 @@ test('Code.gs saveCopy:同資料夾建 cutplan_YYMMDDHHmmss.md,內容原樣', ()
   assert.deepEqual(made, [{ n: 'cutplan_261030001530.md', c: 'EDITED', m: 'text/plain' }]);
   assert.throws(() => ctx.saveCopy('id', ''), /空的/);
 });
+
+// ── 留白行(## 🔇)是護欄唯一放行的增刪:編輯器有按鈕可插,伺服端不能拒絕 ──
+
+test('護欄:插入/刪除 ## 🔇 留白行 → 放行;其他行數變動照舊拒絕', () => {
+  const lines = PLAN.split('\n');
+  const at = lines.findIndex((l) => l.startsWith('- [x] B0001'));
+  const withRt = lines.slice(0, at + 1).concat('## 🔇 0.5  留白', lines.slice(at + 1)).join('\n');
+  assert.equal(findIllegalEdit(PLAN, withRt), null);
+  assert.equal(findIllegalEdit(withRt, PLAN), null);
+  // 留白行以外的增行仍然拒絕
+  const other = lines.slice(0, at + 1).concat('## ✂ 0:01-0:02', lines.slice(at + 1)).join('\n');
+  assert.match(findIllegalEdit(PLAN, other) || '', /行數/);
+  // 插留白的同時偷改文字,仍然抓得到
+  const sneaky = withRt.replace('大家好我是', '大家好我們是');
+  assert.match(findIllegalEdit(PLAN, sneaky) || '', /逐字稿文字/);
+});

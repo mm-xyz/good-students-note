@@ -546,8 +546,14 @@ function trackSkeleton(tracksRaw) {
 }
 
 function findIllegalEdit(oldContent, newContent) {
-  const oldDoc = parseCutplan(oldContent);
-  const newDoc = parseCutplan(newContent);
+  // 留白行(## 🔇)是編輯器唯一能增刪的結構行(「＋ 之後留白」按鈕),比對前兩邊
+  // 都拿掉;其餘行照原規則逐行比。拿掉後的行數不同,代表動了別的結構行。
+  const dropRoomtone = (doc) => ({
+    ...doc,
+    lines: doc.lines.filter((_, i) => !isRoomtoneLine(doc, i)),
+  });
+  const oldDoc = dropRoomtone(parseCutplan(oldContent));
+  const newDoc = dropRoomtone(parseCutplan(newContent));
   if (oldDoc.lines.length !== newDoc.lines.length) {
     return `行數不一致(${oldDoc.lines.length} → ${newDoc.lines.length})`;
   }
