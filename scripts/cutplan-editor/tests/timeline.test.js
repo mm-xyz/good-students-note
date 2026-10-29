@@ -242,3 +242,16 @@ test('timelineStatus:P 停頓列勾或不勾成品都有(只差收緊),不算「
   assert.equal(core.timelineStatus(doc.lines[0], tl), null);
   assert.equal(core.timelineStatus(doc.lines[1], tl).mismatch, true);
 });
+
+test('timelineStatus:勾選但整句有刪除線(部分保留)→ 成品起點不在也不算不一致', () => {
+  const core = require('../cutplan-core.js');
+  const doc = core.parseCutplan(
+    '- [x] B0030 [0:56–0:58] [A] ~~然後他們~~都住在那邊,\n'
+    + '- [x] B0031 [0:58–0:59] [A] 沒刪除線的整句\n');
+  const tl = core.parseTimeline(JSON.stringify({
+    version: 'v7_x', generated_at: '2026-10-30T00:00:00', plan: 'cutplan.md',
+    final_duration_secs: 10, blocks: { B0030: null, B0031: null },
+  }));
+  assert.equal(core.timelineStatus(doc.lines[0], tl).mismatch, false);
+  assert.equal(core.timelineStatus(doc.lines[1], tl).mismatch, true);
+});

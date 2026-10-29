@@ -780,7 +780,9 @@ function timelineStatus(line, timeline) {
     label: present
       ? `▶ ${timeline.versionShort} ${times.map(formatTime).join(' · ')}`
       : `${timeline.versionShort} 未出現`,
-    mismatch: checked !== present,
+    // 勾選但帶刪除線:只剪掉一部分字、其餘仍在成品,但 timeline 只記區塊起點,
+    // 起點被劃掉就會記成「沒出現」——不算不一致。
+    mismatch: checked !== present && !(checked && !present && /~~/.test(line.bodyRaw || '')),
   };
 }
 
