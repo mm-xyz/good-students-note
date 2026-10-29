@@ -404,7 +404,7 @@ function undo(doc, history) {
 
 // ── 室噪留白(`## 🔇`)──────────────────────────────────────────────────
 //
-// **這是編輯器裡唯一可新增／可刪除的結構行**,其餘結構行(⚙ ✂ 🎵 ➕ 🎬)維持
+// **這是編輯器裡可新增／可刪除的兩種結構行之一**(另一種是 `## 🎵 break`,見 insertBreak),其餘結構行(⚙ ✂ 🎵 opening/ending ➕ 🎬)維持
 // 完全唯讀。這是刻意開的一個口,不是放寬整體護欄 —— 開它的理由:「哪裡該留白」
 // 只有人審聽得出來,而且既然人可以插,就必須看得到、也刪得掉,否則在手機上插錯
 // 沒有退路。要再開第二個口請先想清楚同樣的兩個條件成不成立。
@@ -450,6 +450,59 @@ function insertRoomtone(doc, lineIndex, seconds) {
     term: anchor.term ? anchor.term : '',
   });
   return { ...doc, lines };
+}
+
+// ── 插入間奏(`## 🎵 break`)——編輯器第二個、也是最後一個可增刪的結構行 ──
+//
+// 只認「整行就是 `## 🎵 break`」:參數(fadein/fadeout/end=…)一律取
+// `## ⚙ template=` 的樣板(ADR-2026-09-10-cutplan-template),所以編輯器不需要
+// 任何自由輸入,插入後也看得到、刪得掉。帶參數的 break 行、opening、ending
+// 仍是唯讀,護欄照舊逐行比。
+const BREAK_LINE_RE = /^##\s*🎵\s+break\s*$/;
+
+function isBreakLine(doc, lineIndex) {
+  const line = doc.lines[lineIndex];
+  return !!(line && !line.editable && BREAK_LINE_RE.test(line.raw || ''));
+}
+
+function insertBreak(doc, lineIndex) {
+  requireEditableLine(doc, lineIndex, 'insertBreak');
+  const term = dominantTerm(doc);
+  const anchor = doc.lines[lineIndex];
+  const lines = doc.lines.slice();
+  if (!anchor.term) lines[lineIndex] = { ...anchor, term };
+  lines.splice(lineIndex + 1, 0, {
+    editable: false,
+    raw: '## 🎵 break',
+    term: anchor.term ? anchor.term : '',
+  });
+  return { ...doc, lines };
+}
+
+function removeBreak(doc, lineIndex) {
+  if (!isBreakLine(doc, lineIndex)) {
+    throw new Error(
+      `cutplan-core: removeBreak — 第 ${lineIndex} 行不是單獨一行的 \`## 🎵 break\`,` +
+      '只有它可以在編輯器裡刪除',
+    );
+  }
+  const lines = doc.lines.slice();
+  lines.splice(lineIndex, 1);
+  return { ...doc, lines };
+}
+
+function insertBreakWithHistory(doc, history, lineIndex) {
+  return {
+    doc: insertBreak(doc, lineIndex),
+    history: pushHistory(history, { doc, lineIndex, start: 0, end: 0 }),
+  };
+}
+
+function removeBreakWithHistory(doc, history, lineIndex) {
+  return {
+    doc: removeBreak(doc, lineIndex),
+    history: pushHistory(history, { doc, lineIndex, start: 0, end: 0 }),
+  };
 }
 
 function removeRoomtone(doc, lineIndex) {
@@ -547,14 +600,15 @@ function trackSkeleton(tracksRaw) {
 }
 
 function findIllegalEdit(oldContent, newContent) {
-  // 留白行(## 🔇)是編輯器唯一能增刪的結構行(「＋ 之後留白」按鈕),比對前兩邊
-  // 都拿掉;其餘行照原規則逐行比。拿掉後的行數不同,代表動了別的結構行。
-  const dropRoomtone = (doc) => ({
+  // 留白行(## 🔇)與單獨一行的間奏(## 🎵 break)是編輯器僅有的兩種可增刪結構行
+  // (「＋ 之後留白」「＋ 之後插間奏」),比對前兩邊都拿掉;其餘行照原規則逐行比。
+  // 拿掉後的行數不同,代表動了別的結構行。
+  const dropEditorLines = (doc) => ({
     ...doc,
-    lines: doc.lines.filter((_, i) => !isRoomtoneLine(doc, i)),
+    lines: doc.lines.filter((_, i) => !isRoomtoneLine(doc, i) && !isBreakLine(doc, i)),
   });
-  const oldDoc = dropRoomtone(parseCutplan(oldContent));
-  const newDoc = dropRoomtone(parseCutplan(newContent));
+  const oldDoc = dropEditorLines(parseCutplan(oldContent));
+  const newDoc = dropEditorLines(parseCutplan(newContent));
   if (oldDoc.lines.length !== newDoc.lines.length) {
     return `行數不一致(${oldDoc.lines.length} → ${newDoc.lines.length})`;
   }
@@ -763,6 +817,11 @@ const api = {
   isChapterDivider,
   ROOMTONE_SECONDS,
   isRoomtoneLine,
+  isBreakLine,
+  insertBreak,
+  removeBreak,
+  insertBreakWithHistory,
+  removeBreakWithHistory,
   insertRoomtone,
   removeRoomtone,
   insertRoomtoneWithHistory,

@@ -535,6 +535,10 @@
         els.blockList.appendChild(renderRoomtoneRow(line, idx));
         return;
       }
+      if (Core.isBreakLine(state.doc, idx)) {
+        els.blockList.appendChild(renderBreakRow(idx));
+        return;
+      }
       var chapterTitle = Core.isChapterDivider(line.raw);
       if (chapterTitle) {
         var div = document.createElement('div');
@@ -662,10 +666,43 @@
       });
       add.appendChild(b);
     });
+    var brk = document.createElement('button');
+    brk.type = 'button';
+    brk.textContent = '＋ 之後插間奏';
+    brk.addEventListener('click', function () {
+      var r = Core.insertBreakWithHistory(state.doc, state.history, idx);
+      state.doc = r.doc;
+      state.history = r.history;
+      setDirty(true);
+      render();
+    });
+    add.appendChild(brk);
     main.appendChild(add);
 
     card.appendChild(main);
     return card;
+  }
+
+  function renderBreakRow(idx) {
+    var row = document.createElement('div');
+    row.className = 'roomtone-row';
+    row.dataset.lineIndex = String(idx);
+    var label = document.createElement('span');
+    label.className = 'grow';
+    label.textContent = '🎵 間奏';
+    row.appendChild(label);
+    var del = document.createElement('button');
+    del.type = 'button';
+    del.textContent = '刪除';
+    del.addEventListener('click', function () {
+      var r = Core.removeBreakWithHistory(state.doc, state.history, idx);
+      state.doc = r.doc;
+      state.history = r.history;
+      setDirty(true);
+      render();
+    });
+    row.appendChild(del);
+    return row;
   }
 
   // `## 🔇` 要**顯示**出來(其他結構行不顯示)——既然人可以插,就必須看得到、

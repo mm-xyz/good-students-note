@@ -238,3 +238,29 @@ test('護欄:插入/刪除 ## 🔇 留白行 → 放行;其他行數變動照舊
   const sneaky = withRt.replace('大家好我是', '大家好我們是');
   assert.match(findIllegalEdit(PLAN, sneaky) || '', /逐字稿文字/);
 });
+
+// ── 插入間奏(## 🎵 break)──────────────────────────────────────────────
+
+test('insertBreak / removeBreak:插在錨點之後,可復原,護欄放行', () => {
+  const { insertBreak, removeBreak, isBreakLine } = core;
+  const doc = parseCutplan(PLAN);
+  const at = idxOf(PLAN, '- [x] B0001');
+  const next = insertBreak(doc, at);
+  assert.equal(next.lines[at + 1].raw, '## 🎵 break');
+  assert.ok(isBreakLine(next, at + 1));
+  assert.equal(findIllegalEdit(PLAN, serializeCutplan(next)), null);
+  assert.equal(serializeCutplan(removeBreak(next, at + 1)), PLAN);
+  assert.throws(() => removeBreak(doc, at), /不是單獨一行/);
+  const h = core.insertBreakWithHistory(doc, createHistory(), at);
+  assert.equal(serializeCutplan(undo(h.doc, h.history).doc), PLAN);
+});
+
+test('護欄:帶參數的 break、opening、ending 仍唯讀;插間奏同時改字照抓', () => {
+  const lines = PLAN.split('\n');
+  const at = lines.findIndex((l) => l.startsWith('- [x] B0001'));
+  const ins = (row) => lines.slice(0, at + 1).concat(row, lines.slice(at + 1)).join('\n');
+  assert.match(findIllegalEdit(PLAN, ins('## 🎵 break end=20')) || '', /行數/);
+  assert.match(findIllegalEdit(PLAN, ins('## 🎵 opening')) || '', /行數/);
+  assert.match(findIllegalEdit(PLAN, ins('## 🎵 ending')) || '', /行數/);
+  assert.match(findIllegalEdit(PLAN, ins('## 🎵 break').replace('大家好我是', '大家好我們是')) || '', /逐字稿文字/);
+});
