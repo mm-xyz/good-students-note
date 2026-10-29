@@ -149,3 +149,22 @@ function saveCutplan(fileId, content) {
   file.setContent(content);
   return { ok: true, savedAt: new Date().toISOString() };
 }
+
+/**
+ * saveCutplan 失敗時的退路:在**同一個資料夾**另存一份 cutplan_YYMMDDHHmmss.md,
+ * 內容就是頁面上目前的編輯。不驗證內容(它是新檔,不是真相源),檔名不叫
+ * cutplan.md,所以 listEpisodes 掃不到、cut.py 也不會誤當成人審結果;
+ * 要採用得由人/agent 對照後再搬回 cutplan.md。
+ */
+function saveCopy(fileId, content) {
+  if (typeof content !== 'string' || !content) {
+    throw new Error('副本內容是空的,不建立');
+  }
+  var file = DriveApp.getFileById(fileId);
+  var parents = file.getParents();
+  if (!parents.hasNext()) throw new Error('找不到 cutplan.md 所在的資料夾');
+  var stamp = Utilities.formatDate(new Date(), 'Asia/Taipei', 'yyMMddHHmmss');
+  var name = 'cutplan_' + stamp + '.md';
+  parents.next().createFile(name, content, 'text/plain');
+  return { ok: true, name: name };
+}

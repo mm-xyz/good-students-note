@@ -70,11 +70,21 @@
     color: var(--fg);
   }
   #status {
-    padding: 8px 12px;
+    padding: 6px 0 0;
     font-size: 13px;
     color: var(--muted);
-    min-height: 18px;
   }
+  #status:empty { display: none; }
+  #lastEditBtn {
+    margin-top: 8px;
+    font-size: 14px;
+    padding: 8px 12px;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    background: var(--card-bg);
+    color: var(--fg);
+  }
+  #lastEditBtn:not([hidden]) { display: block; }
   #status.error { color: var(--danger); }
   #status.ok { color: var(--accent); }
   #blockList { padding: 8px 12px; }
@@ -245,6 +255,9 @@
     display: none;
   }
   footer .dirty-dot.show { display: inline-block; }
+  #saveMsg { flex: 2; font-size: 13px; color: var(--muted); word-break: break-all; }
+  #saveMsg.ok { color: var(--accent); }
+  #saveMsg.error { color: var(--danger); font-weight: 700; }
   footer button {
     flex: 1;
     font-size: 16px;
@@ -269,20 +282,22 @@
   <select id="episodeSelect">
     <option value="">載入集數清單中…</option>
   </select>
+  <button id="lastEditBtn" type="button" hidden>跳到最後一次修改</button>
   <form id="tlBar" autocomplete="off">
     <div id="tlInfo"></div>
     <input id="tlInput" autocapitalize="characters" placeholder="成品時間 12:34 或 Block ID B0059">
     <button id="tlGo" type="submit">跳到</button>
   </form>
+  <div id="status"></div>
 </header>
 
-<div id="status"></div>
 <div id="blockList"></div>
 
 <div id="undoFloat"><button id="undoBtn" type="button">復原</button></div>
 
 <footer>
   <span class="dirty-dot" id="dirtyDot" title="尚未儲存"></span>
+  <span id="saveMsg"></span>
   <button id="saveBtn" type="button" disabled>儲存</button>
 </footer>
 
@@ -309,6 +324,8 @@
     undoFloat: document.getElementById('undoFloat'),
     undoBtn: document.getElementById('undoBtn'),
     saveBtn: document.getElementById('saveBtn'),
+    saveMsg: document.getElementById('saveMsg'),
+    lastEditBtn: document.getElementById('lastEditBtn'),
     dirtyDot: document.getElementById('dirtyDot'),
   };
 
@@ -317,11 +334,84 @@
     els.status.className = kind || '';
   }
 
+  var AUTOSAVE_MS = 3000;   // 最後一次編輯後等這麼久才自動存
+  var SAVE_TIMEOUT_MS = 30000;
+  var rev = 0;              // 每次編輯 +1;存檔回來時用來判斷「存的途中又改了」
+  var saving = false;
+  var autoTimer = null;
+
   function setDirty(v) {
     state.dirty = v;
     els.dirtyDot.classList.toggle('show', v);
-    els.saveBtn.disabled = !v;
+    els.saveBtn.disabled = !v || saving;
+    if (v) {
+      rev++;
+      noteLastEdit();
+      clearTimeout(autoTimer);
+      autoTimer = setTimeout(function () { doSave(true); }, AUTOSAVE_MS);
+    }
   }
+
+  // ── 最後一次修改 ─────────────────────────────────────────────────────
+  // 每次 dirty 時跟上一份快照逐行比,第一個不同的行就是剛改的那行;
+  // 記它的 Block ID(行號會因補房間音位移),存 localStorage 讓重新整理後還在。
+  var lineSnap = null;
+  function snapLines() {
+    lineSnap = state.doc ? state.doc.lines.map(Core.serializeLine) : null;
+  }
+  function lastEditKey() { return 'cutplan-lastedit:' + state.fileId; }
+  function noteLastEdit() {
+    if (!state.doc || !lineSnap) return;
+    var cur = state.doc.lines, i = 0;
+    while (i < cur.length && i < lineSnap.length && Core.serializeLine(cur[i]) === lineSnap[i]) i++;
+    snapLines();
+    var line = cur[i];
+    if (!line || !line.id) return;
+    try { localStorage.setItem(lastEditKey(), line.id); } catch (e) { /* 無痕/封鎖時略過 */ }
+    els.lastEditBtn.hidden = false;
+  }
+  function refreshLastEditBtn() {
+    var id = null;
+    try { id = localStorage.getItem(lastEditKey()); } catch (e) { /* ignore */ }
+    els.lastEditBtn.hidden = !(id && Core.findLineById(state.doc, id) !== null);
+  }
+  els.lastEditBtn.addEventListener('click', function () {
+    var id = null;
+    try { id = localStorage.getItem(lastEditKey()); } catch (e) { /* ignore */ }
+    var li = id ? Core.findLineById(state.doc, id) : null;
+    var card = li === null ? null
+      : els.blockList.querySelector('[data-line-index="' + li + '"]');
+    if (!card) { setStatus('找不到最後修改的那一列', 'error'); return; }
+    card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    card.classList.add('tl-flash');
+    setTimeout(function () { card.classList.remove('tl-flash'); }, 1600);
+    setStatus('最後一次修改 → ' + id, 'ok');
+  });
+
+  // ── 存不了就另存副本 ─────────────────────────────────────────────────
+  var copiedRev = -1;
+  function saveCopyFallback(content, why) {
+    if (copiedRev === rev) return;   // 同一份內容只另存一次,免得連環失敗刷出一堆檔
+    copiedRev = rev;
+    google.script.run
+      .withSuccessHandler(function (r) {
+        setSaveMsg(why + ';已另存副本 ' + r.name + '(同資料夾),編輯沒丟', 'error');
+      })
+      .withFailureHandler(function (err2) {
+        setSaveMsg(why + ';另存副本也失敗:' + (err2 && err2.message ? err2.message : err2)
+          + '。編輯還在頁面上,不要重新整理', 'error');
+      })
+      .saveCopy(state.fileId, content);
+  }
+
+  function setSaveMsg(msg, kind) {
+    els.saveMsg.textContent = msg || '';
+    els.saveMsg.className = kind || '';
+  }
+
+  window.addEventListener('beforeunload', function (e) {
+    if (state.dirty) { e.preventDefault(); e.returnValue = ''; }
+  });
 
   // ── 集數清單 ──────────────────────────────────────────────────────────
 
@@ -377,6 +467,8 @@
         // 有檔案但格式不合格:整份不採信,頁首講清楚(驗收 TL-2)
         state.timelineBad = Core.timelineFileState(res.timeline) === 'bad'; // 空白檔也算(TL-2-2)
         showTimelineBar();
+        snapLines();
+        refreshLastEditBtn();
         render();
         setStatus('已載入:' + res.name, 'ok');
       })
@@ -902,24 +994,50 @@
 
   // ── 儲存 ──────────────────────────────────────────────────────────────
 
-  els.saveBtn.addEventListener('click', function () {
-    if (!state.doc || !state.fileId) return;
+  function doSave(auto) {
+    clearTimeout(autoTimer);
+    if (!state.doc || !state.fileId || !state.dirty || saving) return;
+    saving = true;
     els.saveBtn.disabled = true;
-    setStatus('儲存中…');
+    setSaveMsg(auto ? '自動儲存中…' : '儲存中…');
     var content = Core.serializeCutplan(state.doc);
+    var savedRev = rev;
+    var done = false;
+    var timer = setTimeout(function () {
+      if (done) return;
+      done = true; saving = false;
+      els.saveBtn.disabled = false;
+      setSaveMsg('儲存沒有回應(超過 30 秒),編輯還在頁面上', 'error');
+      saveCopyFallback(content, '儲存沒有回應');
+    }, SAVE_TIMEOUT_MS);
     google.script.run
       .withSuccessHandler(function () {
-        setDirty(false);
+        if (done) return;
+        done = true; clearTimeout(timer); saving = false;
         state.history = Core.createHistory(); // 已落地就不需要再回頭復原
         hideUndoFloat();
-        setStatus('已儲存 ✓', 'ok');
+        if (rev === savedRev) {
+          setDirty(false);
+          setSaveMsg('已儲存 ✓ ' + new Date().toLocaleTimeString('zh-TW', { hour12: false }), 'ok');
+        } else {
+          els.saveBtn.disabled = false;   // 存的途中又改了:下一輪 autosave 會接手
+          setSaveMsg('已儲存一部分,繼續編輯中…', 'ok');
+          autoTimer = setTimeout(function () { doSave(true); }, AUTOSAVE_MS);
+        }
       })
       .withFailureHandler(function (err) {
+        if (done) return;
+        done = true; clearTimeout(timer); saving = false;
         els.saveBtn.disabled = false;
-        setStatus('儲存失敗:' + (err && err.message ? err.message : err), 'error');
+        var why = '儲存失敗:' + (err && err.message ? err.message : err);
+        setSaveMsg(why, 'error');
+        saveCopyFallback(content, why);
+        // 不重排 autosave:被護欄拒絕時重試只會一直失敗,等下一次編輯或手動按
       })
       .saveCutplan(state.fileId, content);
-  });
+  }
+
+  els.saveBtn.addEventListener('click', function () { doSave(false); });
 
   loadEpisodeList();
 })();

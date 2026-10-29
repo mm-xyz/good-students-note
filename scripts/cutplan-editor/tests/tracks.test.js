@@ -202,3 +202,23 @@ test('Code.gs saveCutplan:軌欄被加/文字被改 → 拒絕、不寫入', () 
     assert.equal(saved.content, null);
   }
 });
+
+// ── saveCopy:存不了時另存副本(同資料夾、不叫 cutplan.md、不驗內容)────────
+
+test('Code.gs saveCopy:同資料夾建 cutplan_YYMMDDHHmmss.md,內容原樣', () => {
+  const made = [];
+  const folder = { createFile: (n, c, m) => made.push({ n, c, m }) };
+  const file = { getParents: () => ({ hasNext: () => true, next: () => folder }) };
+  const ctx = vm.createContext({
+    DriveApp: { getFileById: () => file },
+    Utilities: { formatDate: () => '261030001530' },
+    HtmlService: {},
+    Date,
+  });
+  vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'cutplan-core.js'), 'utf8'), ctx);
+  vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'Code.gs'), 'utf8'), ctx);
+  const r = ctx.saveCopy('id', 'EDITED');
+  assert.equal(r.name, 'cutplan_261030001530.md');
+  assert.deepEqual(made, [{ n: 'cutplan_261030001530.md', c: 'EDITED', m: 'text/plain' }]);
+  assert.throws(() => ctx.saveCopy('id', ''), /空的/);
+});

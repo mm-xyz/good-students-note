@@ -737,6 +737,7 @@ const api = {
   OUT_OF_RANGE,
   timelineFileState,
   serializeCutplan,
+  serializeLine,
   toggleCheckbox,
   splitStrikes,
   classifySelection,
