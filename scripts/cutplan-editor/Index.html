@@ -65,7 +65,6 @@
   header.collapsed #episodeSelect,
   header.collapsed #tlBar,
   header.collapsed #lastEditBtn,
-  header.collapsed #loadLatest,
   header.collapsed #clearCache,
   header.collapsed #pickAudio,
   header.collapsed #musicWrap { display: none; }
@@ -353,7 +352,7 @@
 </style>
 
 <header>
-  <div class="hrow"><h1>Cutplan 編輯器 — 只能勾選 / 加刪除線,其餘唯讀</h1><button id="hdrToggle" type="button" aria-expanded="true">收合 ▲</button></div>
+  <div class="hrow"><h1>Cutplan 編輯器 — 只能勾選 / 加刪除線,其餘唯讀</h1><button id="hdrToggle" type="button" aria-expanded="true">收起 ▲</button></div>
   <select id="episodeSelect">
     <option value="">載入集數清單中…</option>
   </select>
@@ -552,6 +551,7 @@
         // 有檔案但格式不合格:整份不採信,頁首講清楚(驗收 TL-2)
         state.timelineBad = Core.timelineFileState(res.timeline) === 'bad'; // 空白檔也算(TL-2-2)
         showTimelineBar();
+        autoCollapseAfterLoad();
         snapLines();
         refreshLastEditBtn();
         render();
@@ -1071,14 +1071,20 @@
   var hdrToggle = document.getElementById('hdrToggle');
   function setCollapsed(on, remember) {
     hdr.classList.toggle('collapsed', on);
-    hdrToggle.textContent = on ? '展開 ▼' : '收合 ▲';
+    hdrToggle.textContent = on ? '更多 ▼' : '收起 ▲';
     hdrToggle.setAttribute('aria-expanded', on ? 'false' : 'true');
     if (remember) { try { localStorage.setItem('cutplan-hdr-collapsed', on ? '1' : '0'); } catch (e) { /* ignore */ } }
   }
   hdrToggle.addEventListener('click', function () {
     setCollapsed(!hdr.classList.contains('collapsed'), true);
   });
-  try { if (localStorage.getItem('cutplan-hdr-collapsed') === '1') setCollapsed(true, false); } catch (e) { /* ignore */ }
+  // 設定類(集數、跳到、音樂版本、快取…)剪輯時不常用:載入 cutplan 後自動收起,
+  // 只有使用者自己按過「收起/更多」選了展開(存 '0')才維持展開。
+  function autoCollapseAfterLoad() {
+    var pref = null;
+    try { pref = localStorage.getItem('cutplan-hdr-collapsed'); } catch (e) { /* ignore */ }
+    if (pref !== '0') setCollapsed(true, false);
+  }
 
   var playerRow = document.getElementById('player');
   var audio = document.getElementById('audio');
