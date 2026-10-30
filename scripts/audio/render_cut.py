@@ -803,7 +803,8 @@ def src_to_dst(src: float, ranges: list[dict]) -> float | None:
     return last["dst_start"] + (last["src_end"] - last["src_start"])
 
 
-def enforce_monotonic(segments: list[dict], min_frag: float = 0.12) -> list[dict]:
+def enforce_monotonic(segments: list[dict], min_frag: float = 0.12,
+                      index_map: list | None = None) -> list[dict]:
     """保證來源時間軸上**同一段音訊不會播兩次**。
 
     剪點微調(snap 靜音、谷底、word_guard)是逐 unit 各自算的:前一段的尾巴
@@ -813,19 +814,33 @@ def enforce_monotonic(segments: list[dict], min_frag: float = 0.12) -> list[dict
     重轉抓到,dry-run 的秒數看不出來)。
 
     只夾**往前推進**的相鄰語音段;`🎬 集錦`本來就會回頭重播,不動。
+
+    index_map:傳一個空 list 進來,回傳時它會是「原編號 → 新編號」。被丟掉的段落
+    對到**下一個還在的段落**(丟在最後面就是 len(out))。呼叫端若拿舊編號當錨點
+    (unit_first_seg:間奏音樂、章節),丟段落後一定要用它換算,否則錨點整個位移
+    (EP22 v7:5 個段落被丟,間奏音樂跑掉,原位留下 9 秒數位靜音)。
     """
     out = []
     prev = None
+    pending = 0          # 還沒對到新編號的「被丟掉」的舊編號個數
+    mapped = []
     for s_ in segments:
         if s_["kind"] != "speech" or s_.get("clip"):
-            out.append(s_)
-            continue
-        if prev is not None and prev["a"] < s_["a"] < prev["b"]:
-            s_ = dict(s_, a=prev["b"])
-        if s_["b"] - s_["a"] < min_frag:
-            continue
-        out.append(s_)
-        prev = s_
+            keep = s_
+        else:
+            if prev is not None and prev["a"] < s_["a"] < prev["b"]:
+                s_ = dict(s_, a=prev["b"])
+            if s_["b"] - s_["a"] < min_frag:
+                pending += 1
+                continue
+            keep = s_
+            prev = s_
+        mapped.extend([len(out)] * (pending + 1))
+        pending = 0
+        out.append(keep)
+    mapped.extend([len(out)] * pending)
+    if index_map is not None:
+        index_map[:] = mapped
     return out
 
 
@@ -1995,7 +2010,11 @@ def main():
         segments.extend(segs)
 
     n_seg0 = len(segments)
-    segments = enforce_monotonic(segments)
+    seg_index_map = []
+    segments = enforce_monotonic(segments, index_map=seg_index_map)
+    # 丟掉段落後,所有以舊編號當錨點的東西(間奏音樂、章節)都要跟著換算
+    unit_first_seg = {ui: seg_index_map[i] if i < len(seg_index_map) else len(segments)
+                      for ui, i in unit_first_seg.items()}
     if len(segments) != n_seg0:
         print(f"[render] ⚠ 剪點微調造成 {n_seg0 - len(segments)} 個段落被"
               f"相鄰段落吃掉(重疊=同一段音訊播兩次),已丟棄")

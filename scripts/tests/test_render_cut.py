@@ -72,6 +72,28 @@ class TestEnforceMonotonic(unittest.TestCase):
         self.assertEqual([(s["a"], s["b"]) for s in out],
                          [(0.0, 10.0), (11.0, 12.0)])
 
+    def test_index_map_follows_dropped_segments(self):
+        """丟掉段落後,原本的 segment 編號(間奏音樂/章節的錨點)要對到「下一個還在的段落」。
+
+        EP22 v7:5 個段落被丟,錨點編號沒跟著位移,間奏音樂被放到別處,
+        原本該放音樂的 9 秒空檔變成數位靜音。
+        """
+        segs = [self._seg(0.0, 10.0),                 # 0 → 0
+                self._seg(9.9, 10.02),                # 1 被吃掉 → 對到下一個(新 1)
+                {"kind": "silence", "dur": 9.0},      # 2 → 1  (音樂錨點在這)
+                self._seg(11.0, 12.0)]                # 3 → 2
+        idx = []
+        out = enforce_monotonic(segs, index_map=idx)
+        self.assertEqual(len(out), 3)
+        self.assertEqual(idx, [0, 1, 1, 2])
+        self.assertEqual(out[idx[2]]["kind"], "silence")
+
+    def test_index_map_dropped_tail_points_past_the_end(self):
+        segs = [self._seg(0.0, 10.0), self._seg(9.9, 10.02)]
+        idx = []
+        out = enforce_monotonic(segs, index_map=idx)
+        self.assertEqual(idx, [0, len(out)])
+
     def test_clip_segments_may_legitimately_go_backwards(self):
         segs = [self._seg(100.0, 110.0, clip=True),
                 self._seg(20.0, 30.0, clip=True)]
