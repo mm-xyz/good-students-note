@@ -168,3 +168,40 @@ function saveCopy(fileId, content) {
   parents.next().createFile(name, content, 'text/plain');
   return { ok: true, name: name };
 }
+
+/**
+ * 播放用:找 cutplan 同資料夾底下「跟 timeline 同一版」的成品音檔。
+ * versionName = cutplan.timeline.json 的 version(例 v7_20261030-0129,cut.py 出片時
+ * 的版本資料夾名);找不到同名資料夾才退而取編號最大的 vN_*,保證至少有得播。
+ * 回傳 Drive 檔案 id 與一組臨時 OAuth token,讓頁面自己用 fetch 抓檔
+ * (google.script.run 傳不動 60MB;token 只活約一小時、只給這位使用者自己的頁面)。
+ */
+function getLatestAudio(fileId, versionName) {
+  var parents = DriveApp.getFileById(fileId).getParents();
+  if (!parents.hasNext()) throw new Error('找不到 cutplan.md 所在的資料夾');
+  var root = parents.next();
+  var folder = null, best = -1;
+  var it = root.getFolders();
+  while (it.hasNext()) {
+    var f = it.next();
+    var name = f.getName();
+    if (versionName && name === versionName) { folder = f; break; }
+    var m = /^v(\d+)_/.exec(name);
+    if (m && Number(m[1]) > best) { best = Number(m[1]); folder = f; }
+  }
+  if (!folder) throw new Error('集數資料夾底下沒有任何 vN_ 版本資料夾');
+  var files = folder.getFiles();
+  while (files.hasNext()) {
+    var a = files.next();
+    if (/\.(mp3|m4a|wav)$/i.test(a.getName())) {
+      return {
+        id: a.getId(),
+        name: a.getName(),
+        folder: folder.getName(),
+        size: a.getSize(),
+        token: ScriptApp.getOAuthToken(),
+      };
+    }
+  }
+  throw new Error('版本資料夾「' + folder.getName() + '」裡沒有音檔');
+}

@@ -280,3 +280,26 @@ test('音樂版本:v1→v2 只改那一個數字,護欄放行;改其他旋鈕/�
   assert.match(findIllegalEdit(plan, plan.replace('_v1', '_v3')) || '', /唯讀/);
   assert.match(findIllegalEdit(plan, plan.replace('template=水星貓_v1', 'template=別的_v2')) || '', /唯讀/);
 });
+
+// ── getLatestAudio:找同版本資料夾裡的音檔 ───────────────────────────────
+
+test('Code.gs getLatestAudio:優先同名版本資料夾,否則取編號最大的 vN_', () => {
+  const mk = (name, files) => ({
+    getName: () => name,
+    getFiles: () => { let i = 0; return { hasNext: () => i < files.length, next: () => files[i++] }; },
+  });
+  const f = (n) => ({ getName: () => n, getId: () => 'id_' + n, getSize: () => 123 });
+  const folders = [mk('v6_a', [f('EP_v6.mp3')]), mk('v7_b', [f('cutplan.md'), f('EP_v7.mp3')]), mk('_archive', [])];
+  const root = { getFolders: () => { let i = 0; return { hasNext: () => i < folders.length, next: () => folders[i++] }; } };
+  const ctx = vm.createContext({
+    DriveApp: { getFileById: () => ({ getParents: () => ({ hasNext: () => true, next: () => root }) }) },
+    ScriptApp: { getOAuthToken: () => 'TOK' },
+    HtmlService: {}, Date,
+  });
+  vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'cutplan-core.js'), 'utf8'), ctx);
+  vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'Code.gs'), 'utf8'), ctx);
+  assert.equal(ctx.getLatestAudio('x', 'v6_a').name, 'EP_v6.mp3');
+  const latest = ctx.getLatestAudio('x', 'v99_none');
+  assert.equal(latest.name, 'EP_v7.mp3');
+  assert.equal(latest.token, 'TOK');
+});

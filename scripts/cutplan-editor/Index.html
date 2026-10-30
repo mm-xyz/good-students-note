@@ -106,6 +106,11 @@
   }
   #player { margin-top: 8px; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
   #player[hidden] { display: none; }
+  #loadLatest {
+    font-size: 14px; padding: 8px 12px; border-radius: 8px; border: none;
+    background: var(--accent); color: #04241a; font-weight: 700;
+  }
+  #loadLatest:disabled { opacity: .6; }
   #pickAudio {
     font-size: 14px; padding: 8px 12px; border-radius: 8px; cursor: pointer;
     border: 1px solid var(--border); background: var(--card-bg); color: var(--fg);
@@ -337,7 +342,8 @@
   </form>
   <div id="diffStrip" hidden title="紅色=勾選跟最新成品不一致(還沒 apply),點一下跳過去"></div>
   <div id="player" hidden>
-    <label id="pickAudio">載入成品音檔<input id="audioFile" type="file" accept="audio/*,.mp3,.m4a,.wav"></label>
+    <button id="loadLatest" type="button">▶ 載入最新成品</button>
+    <label id="pickAudio">改選本機音檔<input id="audioFile" type="file" accept="audio/*,.mp3,.m4a,.wav"></label>
     <label id="musicWrap">音樂版本 <select id="musicVer"><option value="1">v1</option><option value="2">v2</option></select></label>
     <label id="followWrap"><input id="follow" type="checkbox" checked>自動捲動</label>
     <span id="playInfo"></span>
@@ -1067,6 +1073,57 @@
       setStatus('已載入 ' + f.name, 'ok');
     }
   });
+  function useAudioBlob(blob, label) {
+    if (audioUrl) URL.revokeObjectURL(audioUrl);
+    audioUrl = URL.createObjectURL(blob);
+    audio.src = audioUrl;
+    audio.hidden = false;
+    clearPlaying();
+    setStatus('已載入 ' + label, 'ok');
+  }
+  // 一鍵載入「跟成品對照檔同一版」的音檔:伺服端找檔並給臨時 token,
+  // 頁面自己用 fetch 向 Drive 抓(60MB 不能走 google.script.run)。
+  document.getElementById('loadLatest').addEventListener('click', function () {
+    var btn = this;
+    if (!state.fileId) return;
+    btn.disabled = true;
+    setStatus('尋找最新成品…');
+    google.script.run
+      .withSuccessHandler(function (a) {
+        setStatus('下載 ' + a.name + ' 0%…');
+        fetch('https://www.googleapis.com/drive/v3/files/' + a.id + '?alt=media',
+          { headers: { Authorization: 'Bearer ' + a.token } })
+          .then(function (res) {
+            if (!res.ok) throw new Error('Drive 回應 ' + res.status);
+            var total = Number(a.size) || Number(res.headers.get('Content-Length')) || 0;
+            var reader = res.body.getReader(), chunks = [], got = 0;
+            function pump() {
+              return reader.read().then(function (r) {
+                if (r.done) return;
+                chunks.push(r.value); got += r.value.length;
+                if (total) setStatus('下載 ' + a.name + ' ' + Math.round(got / total * 100) + '%…');
+                return pump();
+              });
+            }
+            return pump().then(function () {
+              useAudioBlob(new Blob(chunks, { type: /\.m4a$/i.test(a.name) ? 'audio/mp4' : 'audio/mpeg' }),
+                a.folder + '/' + a.name);
+              btn.disabled = false;
+            });
+          })
+          .catch(function (e) {
+            btn.disabled = false;
+            setStatus('下載成品失敗:' + (e && e.message ? e.message : e)
+              + '(可改用「改選本機音檔」)', 'error');
+          });
+      })
+      .withFailureHandler(function (err) {
+        btn.disabled = false;
+        setStatus('找不到成品:' + (err && err.message ? err.message : err), 'error');
+      })
+      .getLatestAudio(state.fileId, state.timeline ? state.timeline.version : '');
+  });
+
   audio.addEventListener('error', function () {
     setStatus('音檔無法播放(格式不支援或檔案太大),可改選 mp3', 'error');
   });
