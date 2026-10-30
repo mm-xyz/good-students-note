@@ -255,3 +255,18 @@ test('timelineStatus:勾選但整句有刪除線(部分保留)→ 成品起點�
   assert.equal(core.timelineStatus(doc.lines[0], tl).mismatch, false);
   assert.equal(core.timelineStatus(doc.lines[1], tl).mismatch, true);
 });
+
+test('findTimeForLine:該列有成品時間就用它;沒有(被剪掉/未 apply)往前找最近有時間的列', () => {
+  const core = require('../cutplan-core.js');
+  const doc = core.parseCutplan(
+    '- [x] B0001 [0:00–0:02] [A] 一\n'
+    + '- [x] B0002 [0:02–0:04] [A] 二\n'
+    + '- [ ] B0003 [0:04–0:06] [A] 三\n');
+  const tl = core.parseTimeline(JSON.stringify({
+    version: 'v7_x', generated_at: '2026-10-30T00:00:00', plan: 'cutplan.md',
+    final_duration_secs: 10, blocks: { B0001: [1.5], B0002: [3.5], B0003: null },
+  }));
+  assert.equal(core.findTimeForLine(doc, tl, 1), 3.5);
+  assert.equal(core.findTimeForLine(doc, tl, 2), 3.5);   // B0003 不在成品 → 前一列
+  assert.equal(core.findTimeForLine(doc, null, 0), null);
+});

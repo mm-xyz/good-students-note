@@ -1146,6 +1146,15 @@
       card.scrollIntoView({ behavior: 'smooth', block: 'center' });
     }
   });
+  // 點橫軸:音檔也跳到那一列在成品裡的位置(被剪掉的列就用前一個有時間的列)並開始播。
+  function seekAndPlay(lineIndex) {
+    if (audio.hidden || !audio.src) return;
+    var t = Core.findTimeForLine(state.doc, state.timeline, lineIndex);
+    if (t === null) return;
+    audio.currentTime = Math.max(0, t - 2);   // 往前 2 秒,聽得到接縫
+    var p = audio.play();
+    if (p && p.catch) p.catch(function () { /* 瀏覽器擋自動播放時,使用者按播放鍵即可 */ });
+  }
   function clearPlayingCard() {
     var old = els.blockList.querySelector('.block-card.playing');
     if (old) old.classList.remove('playing');
@@ -1195,6 +1204,7 @@
     });
     var id = state.doc.lines[best.idx].id;
     if (jumpToLine(best.idx)) setStatus('未 apply → ' + id, 'ok');
+    seekAndPlay(best.idx);
   });
 
   function showTimelineBar() {

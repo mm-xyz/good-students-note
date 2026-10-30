@@ -786,6 +786,19 @@ function timelineStatus(line, timeline) {
   };
 }
 
+// 哪一列 → 成品時間(播放要跳去的位置)。該列在成品裡就用它的時間(多次出現取最後一次,
+// 集錦在前、正文在後);不在成品裡(被剪掉或還沒 apply)就往前找最近一個有時間的列。
+function findTimeForLine(doc, timeline, lineIndex) {
+  if (!timeline || !doc) return null;
+  for (let i = lineIndex; i >= 0; i--) {
+    const l = doc.lines[i];
+    if (!l || !l.editable) continue;
+    const t = timeline.blocks[l.id];
+    if (Array.isArray(t) && t.length) return t[t.length - 1];
+  }
+  return null;
+}
+
 // 成品時間 → 哪一張卡:起點 ≤ 該時間的最後一個 block。同一 id 出現在 🎬 集錦
 // 與正文時,集錦的時間(成品前段)對到文件裡第一次出現的那列(集錦區),其餘
 // 時間對到最後一次出現的那列(正文)。
@@ -835,6 +848,7 @@ const api = {
   formatTime,
   timelineStatus,
   findLineAtTime,
+  findTimeForLine,
   findLineById,
   OUT_OF_RANGE,
   timelineFileState,
