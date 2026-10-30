@@ -142,6 +142,12 @@
   #musicWrap select { width: auto; font-size: 14px; padding: 4px 6px; }
   #followWrap { font-size: 13px; color: var(--muted); display: flex; gap: 4px; align-items: center; }
   #playInfo { font-size: 12px; color: var(--accent); flex: 1; min-width: 0; }
+  #skipRow { display: flex; gap: 8px; width: 100%; }
+  #skipRow[hidden] { display: none; }
+  #skipRow button {
+    flex: 1; font-size: 15px; padding: 10px 0; border-radius: 8px;
+    border: 1px solid var(--border); background: var(--card-bg); color: var(--fg);
+  }
   #audio { width: 100%; height: 36px; }
   #audio[hidden] { display: none; }
   #diffStrip b {
@@ -370,6 +376,10 @@
     <label id="musicWrap">音樂版本 <select id="musicVer"><option value="1">v1</option><option value="2">v2</option></select></label>
     <label id="followWrap"><input id="follow" type="checkbox" checked>自動捲動</label>
     <span id="playInfo"></span>
+    <div id="skipRow" hidden>
+      <button id="skipBack" type="button">⏪ 10 秒</button>
+      <button id="skipFwd" type="button">10 秒 ⏩</button>
+    </div>
     <audio id="audio" controls preload="metadata" hidden></audio>
   </div>
   <div id="status"></div>
@@ -1109,6 +1119,7 @@
     audioUrl = URL.createObjectURL(f);
     audio.src = audioUrl;
     audio.hidden = false;
+    document.getElementById('skipRow').hidden = false;
     clearPlaying();
     var vs = state.timeline && state.timeline.versionShort;
     if (vs && f.name.indexOf(vs) === -1) {
@@ -1117,11 +1128,19 @@
       setStatus('已載入 ' + f.name, 'ok');
     }
   });
+  function skip(secs) {
+    if (audio.hidden || !audio.src) return;
+    audio.currentTime = Math.max(0, Math.min(audio.duration || Infinity, audio.currentTime + secs));
+  }
+  document.getElementById('skipBack').addEventListener('click', function () { skip(-10); });
+  document.getElementById('skipFwd').addEventListener('click', function () { skip(10); });
+
   function useAudioBlob(blob, label) {
     if (audioUrl) URL.revokeObjectURL(audioUrl);
     audioUrl = URL.createObjectURL(blob);
     audio.src = audioUrl;
     audio.hidden = false;
+    document.getElementById('skipRow').hidden = false;
     clearPlaying();
     setStatus('已載入 ' + label, 'ok');
   }
