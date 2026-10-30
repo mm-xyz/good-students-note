@@ -54,6 +54,25 @@
     border-bottom: 1px solid var(--border);
     padding: 10px 12px;
   }
+  header .hrow { display: flex; align-items: center; gap: 8px; margin: 0 0 8px; }
+  header .hrow h1 { margin: 0; flex: 1; min-width: 0; }
+  #hdrToggle {
+    flex: none; font-size: 13px; padding: 6px 10px; border-radius: 8px;
+    border: 1px solid var(--border); background: var(--card-bg); color: var(--fg);
+  }
+  /* 收合:只留橫軸、播放器、播放中的 block、狀態列,畫面讓給 block 列表 */
+  header.collapsed .hrow h1,
+  header.collapsed #episodeSelect,
+  header.collapsed #tlBar,
+  header.collapsed #lastEditBtn,
+  header.collapsed #loadLatest,
+  header.collapsed #clearCache,
+  header.collapsed #pickAudio,
+  header.collapsed #musicWrap { display: none; }
+  header.collapsed .hrow { margin: 0; justify-content: flex-end; position: absolute; right: 12px; top: 10px; z-index: 6; }
+  header.collapsed { padding-top: 10px; }
+  header.collapsed #diffStrip { margin-top: 0; margin-right: 92px; }
+  header.collapsed #player { margin-top: 6px; }
   header h1 {
     font-size: 15px;
     margin: 0 0 8px;
@@ -334,7 +353,7 @@
 </style>
 
 <header>
-  <h1>Cutplan 編輯器 — 只能勾選 / 加刪除線,其餘唯讀</h1>
+  <div class="hrow"><h1>Cutplan 編輯器 — 只能勾選 / 加刪除線,其餘唯讀</h1><button id="hdrToggle" type="button" aria-expanded="true">收合 ▲</button></div>
   <select id="episodeSelect">
     <option value="">載入集數清單中…</option>
   </select>
@@ -1047,6 +1066,20 @@
     setDirty(true);
     setStatus('音樂改用 v' + musicSel.value + '(opening / break / ending),下次出片生效', 'ok');
   });
+  // ── 收合標題列:只留橫軸+播放器,手機上不用一直捲 ─────────────────────
+  var hdr = document.querySelector('header');
+  var hdrToggle = document.getElementById('hdrToggle');
+  function setCollapsed(on, remember) {
+    hdr.classList.toggle('collapsed', on);
+    hdrToggle.textContent = on ? '展開 ▼' : '收合 ▲';
+    hdrToggle.setAttribute('aria-expanded', on ? 'false' : 'true');
+    if (remember) { try { localStorage.setItem('cutplan-hdr-collapsed', on ? '1' : '0'); } catch (e) { /* ignore */ } }
+  }
+  hdrToggle.addEventListener('click', function () {
+    setCollapsed(!hdr.classList.contains('collapsed'), true);
+  });
+  try { if (localStorage.getItem('cutplan-hdr-collapsed') === '1') setCollapsed(true, false); } catch (e) { /* ignore */ }
+
   var playerRow = document.getElementById('player');
   var audio = document.getElementById('audio');
   var playInfo = document.getElementById('playInfo');
