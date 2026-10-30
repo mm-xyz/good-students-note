@@ -111,6 +111,10 @@
     background: var(--accent); color: #04241a; font-weight: 700;
   }
   #loadLatest:disabled { opacity: .6; }
+  #clearCache {
+    font-size: 13px; padding: 8px 10px; border-radius: 8px;
+    border: 1px solid var(--border); background: transparent; color: var(--muted);
+  }
   #pickAudio {
     font-size: 14px; padding: 8px 12px; border-radius: 8px; cursor: pointer;
     border: 1px solid var(--border); background: var(--card-bg); color: var(--fg);
@@ -343,6 +347,7 @@
   <div id="diffStrip" hidden title="紅色=勾選跟最新成品不一致(還沒 apply),點一下跳過去"></div>
   <div id="player" hidden>
     <button id="loadLatest" type="button">▶ 載入最新成品</button>
+    <button id="clearCache" type="button">清除音檔快取</button>
     <label id="pickAudio">改選本機音檔<input id="audioFile" type="file" accept="audio/*,.mp3,.m4a,.wav"></label>
     <label id="musicWrap">音樂版本 <select id="musicVer"><option value="1">v1</option><option value="2">v2</option></select></label>
     <label id="followWrap"><input id="follow" type="checkbox" checked>自動捲動</label>
@@ -1081,6 +1086,32 @@
     clearPlaying();
     setStatus('已載入 ' + label, 'ok');
   }
+  // 音檔快取(Cache Storage):同一版只下載一次,換新版時舊版自動清掉。
+  // 沙盒頁面可能不給用(無痕、被封鎖),一律 try/catch,拿不到就當沒快取。
+  var AUDIO_CACHE = 'cutplan-audio';
+  function cacheKeyFor(a) { return 'https://cutplan.local/audio/' + encodeURIComponent(a.folder + '/' + a.name); }
+  function cacheGet(a) {
+    if (!window.caches) return Promise.resolve(null);
+    return caches.open(AUDIO_CACHE)
+      .then(function (c) { return c.match(cacheKeyFor(a)); })
+      .then(function (r) { return r ? r.blob() : null; })
+      .catch(function () { return null; });
+  }
+  function cachePut(a, blob) {
+    if (!window.caches) return Promise.resolve(false);
+    return caches.open(AUDIO_CACHE).then(function (c) {
+      return c.keys().then(function (ks) {
+        return Promise.all(ks.map(function (k) { return c.delete(k); }));   // 舊版一併清掉
+      }).then(function () { return c.put(cacheKeyFor(a), new Response(blob)); });
+    }).then(function () { return true; }).catch(function () { return false; });
+  }
+  document.getElementById('clearCache').addEventListener('click', function () {
+    if (!window.caches) { setStatus('這個瀏覽器環境沒有快取可清', 'ok'); return; }
+    caches.delete(AUDIO_CACHE)
+      .then(function (had) { setStatus(had ? '已清除音檔快取' : '目前沒有音檔快取', 'ok'); })
+      .catch(function (e) { setStatus('清除快取失敗:' + (e && e.message ? e.message : e), 'error'); });
+  });
+
   // 一鍵載入「跟成品對照檔同一版」的音檔:伺服端找檔並給臨時 token,
   // 頁面自己用 fetch 向 Drive 抓(60MB 不能走 google.script.run)。
   document.getElementById('loadLatest').addEventListener('click', function () {
@@ -1090,6 +1121,22 @@
     setStatus('尋找最新成品…');
     google.script.run
       .withSuccessHandler(function (a) {
+        cacheGet(a).then(function (hit) {
+          if (hit) {
+            useAudioBlob(hit, a.folder + '/' + a.name + '(快取)');
+            btn.disabled = false;
+            return;
+          }
+          downloadAudio(a);
+        });
+      })
+      .withFailureHandler(function (err) {
+        btn.disabled = false;
+        setStatus('找不到成品:' + (err && err.message ? err.message : err), 'error');
+      })
+      .getLatestAudio(state.fileId, state.timeline ? state.timeline.version : '');
+
+    function downloadAudio(a) {
         setStatus('下載 ' + a.name + ' 0%…');
         fetch('https://www.googleapis.com/drive/v3/files/' + a.id + '?alt=media',
           { headers: { Authorization: 'Bearer ' + a.token } })
@@ -1106,9 +1153,12 @@
               });
             }
             return pump().then(function () {
-              useAudioBlob(new Blob(chunks, { type: /\.m4a$/i.test(a.name) ? 'audio/mp4' : 'audio/mpeg' }),
-                a.folder + '/' + a.name);
+              var blob = new Blob(chunks, { type: /\.m4a$/i.test(a.name) ? 'audio/mp4' : 'audio/mpeg' });
+              useAudioBlob(blob, a.folder + '/' + a.name);
               btn.disabled = false;
+              cachePut(a, blob).then(function (ok) {
+                if (ok) setStatus('已載入 ' + a.folder + '/' + a.name + '(已存快取,下次不用再下載)', 'ok');
+              });
             });
           })
           .catch(function (e) {
@@ -1116,12 +1166,7 @@
             setStatus('下載成品失敗:' + (e && e.message ? e.message : e)
               + '(可改用「改選本機音檔」)', 'error');
           });
-      })
-      .withFailureHandler(function (err) {
-        btn.disabled = false;
-        setStatus('找不到成品:' + (err && err.message ? err.message : err), 'error');
-      })
-      .getLatestAudio(state.fileId, state.timeline ? state.timeline.version : '');
+    }
   });
 
   audio.addEventListener('error', function () {
