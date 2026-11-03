@@ -518,13 +518,21 @@ def apply_review_edges(segments: list[dict], cuts: list[list[float]],
         else:
             base = {"kind": "speech", "clip": False}
             lo, hi, origins = ka, kb, set()
-            at = 0
-            for k, (s, _) in enumerate(out):
-                if s is not None and editable(s) and s["b"] <= ka + eps:
-                    at = k + 1
+            # 插在來源時間之前的最後一段正片後面;比所有正片都早 → 插在第一段
+            # 正片前面(不是 index 0:開場 🎬 集錦要先播)
+            speech_at = [k for k, (s, _) in enumerate(out)
+                         if s is not None and editable(s)]
+            before = [k for k in speech_at if out[k][0]["b"] <= ka + eps]
+            at = (before[-1] + 1 if before
+                  else speech_at[0] if speech_at else len(out))
         base = with_titems(base, lo, hi)
         new = [(dict(base, a=pa, b=pb, tempo=pt), set())
                for pa, pb, pt in tempo_pieces(lo, hi, tmap, default_tempo)]
+        for j, (d, _) in enumerate(new):     # 跨 ⏩ 界線切成多片:fade 只留頭尾
+            if j > 0:
+                d.pop("fade_in", None)
+            if j < len(new) - 1:
+                d.pop("fade_out", None)
         if new:
             new[0] = (new[0][0], origins)
         out[at:at] = new

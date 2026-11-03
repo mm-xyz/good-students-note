@@ -825,6 +825,34 @@ class TestReviewEdges(unittest.TestCase):
                                     titem_pool=blocks)
         self.assertEqual(out[1]["titems"], blocks)
 
+    def test_keep_across_tempo_boundary_fades_only_on_ends(self):
+        """驗收 #1:✚ 跨 ⏩ 界線切成多片,fade 只能留在頭尾片。"""
+        segs = [self._sp(10.0, 20.0, fade_in=2.0, fade_out=1.0)]
+        out, _ = apply_review_edges(segs, cuts=[], keeps=[[19.0, 25.0]],
+                                    tmap=[(21.0, 23.0, 1.2)], default_tempo=1.0)
+        self.assertEqual(self._ab(out), [(10.0, 21.0), (21.0, 23.0), (23.0, 25.0)])
+        self.assertEqual([("fade_in" in s, "fade_out" in s) for s in out],
+                         [(True, False), (False, False), (False, True)])
+
+    def test_keep_before_all_speech_goes_after_leading_clip(self):
+        """驗收 #2:✚ 早於所有正片語音,不能插到 🎬 開場集錦前面。"""
+        clip = {"kind": "speech", "a": 500.0, "b": 510.0, "clip": True, "tempo": 1.0}
+        segs = [clip, self._sp(10.0, 20.0)]
+        out, imap = apply_review_edges(segs, cuts=[], keeps=[[2.0, 5.0]],
+                                       tmap=[], default_tempo=1.0)
+        self.assertEqual([(s["a"], s.get("clip", False)) for s in out],
+                         [(500.0, True), (2.0, False), (10.0, False)])
+        self.assertEqual(imap, [0, 2])
+
+    def test_cut_removing_whole_segment_maps_index_to_next(self):
+        """驗收注入 4:✂ 把整段剪光,錨點對到下一個還在的段落。"""
+        music = {"kind": "music", "at": 0}
+        segs = [self._sp(0.0, 1.0), self._sp(5.0, 6.0), music, self._sp(8.0, 9.0)]
+        out, imap = apply_review_edges(segs, cuts=[[4.5, 6.5]], keeps=[],
+                                       tmap=[], default_tempo=1.0)
+        self.assertEqual(self._ab(out), [(0.0, 1.0), (8.0, 9.0)])
+        self.assertEqual(imap, [0, 1, 1, 2])
+
     def test_no_edges_is_identity(self):
         segs = [self._sp(0.0, 1.0), {"kind": "music"}]
         out, imap = apply_review_edges(segs, cuts=[], keeps=[], tmap=[],

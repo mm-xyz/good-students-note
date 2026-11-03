@@ -123,7 +123,7 @@ def _decode(dict_blob: bytes, doc_blob: bytes) -> list[tuple]:
                 i, v, _ = rd("<Hfi" if op == 9 else "<Hdi")
                 attr(i, v)
             elif op in (11, 12):
-                text(rd("<i"))
+                p += rd("<i")          # 二進位資料/原始字串,不需要,不解碼
             elif op in (13, 14):
                 pass
             elif op == 16:
@@ -190,7 +190,8 @@ def _minus(xs, ys, min_len: float = 0.0) -> list[list[float]]:
 def diff_tracks(ai, mm) -> tuple[list[list[float]], list[list[float]]]:
     """AI／MM 兩條軌的覆蓋範圍相減 → (多剪 ✂, 救回 ✚),各自已合併排序。"""
     def r(xs):
-        return [[round(a, 2), round(b, 2)] for a, b in xs]
+        return [[round(a, 2), round(b, 2)] for a, b in xs
+                if round(b, 2) > round(a, 2)]
     return r(_minus(ai, mm, JITTER)), r(_minus(mm, ai, JITTER))
 
 
@@ -268,6 +269,14 @@ def cmd_apply(args) -> None:
     if missing:
         sys.exit(f"[audacity] FAIL: 找不到標籤軌 {'、'.join(missing)};"
                  f"專案裡有:{'、'.join(by) or '(沒有標籤軌)'}")
+    wd = work_dir(args.session)
+    cm, ai_txt = wd / "cut_map.json", wd / "audacity_AI.txt"
+    if cm.exists() and (not ai_txt.exists()
+                        or cm.stat().st_mtime > ai_txt.stat().st_mtime):
+        # AI 軌必須是「上一輪套完之後」的成品,差異才是這一輪的決定;拿舊基準比,
+        # 上一輪已寫進 cutplan 的 ✂/✚ 會被當成沒發生、MM 改回去也撤不掉
+        print("[audacity] ⚠ cut_map.json 比 audacity_AI.txt 新 —— 出片後沒重新"
+              " export,Audacity 裡的 AI 軌可能是上一版的保留段")
     cuts, keeps = diff_tracks(by["AI"], by["MM"])
     print(f"[audacity] ✂ 多剪 {len(cuts)} 段({sum(b - a for a, b in cuts):.2f}s)"
           f"、✚ 救回 {len(keeps)} 段({sum(b - a for a, b in keeps):.2f}s)")

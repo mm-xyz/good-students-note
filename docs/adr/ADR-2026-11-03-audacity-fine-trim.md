@@ -32,4 +32,9 @@
   開剪過的成品或 `.pertrack_bus.wav` 會對錯軸。
 - 讀檔：Audacity 開著用 `mode=ro`（讀得到 -wal），關掉後 WAL 專案沒有 -shm 會 error 14，改 `immutable=1`。
 - `line=pertrack` 舊分軌線不吃 ✚（那條線本來就跳過 ✂）。
+- 差異累加的前提是 AI 軌＝上一輪套完後的成品：出片後要重新 export、在 Audacity 換掉 AI 軌。
+  沒換的話上一輪寫進 cutplan 的 ✂／✚ 會被當成沒發生；`apply` 偵測到 cut_map.json 比
+  audacity_AI.txt 新會警告。
+- ✚ 新開段落落在語音與間奏音樂之間時，插在音樂前面；比所有正片都早時，插在第一段正片前
+  （開場 🎬 集錦之後）。
 - Audacity 4 的標籤匯入入口與快捷鍵尚待 MM 實機確認。

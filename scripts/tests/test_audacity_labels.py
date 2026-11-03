@@ -150,6 +150,16 @@ class TestDiffTracks(unittest.TestCase):
         mm = [(1.004, 2.0, ""), (3.0, 3.995, ""), (6.0, 7.0, "")]
         self.assertEqual(diff_tracks(self.AI, mm), ([], []))
 
+    def test_rounding_never_yields_zero_length(self):
+        """驗收 #3:差異 > 0.01s 但四捨五入到兩位後 a == b,不能寫出零長度行。"""
+        ai = [(1.0, 2.0, "")]
+        mm = [(1.0, 1.98901, "")]          # 差 0.01099s → [1.99, 2.0] ok
+        mm2 = [(1.0, 1.9949, ""), (1.9951, 2.0, "")]
+        self.assertEqual(diff_tracks(ai, mm), ([[1.99, 2.0]], []))
+        cuts, keeps = diff_tracks([(1.0, 1.004, "")], [(1.0, 1.0151, "")])
+        self.assertTrue(all(b > a for a, b in cuts + keeps), (cuts, keeps))
+        self.assertEqual(diff_tracks(ai, mm2), ([], []))
+
     def test_order_and_overlap_in_mm_track_do_not_matter(self):
         mm = [(6.0, 7.0, ""), (3.0, 4.0, ""), (1.0, 1.8, ""), (1.5, 2.0, "")]
         self.assertEqual(diff_tracks(self.AI, mm), ([], []))
