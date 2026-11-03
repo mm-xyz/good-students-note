@@ -68,9 +68,18 @@ render 會把每首間奏先正規化到 `bgm-lufs`（樣板 -17≈人聲）再�
 3. 回報 MM 時附：人聲平均 LUFS、三個間奏窗 LUFS。
 4. 嫌大嫌小調 `## ⚙ bgm-solo=`（0.7≈-3dB），不要動 `bgm-lufs`。
 
+## Audacity 細剪（ADR-2026-11-03-audacity-fine-trim）
+
+文字剪切不到的邊界（字中間、被吃進字長的停頓）走 Audacity：
+
+1. 出完片：`python3 scripts/audio/audacity_labels.py export --session <目錄>` → `_asset/audacity_AI.txt`
+2. MM 在 Audacity 開分軌 WAV（原始錄音，**不是成品**），匯入標籤、軌名改 `AI`，複製一條改名 `MM`，只動 `MM`，⌘S
+3. `python3 scripts/audio/audacity_labels.py apply --session <目錄> --aup <專案.aup4>`（先加 `--dry-run` 看差異）→ cutplan 多出 `## ✂ … audacity`／`## ✚ … audacity`
+4. 照常 `cut.py` 出片；下一輪細剪前重跑 export
+
 ## cutplan 標記速查
 
-`- [ ]`＝剪整句｜`~~刪除線~~`＝剪字｜`## ✂ 起-迄`＝手動剪空白｜G 列勾＝保留留白（剪停頓是常態、留白才標）｜`## 章節`＝chapters｜`## 🎬`集錦／`## 🎵`BGM／`## ➕`補錄插入（`gain=auto`）／`## 🔇`室噪留白｜`## ⚙`＝render 參數｜`## ⏩ 起-迄 倍率`＝分段變速（原始時間軸，迄可省略，倍率前要空白；例 `## ⏩ 00:00-10:00 1.05` / `## ⏩ 10:00- 1.0`，ADR-2026-11-03-tempo-map）。
+`- [ ]`＝剪整句｜`~~刪除線~~`＝剪字｜`## ✂ 起-迄`＝手動剪空白｜`## ✚ 起-迄`＝強制保留（蓋過刪除線／停頓收緊／沒勾的列，✚ 贏 ✂）｜G 列勾＝保留留白（剪停頓是常態、留白才標）｜`## 章節`＝chapters｜`## 🎬`集錦／`## 🎵`BGM／`## ➕`補錄插入（`gain=auto`）／`## 🔇`室噪留白｜`## ⚙`＝render 參數｜`## ⏩ 起-迄 倍率`＝分段變速（原始時間軸，迄可省略，倍率前要空白；例 `## ⏩ 00:00-10:00 1.05` / `## ⏩ 10:00- 1.0`，ADR-2026-11-03-tempo-map）。
 
 ## 已知坑
 
