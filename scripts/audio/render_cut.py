@@ -129,6 +129,8 @@ def apply_template(program: list[dict], tpl: dict | None) -> dict:
 MUSIC_RE = re.compile(r"^##\s*🎵\s*(\S+)((?:\s+\w+=[\d.]+)*)\s*$")
 TEASER_RE = re.compile(r"^##\s*🎬\s*(.*)$")
 CONFIG_RE = re.compile(r"^##\s*⚙️?\s*(.*)$")
+# `## ⏩ 起-迄 倍率` — 分段變速(原始時間軸;迄可省略＝到結尾,倍率前必須有空白)
+TEMPO_RE = re.compile(r"^##\s*⏩\s*([\d:.]*)\s*[-–~]\s*([\d:.]*)\s+([\d.]+)\s*(.*)$")
 CUT_RE = re.compile(r"^##\s*✂\s*([\d:.]+)\s*[-–~]\s*([\d:.]+)\s*(.*)$")
 # `## ➕ 檔案 [gain=auto|±dB start= end= fade= tempo=0|1]  說明` — 插入外部語音檔
 # (補錄)。檔案不在 source 的時間軸上,所以走自己的 ffmpeg input,不吃 atrim 主軌。
@@ -387,6 +389,33 @@ def parse_ts(tok: str) -> float:
     return secs
 
 
+def tempo_map_from_program(program: list[dict]) -> list[tuple[float, float, float]]:
+    """`## ⏩` 行 → 依起點排序的 [(起, 迄, 倍率)];重疊或倍率超出 0.5–2.0 就報錯。"""
+    tm = sorted((it["a"], it["b"], it["tempo"]) for it in program
+                if it["kind"] == "tempo")
+    for a, b, t in tm:
+        if not 0.5 <= t <= 2.0:
+            raise ValueError(f"## ⏩ 倍率 {t} 超出單顆 atempo 的合法範圍 0.5–2.0")
+        if b <= a:
+            raise ValueError(f"## ⏩ 區間 {a}–{b} 迄點必須大於起點")
+    for (a1, b1, _), (a2, _b2, _) in zip(tm, tm[1:]):
+        if a2 < b1:
+            raise ValueError(f"## ⏩ 區間重疊:{a1}–{b1} 與起點 {a2} 的那段")
+    return tm
+
+
+def tempo_pieces(a: float, b: float, tmap: list[tuple[float, float, float]],
+                 default: float) -> list[tuple[float, float, float]]:
+    """把來源區間 [a,b) 在變速界線處切開,每片帶自己的倍率;沒落在任何 ⏩ 區間的用 default。"""
+    edges = sorted({a, b} | {x for lo, hi, _ in tmap for x in (lo, hi) if a < x < b})
+    out = []
+    for lo, hi in zip(edges, edges[1:]):
+        mid = (lo + hi) / 2
+        t = next((tp for ta, tb, tp in tmap if ta <= mid < tb), default)
+        out.append((lo, hi, t))
+    return out
+
+
 def bgm_envelope(m: dict, duck: float, solo: float, predrop: float,
                  rise: float) -> list[tuple[float, float]]:
     """疊軌感知的 BGM 音量包絡(分段線性 keypoints,音樂 local 時間軸,0–1 乘數)。
@@ -551,6 +580,20 @@ def parse_program(path: Path) -> list[dict]:
                     note = parts[1].strip() if len(parts) > 1 else ""
             program.append({"kind": "roomtone", "duration": duration,
                             "note": note})
+            clip_mode = False
+            cur_insert = None
+            continue
+        if s.startswith("## ⏩"):
+            mtp = TEMPO_RE.match(s)
+            if not mtp or not mtp.group(1):
+                raise ValueError(
+                    f"## ⏩ 格式要寫成 `## ⏩ 起-迄 倍率`(迄可省略,倍率前要有空白),"
+                    f"讀到:「{s}」")
+            program.append({"kind": "tempo", "a": parse_ts(mtp.group(1)),
+                            "b": parse_ts(mtp.group(2)) if mtp.group(2)
+                            else float("inf"),
+                            "tempo": float(mtp.group(3)),
+                            "note": mtp.group(4).strip()})
             clip_mode = False
             cur_insert = None
             continue
@@ -798,9 +841,9 @@ def src_to_dst(src: float, ranges: list[dict]) -> float | None:
         if src < r["src_start"]:
             return r["dst_start"]                       # 落在剪掉的空隙/最前面
         if src <= r["src_end"]:
-            return r["dst_start"] + (src - r["src_start"])
+            return r["dst_start"] + (src - r["src_start"]) / (r.get("tempo") or 1.0)
     last = ranges[-1]
-    return last["dst_start"] + (last["src_end"] - last["src_start"])
+    return last["dst_start"] + (last["src_end"] - last["src_start"]) / (last.get("tempo") or 1.0)
 
 
 def enforce_monotonic(segments: list[dict], min_frag: float = 0.12,
@@ -1085,7 +1128,7 @@ def build_timeline(blocks: list[dict], speech: list[dict], inserts: list[dict],
             rs = [(r["a"], r["b"], r["dst_start"], r.get("tempo", 1.0))
                   for r in inserts if r["file"] == b["insert"]]
         else:
-            rs = [(r["src_start"], r["src_end"], r["dst_start"], tempo)
+            rs = [(r["src_start"], r["src_end"], r["dst_start"], r.get("tempo", tempo))
                   for r in speech]
         dur = max(b["end"] - b["start"], 1e-6)
         times = set(out.get(b["id"]) or [])
@@ -1181,11 +1224,12 @@ def run_ffmpeg(src: Path, segments: list[dict], musics: list[dict], out: Path,
     parts = []
     for i, s in enumerate(segments):
         if s["kind"] == "speech":
-            d = (s["b"] - s["a"]) / tempo
+            s_tempo = s.get("tempo", tempo)
+            d = (s["b"] - s["a"]) / s_tempo
             expr = (f"[0:a]atrim=start={s['a']:.3f}:end={s['b']:.3f},"
                     f"asetpts=PTS-STARTPTS")
-            if abs(tempo - 1.0) > 1e-6:
-                expr += f",atempo={tempo:.4f}"
+            if abs(s_tempo - 1.0) > 1e-6:
+                expr += f",atempo={s_tempo:.4f}"
             expr += (f",aformat=sample_rates=48000:"
                      f"channel_layouts=stereo")
             f_in = s.get("fade_in") or (fade if i == 0 else 0.0)
@@ -1921,6 +1965,7 @@ def main():
         [_row_span(it) for it in main_rows if it["keep"]], min_frag=0.0)
 
     # ── 每個 speech unit:snap → 字級精剪/停頓收緊 → 谷底 → word 保護 ──
+    tmap = tempo_map_from_program(program)
     segments = []
     unit_first_seg = {}
     n_pause = 0
@@ -1974,9 +2019,11 @@ def main():
                   if audio_tracks else None)
         if u.get("raw"):  # G 空白列:保留原聲原長,不 snap/不收停頓/不精剪
             unit_first_seg[ui] = len(segments)
-            segments.append({"kind": "speech", "a": u["start"], "b": u["end"],
-                             "clip": u["clip"],
-                             **({"titems": titems} if audio_tracks else {})})
+            segments.extend(
+                {"kind": "speech", "a": pa, "b": pb, "clip": u["clip"],
+                 "tempo": pt, **({"titems": titems} if audio_tracks else {})}
+                for pa, pb, pt in tempo_pieces(u["start"], u["end"], tmap,
+                                               args.tempo))
             continue
         if words:
             extend_unit_edges(u, words)
@@ -2023,9 +2070,10 @@ def main():
             # 隔壁沒勾列的「呃。」(EP22 B0095→B0096),覆寫又把它塞回來
             ranges = subtract(ranges, unchecked_cuts)
         unit_first_seg[ui] = len(segments)
-        segs = [{"kind": "speech", "a": a, "b": b, "clip": u["clip"],
-                 **({"titems": titems} if audio_tracks else {})}
-                for a, b in ranges]
+        segs = [{"kind": "speech", "a": pa, "b": pb, "clip": u["clip"],
+                 "tempo": pt, **({"titems": titems} if audio_tracks else {})}
+                for a, b in ranges
+                for pa, pb, pt in tempo_pieces(a, b, tmap, args.tempo)]
         if segs:
             if u["clip"]:  # 🎬 集錦:頭尾烘 2s 淡入/淡出(unit 級,不是每個小段)
                 segs[0]["fade_in"] = args.clip_fade_in
@@ -2058,6 +2106,9 @@ def main():
                   "範圍、或時間碼寫成成品時間軸了?(✂ 吃的是原始錄音時間軸)")
     if abs(args.tempo - 1.0) > 1e-6:
         print(f"[render] 語速 {args.tempo}x(只套語音,配樂原速)")
+    for ta, tb, tp in tmap:
+        print(f"[render] ⏩ 分段變速 {fmt_mmss(ta)}–"
+              f"{'結尾' if tb == float('inf') else fmt_mmss(tb)} {tp}x")
 
     if args.dump_ranges:
         # kind 含 insert(補錄 unit)——字級精剪同樣要能被這支測試探針看到,
@@ -2330,7 +2381,8 @@ def main():
 
     cut_map = [{"src_start": round(s.get("src_a", s["a"]), 3),
                 "src_end": round(s.get("src_b", s["b"]), 3),
-                "dst_start": round(d, 3)}
+                "dst_start": round(d, 3),
+                "tempo": s.get("tempo", args.tempo)}
                for s, d in zip(segments, dst_starts) if s["kind"] == "speech"]
     music_map = [{"file": m["path"].name, "dst_start": round(m["at"], 3),
                   "dur": round(m["dur"], 3)} for m in musics]

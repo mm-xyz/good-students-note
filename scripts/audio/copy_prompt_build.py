@@ -56,7 +56,8 @@ def build_transcript(sdir: Path) -> str:
     tempo = cm.get("tempo") or 1.0
 
     def to_dst(t: float) -> float | None:
-        hits = [r["dst_start"] + (t - r["src_start"]) / tempo for r in ranges
+        hits = [r["dst_start"] + (t - r["src_start"]) / (r.get("tempo") or tempo)
+                for r in ranges
                 if r["src_start"] - 0.5 <= t <= r["src_end"] + 0.5]
         return max(hits) if hits else None
 

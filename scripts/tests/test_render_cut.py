@@ -32,7 +32,8 @@ from render_cut import (src_to_dst,  # noqa: F401
                         env_to_expr, resolve_music, extend_unit_edges,
                         enforce_monotonic, structure_anchors, choose_roomtone,
                         RoomtoneError, load_template, apply_template,
-                        TemplateError, bgm_norm_gain_db, measure_lufs_ranges)
+                        TemplateError, bgm_norm_gain_db, measure_lufs_ranges,
+                        tempo_map_from_program, tempo_pieces, build_timeline)
 
 
 
@@ -486,6 +487,56 @@ class TestBgmEnvelope(unittest.TestCase):
         self.assertIn("st(0,", expr)            # smoothstep 內插
         self.assertIn("*ld(0)*(3-2*ld(0))", expr)
         self.assertIn("0.550", expr)            # 平段常數
+
+
+class TestTempoMap(unittest.TestCase):
+    def _program(self, *lines):
+        return parse_program_text("\n".join(lines) + "\n- [x] B0001 [0:01–0:02] [A] hi\n")
+
+    def test_parse_two_ranges_open_ended(self):
+        prog = self._program("## ⏩ 00:00-10:00 1.05", "## ⏩ 10:00- 1.0")
+        tm = tempo_map_from_program(prog)
+        self.assertEqual(tm, [(0.0, 600.0, 1.05), (600.0, float("inf"), 1.0)])
+
+    def test_missing_space_before_multiplier_is_rejected(self):
+        # `10:00-1.0` 會被讀成「迄=1.0 秒」,必須報錯不能靜默吃掉
+        with self.assertRaises(ValueError):
+            self._program("## ⏩ 10:00-1.0")
+
+    def test_overlapping_ranges_rejected(self):
+        prog = self._program("## ⏩ 0:00-10:00 1.05", "## ⏩ 9:00-20:00 1.0")
+        with self.assertRaises(ValueError):
+            tempo_map_from_program(prog)
+
+    def test_out_of_range_multiplier_rejected(self):
+        prog = self._program("## ⏩ 0:00-10:00 2.5")
+        with self.assertRaises(ValueError):
+            tempo_map_from_program(prog)
+
+    def test_pieces_split_at_boundary(self):
+        tm = [(0.0, 600.0, 1.05), (600.0, float("inf"), 1.0)]
+        self.assertEqual(tempo_pieces(590.0, 610.0, tm, 1.0),
+                         [(590.0, 600.0, 1.05), (600.0, 610.0, 1.0)])
+
+    def test_pieces_outside_map_use_default(self):
+        tm = [(0.0, 600.0, 1.05)]
+        self.assertEqual(tempo_pieces(700.0, 710.0, tm, 1.02),
+                         [(700.0, 710.0, 1.02)])
+
+    def test_pieces_without_map_is_single_default(self):
+        self.assertEqual(tempo_pieces(5.0, 9.0, [], 1.05), [(5.0, 9.0, 1.05)])
+
+    def test_src_to_dst_divides_by_range_tempo(self):
+        ranges = [{"src_start": 0.0, "src_end": 10.0, "dst_start": 0.0, "tempo": 1.25},
+                  {"src_start": 10.0, "src_end": 20.0, "dst_start": 8.0, "tempo": 1.0}]
+        self.assertAlmostEqual(src_to_dst(5.0, ranges), 4.0)
+        self.assertAlmostEqual(src_to_dst(15.0, ranges), 13.0)
+
+    def test_timeline_uses_range_tempo(self):
+        blocks = [{"id": "B1", "start": 0.0, "end": 10.0, "insert": None}]
+        speech = [{"src_start": 0.0, "src_end": 10.0, "dst_start": 3.0, "tempo": 1.25}]
+        tl = build_timeline(blocks, speech, [], tempo=1.0)
+        self.assertEqual(tl["B1"], [3.0])
 
 
 class TestBgmNormalize(unittest.TestCase):

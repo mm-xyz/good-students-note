@@ -88,7 +88,7 @@ def src_to_dst(cut_map: dict, t: float) -> float | None:
     starts = [r["src_start"] for r in rs]
     i = bisect.bisect_right(starts, t) - 1
     if 0 <= i < len(rs) and rs[i]["src_start"] <= t < rs[i]["src_end"]:
-        tempo = cut_map.get("tempo", 1.0) or 1.0
+        tempo = rs[i].get("tempo") or cut_map.get("tempo", 1.0) or 1.0
         return rs[i]["dst_start"] + (t - rs[i]["src_start"]) / tempo
     nxt = bisect.bisect_left(starts, t)
     return rs[nxt]["dst_start"] if nxt < len(rs) else None
