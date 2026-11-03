@@ -33,7 +33,8 @@ from render_cut import (src_to_dst,  # noqa: F401
                         enforce_monotonic, structure_anchors, choose_roomtone,
                         RoomtoneError, load_template, apply_template,
                         TemplateError, bgm_norm_gain_db, measure_lufs_ranges,
-                        tempo_map_from_program, tempo_pieces, build_timeline)
+                        tempo_map_from_program, tempo_pieces, build_timeline,
+                        pad_seams, run_ffmpeg)
 
 
 
@@ -537,6 +538,91 @@ class TestTempoMap(unittest.TestCase):
         speech = [{"src_start": 0.0, "src_end": 10.0, "dst_start": 3.0, "tempo": 1.25}]
         tl = build_timeline(blocks, speech, [], tempo=1.0)
         self.assertEqual(tl["B1"], [3.0])
+
+
+class TestEndingNoOverlap(unittest.TestCase):
+    def test_lead_zero_fades_in_after_speech(self):
+        # 片尾音樂 lead=0:不疊在人聲上,人聲講完才從 0 淡入到 solo
+        m = {"dur": 20.0, "has_prev": True, "has_next": False,
+             "fadein": 2.0, "fadeout": 3.0, "lead": 0.0, "tail": 0.0}
+        pts = bgm_envelope(m, duck=0.3, solo=0.8, predrop=2.0, rise=3.0)
+        self.assertEqual(pts[0], (0.0, 0.0))
+        self.assertEqual(pts[1], (2.0, 0.8))
+        self.assertTrue(all(v <= 0.8 for _, v in pts))
+
+    def test_lead_overlap_still_ducks_then_slowly_rises(self):
+        m = {"dur": 30.0, "has_prev": True, "has_next": True,
+             "fadein": 1.0, "fadeout": 1.5, "lead": 3.0, "tail": 4.0}
+        pts = bgm_envelope(m, duck=0.3, solo=0.8, predrop=2.0, rise=3.0)
+        self.assertEqual(pts[2:4], [(3.0, 0.3), (6.0, 0.8)])
+        self.assertTrue(all(v <= 0.8 for _, v in pts))
+
+
+class TestPadSeams(unittest.TestCase):
+    def _segs(self):
+        return [{"kind": "speech", "a": 0.0, "b": 10.0},
+                {"kind": "speech", "a": 50.0, "b": 60.0}]
+
+    def test_jump_seam_gets_breathing_room(self):
+        words = [{"start": 9.5, "end": 9.98}, {"start": 50.8, "end": 51.2}]
+        out = pad_seams(self._segs(), words, pad=0.25)
+        self.assertAlmostEqual(out[0]["b"], 10.25)
+        self.assertAlmostEqual(out[1]["a"], 49.75)
+
+    def test_pad_stops_before_next_word(self):
+        # 前段結尾後 0.1s 就有下一個字(別人搶話):只能補到字前 0.03s
+        words = [{"start": 9.5, "end": 9.98}, {"start": 10.1, "end": 10.4},
+                 {"start": 50.8, "end": 51.2}]
+        out = pad_seams(self._segs(), words, pad=0.25)
+        self.assertAlmostEqual(out[0]["b"], 10.07)
+
+    def test_contiguous_segments_untouched(self):
+        segs = [{"kind": "speech", "a": 0.0, "b": 10.0},
+                {"kind": "speech", "a": 10.3, "b": 20.0}]
+        out = pad_seams(segs, [], pad=0.25)
+        self.assertEqual((out[0]["b"], out[1]["a"]), (10.0, 10.3))
+
+    def test_pad_zero_is_off(self):
+        out = pad_seams(self._segs(), [], pad=0.0)
+        self.assertEqual((out[0]["b"], out[1]["a"]), (10.0, 50.0))
+
+    def test_non_speech_neighbours_untouched(self):
+        segs = [{"kind": "speech", "a": 0.0, "b": 10.0},
+                {"kind": "silence", "dur": 5.0},
+                {"kind": "speech", "a": 50.0, "b": 60.0}]
+        out = pad_seams(segs, [], pad=0.25)
+        self.assertEqual((out[0]["b"], out[2]["a"]), (10.0, 50.0))
+
+
+class TestBgmMatchSpeechAfterLoudnorm(unittest.TestCase):
+    def test_solo_music_matches_speech_after_final_loudnorm(self):
+        # 回歸(EP22 v10):人聲在 loudnorm 前很小聲,music 若對固定絕對值正規化,
+        # loudnorm 之後獨奏段會比人聲大 5–6 LU。對混音前人聲鏈實測值正規化才對。
+        import math
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+
+            def sine(path, amp, f, secs):
+                with wave.open(str(path), "wb") as wf:
+                    wf.setnchannels(1)
+                    wf.setsampwidth(2)
+                    wf.setframerate(48000)
+                    wf.writeframes(b"".join(
+                        int(amp * 32767 * math.sin(2 * math.pi * f * i / 48000))
+                        .to_bytes(2, "little", signed=True)
+                        for i in range(int(48000 * secs))))
+            sine(td / "speech.wav", 0.01, 300, 16)   # 很小聲的人聲鏈
+            sine(td / "music.wav", 0.9, 880, 14)
+            segs = [{"kind": "speech", "a": 0.0, "b": 8.0},
+                    {"kind": "silence", "dur": 6.0},
+                    {"kind": "speech", "a": 8.0, "b": 16.0}]
+            m = [{"path": td / "music.wav", "dur": 14.0, "ss": 0.0, "lead": 0.0,
+                  "tail": 0.0, "anchor_seg": 1, "env": [(0.0, 1.0), (14.0, 1.0)]}]
+            run_ffmpeg(td / "speech.wav", segs, m, td / "out.wav", 0.015,
+                       "I=-16:TP=-1.5:LRA=11", 0.04, None, 1.0, 0.0, True)
+            sp = measure_lufs_ranges(td / "out.wav", [[0.0, 8.0]])
+            mu = measure_lufs_ranges(td / "out.wav", [[8.5, 13.5]])
+            self.assertLess(abs(sp - mu), 1.0)
 
 
 class TestBgmNormalize(unittest.TestCase):

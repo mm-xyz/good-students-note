@@ -139,7 +139,8 @@ INSERT_RE = re.compile(r"^##\s*➕\s*(\S+)((?:\s+\w+=[\w.+-]+)*)\s*(.*)$")
 ROOMTONE_RE = re.compile(r"^##\s*🔇\s*(.*)$")
 # cutplan ⚙ config 區可覆蓋的數值旋鈕(dash 寫法;config > CLI/預設)
 CONFIG_KEYS = {"clip_gap", "clip_fade_in", "clip_fade_out", "music_speech_fade",
-               "bgm_duck", "bgm_solo", "bgm_predrop", "bgm_rise", "bgm_lufs",
+               "bgm_duck", "bgm_solo", "bgm_predrop", "bgm_rise", "bgm_lufs", "bgm_match",
+               "seam_pad",
                "max_pause", "pause_keep", "crossfade", "snap_window", "fade",
                "tempo", "music_lead_max", "roomtone_word_margin",
                "roomtone_max_db", "roomtone_voice_db", "roomtone_track_db",
@@ -416,6 +417,36 @@ def tempo_pieces(a: float, b: float, tmap: list[tuple[float, float, float]],
     return out
 
 
+def pad_seams(segments: list[dict], words: list[dict] | None, pad: float,
+              min_jump: float = 1.0, margin: float = 0.03) -> list[dict]:
+    """跳接處補換氣空間:來源不連續(跳過 ≥ min_jump 秒)的兩段語音,前段往後、
+    後段往前各補最多 pad 秒的**真實原聲**(說話人自己的停頓/換氣),
+    補到離最近的字 margin 秒為止——不補數位靜音、不吃進別人的字。
+    精剪把切點收到字邊界外 0.02s,跳接就變成「話一講完下一句立刻開始」(EP22 5:48)。"""
+    if pad <= 0:
+        return segments
+    ws = sorted(words or [], key=lambda w: w["start"])
+    out = [dict(s) for s in segments]
+    for prev, nxt in zip(out, out[1:]):
+        if prev["kind"] != "speech" or nxt["kind"] != "speech":
+            continue
+        if nxt["a"] - prev["b"] < min_jump:
+            continue
+        room_b = pad
+        for w in ws:
+            if w["start"] >= prev["b"] - 1e-9:
+                room_b = min(pad, max(0.0, w["start"] - margin - prev["b"]))
+                break
+        room_a = pad
+        for w in reversed(ws):
+            if w["end"] <= nxt["a"] + 1e-9:
+                room_a = min(pad, max(0.0, nxt["a"] - (w["end"] + margin)))
+                break
+        prev["b"] += room_b
+        nxt["a"] -= room_a
+    return out
+
+
 def bgm_envelope(m: dict, duck: float, solo: float, predrop: float,
                  rise: float) -> list[tuple[float, float]]:
     """疊軌感知的 BGM 音量包絡(分段線性 keypoints,音樂 local 時間軸,0–1 乘數)。
@@ -426,7 +457,7 @@ def bgm_envelope(m: dict, duck: float, solo: float, predrop: float,
     算出來的,不做音訊偵測。"""
     D = m["dur"]
     pts = [(0.0, 0.0)]
-    if m["has_prev"]:  # 疊在前段人聲尾巴下進場:0→duck,人聲結束才升 solo
+    if m["has_prev"] and m["lead"] >= 0.1:  # 疊在前段人聲尾巴下進場:0→duck,人聲結束才升 solo
         fi = min(m["fadein"], max(m["lead"], 0.1))
         pts += [(fi, duck), (m["lead"], duck), (m["lead"] + rise, solo)]
     else:
@@ -1184,10 +1215,36 @@ def ffprobe_duration(path: Path) -> float:
     return float(out)
 
 
+def measure_chain_lufs(parts: list[str], post: str, src: Path,
+                       extra_inputs: list[Path], workdir: Path) -> float | None:
+    """量混音前人聲鏈(concat→dynaudnorm)的 integrated LUFS。
+
+    最後的 loudnorm 在混音之後,把整體拉到 -16;分軌 bus 混音前只有約 -38 LUFS,
+    所以間奏不能對固定絕對值(-17)正規化——EP22 v10 實測獨奏段比人聲大 5–6 LU。
+    對這個量測值正規化,loudnorm 之後間奏跟人聲的相對大小才是設計值。"""
+    workdir.mkdir(parents=True, exist_ok=True)
+    script = workdir / ".measure_filter.txt"
+    script.write_text(";\n".join(parts + [f"[{post}]ebur128=framelog=quiet[mo]"]),
+                      encoding="utf-8")
+    cmd = ["ffmpeg", "-hide_banner", "-nostats", "-i", str(src)]
+    for mp in extra_inputs:
+        cmd += ["-i", str(mp)]
+    cmd += ["-/filter_complex", str(script), "-map", "[mo]", "-f", "null", "-"]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, check=True)
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return None
+    finally:
+        script.unlink(missing_ok=True)
+    m = re.findall(r"^\s*I:\s*(-?[\d.]+)\s*LUFS", r.stderr, re.M)
+    return float(m[-1]) if m else None
+
+
 def run_ffmpeg(src: Path, segments: list[dict], musics: list[dict], out: Path,
                fade: float, loudnorm: str | None, crossfade: float,
                dynaudnorm: str | None, tempo: float = 1.0,
-               bgm_lufs: float = 0.0) -> tuple[list[float], float]:
+               bgm_lufs: float = 0.0,
+               bgm_match: bool = False) -> tuple[list[float], float]:
     """出片(節目結構 2026-07-28 v2:音樂改 overlay 疊接,不進 concat 鏈)。
 
     concat 鏈只有 speech/silence:
@@ -1296,18 +1353,25 @@ def run_ffmpeg(src: Path, segments: list[dict], musics: list[dict], out: Path,
         parts.append(f"[cat]dynaudnorm={dynaudnorm}[dyn]")
         post = "dyn"
     total = chain_end
+    speech_l = None
+    if bgm_match and musics:
+        speech_l = measure_chain_lufs(parts, post, src, music_paths, out.parent)
+        print("[render] 🎵 人聲鏈(混音前)響度 "
+              + (f"{speech_l:.1f} LUFS → 間奏正規化到同一響度" if speech_l is not None
+                 else "量不到,間奏維持原音量"))
     for k, m in enumerate(musics):
         at = max(0.0, (chain_end if m["anchor_seg"] is None
                        else dst_starts[m["anchor_seg"]]) - m["lead"])
         m["at"] = at
         total = max(total, at + m["dur"])
         norm = ""
-        if bgm_lufs:
+        target = speech_l if bgm_match else (bgm_lufs or None)
+        if target is not None:
             music_l = measure_lufs_ranges(
                 m["path"], [[m["ss"], m["ss"] + m["dur"]]])
-            g = bgm_norm_gain_db(music_l, bgm_lufs)
+            g = bgm_norm_gain_db(music_l, target)
             print(f"[render] 🎵 {m['path'].name} 正規化:"
-                  + (f"{music_l:.1f} LUFS → {bgm_lufs:.1f} LUFS ({g:+.1f}dB)"
+                  + (f"{music_l:.1f} LUFS → {target:.1f} LUFS ({g:+.1f}dB)"
                      if music_l is not None else "量不到響度,維持原音量"))
             if abs(g) > 0.05:
                 norm = f"volume={g:.2f}dB,"
@@ -1379,6 +1443,12 @@ def main():
     ap.add_argument("--bgm-lufs", type=float, default=0.0,
                     help="間奏素材先正規化到這個 LUFS 再套 duck/solo(0=停用;"
                          "節目樣板設 -17≈人聲響度,solo=1.0 即與人聲同大)")
+    ap.add_argument("--bgm-match", type=float, default=0.0,
+                    help="1=間奏正規化到混音前人聲鏈的實測響度(推薦;loudnorm 之後"
+                         "相對大小才準);0=停用或改用 --bgm-lufs 絕對值")
+    ap.add_argument("--seam-pad", type=float, default=0.0,
+                    help="跳接處前後各補最多幾秒真實原聲當換氣空間(0=停用;"
+                         "節目樣板設 0.25)")
     ap.add_argument("--bgm-predrop", type=float, default=2.0,
                     help="人聲進場前幾秒開始把 solo 降回 duck(預設 2.0)")
     ap.add_argument("--bgm-rise", type=float, default=1.5,
@@ -2092,6 +2162,12 @@ def main():
     if len(segments) != n_seg0:
         print(f"[render] ⚠ 剪點微調造成 {n_seg0 - len(segments)} 個段落被"
               f"相鄰段落吃掉(重疊=同一段音訊播兩次),已丟棄")
+    if args.seam_pad > 0:
+        before = [(s.get("a"), s.get("b")) for s in segments if s["kind"] == "speech"]
+        segments = pad_seams(segments, words_guard or words, args.seam_pad)
+        n_pad = sum(1 for x, y in zip(before, [(s.get("a"), s.get("b"))
+                    for s in segments if s["kind"] == "speech"]) if x != y)
+        print(f"[render] 跳接換氣:{n_pad} 段補了前後原聲(seam-pad={args.seam_pad}s)")
     if not any(s["kind"] == "speech" for s in segments):
         sys.exit("[render] FAIL: 沒有任何保留 block")
     if n_strike:
@@ -2375,7 +2451,7 @@ def main():
     dst_starts, final_dur = run_ffmpeg(src, segments, musics, out, args.fade,
                                        args.loudnorm or None, args.crossfade,
                                        args.dynaudnorm or None, args.tempo,
-                                       args.bgm_lufs)
+                                       args.bgm_lufs, bool(args.bgm_match))
     if tracks_bus is not None and not args.keep_tracks_bus:
         tracks_bus.unlink(missing_ok=True)
 
