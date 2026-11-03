@@ -25,6 +25,10 @@
 4. 寫回只重寫帶 `audacity` 尾巴的行（整組放在 ⚙ 行之後），人手寫的 ✂ 不碰。每輪差異累加；
    新舊反向重疊時新的贏。改前備份 `cutplan.before-audacity.md`。
 5. 只用一條標籤軌，三軌一起剪；分軌各自剪之後再說。
+6. `inject`：把 AI／MM 兩條軌直接寫進 `.aup4`，省掉 MM 匯入、改名、複製三步。只在 binary XML 的
+   byte 位置上剪貼（新軌屬性抄既有標籤軌），寫之前自己先解析一次，壞了就不寫。`--heal-clips` 把同一條
+   音軌被切開的多個 clip 併回一段（Audacity 4 刪除是非破壞性的，各 clip 都帶完整原音；offset 與
+   blockid 全同才做）。Audacity 開著（-wal 有內容或 lsof 有人開著）就拒絕。
 
 ## 後果
 

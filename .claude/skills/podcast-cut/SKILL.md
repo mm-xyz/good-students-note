@@ -74,6 +74,7 @@ render 會把每首間奏先正規化到 `bgm-lufs`（樣板 -17≈人聲）再�
 
 1. 出完片：`python3 scripts/audio/audacity_labels.py export --session <目錄>` → `_asset/audacity_AI.txt`
 2. MM 在 Audacity 開分軌 WAV（原始錄音，**不是成品**），匯入標籤、軌名改 `AI`，複製一條改名 `MM`，只動 `MM`，⌘S
+   - 或直接寫進專案檔：`audacity_labels.py inject --session <目錄> --aup <專案.aup4> [--drop-label-tracks] [--heal-clips]`（Audacity 要先關；開著就先 `sqlite3 "file:X.aup4?mode=ro" ".backup X-AI.aup4"` 複製一份改複本）。`--heal-clips` 把被切開的音軌接回完整一段
 3. `python3 scripts/audio/audacity_labels.py apply --session <目錄> --aup <專案.aup4>`（先加 `--dry-run` 看差異）→ cutplan 多出 `## ✂ … audacity`／`## ✚ … audacity`
 4. 照常 `cut.py` 出片；下一輪細剪前重跑 export
 

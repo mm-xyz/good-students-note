@@ -35,6 +35,7 @@ import re
 import shutil
 import sqlite3
 import struct
+import subprocess
 import sys
 from pathlib import Path
 
@@ -71,69 +72,94 @@ def _connect(path: Path) -> sqlite3.Connection:
         raise AupError(f"{path.name} 不是 Audacity 專案檔(.aup4):{e}") from e
 
 
-def _decode(dict_blob: bytes, doc_blob: bytes) -> list[tuple]:
-    """Audacity binary XML(ProjectSerializer)→ [("start", tag, attrs) | ("end", tag)]。
-    op 16 是 4.x 新增的二進位資料(縮圖 PNG),跳過。"""
+ENC = {1: "utf-8", 2: "utf-16-le", 4: "utf-32-le"}
+
+
+def _ops(dict_blob: bytes, doc_blob: bytes):
+    """Audacity binary XML(ProjectSerializer)逐 op 切開 →
+    (names, cs, [(op, 起, 迄, 名稱, 值)]),起迄是 doc 內的 byte 位置。
+    op 16 是 4.x 新增的二進位資料(縮圖 PNG),值不解。"""
     names: dict[int, str] = {}
-    out: list[tuple] = []
-    enc = {1: "utf-8", 2: "utf-16-le", 4: "utf-32-le"}
     cs = 4
-    for buf in (dict_blob, doc_blob):
+    out: list[tuple] = []
+    for which, buf in ((0, dict_blob), (1, doc_blob)):
         p = 0
-
-        def rd(fmt):
-            nonlocal p
-            v = struct.unpack_from(fmt, buf, p)
-            p += struct.calcsize(fmt)
-            return v[0] if len(v) == 1 else v
-
-        def text(n):
-            nonlocal p
-            t = buf[p:p + n].decode(enc[cs])
-            p += n
-            return t
-
-        def attr(k, v):
-            if out and out[-1][0] == "start":
-                out[-1][2][names.get(k, k)] = v
-
         while p < len(buf):
-            op = rd("<B")
+            st = p
+            op = buf[p]
+            p += 1
+            name = val = None
             if op == 0:
-                cs = rd("<B")
+                cs = buf[p]
+                p += 1
             elif op == 15:
-                i, n = rd("<HH")
-                names[i] = text(n)
-            elif op == 1:
-                out.append(("start", names.get(rd("<H")), {}))
-            elif op == 2:
-                out.append(("end", names.get(rd("<H"))))
+                i, n = struct.unpack_from("<HH", buf, p)
+                p += 4
+                names[i] = buf[p:p + n].decode(ENC[cs])
+                p += n
+            elif op in (1, 2):
+                name = names.get(struct.unpack_from("<H", buf, p)[0])
+                p += 2
             elif op == 3:
-                i, n = rd("<Hi")
-                attr(i, text(n))
-            elif op in (4, 6):
-                attr(*rd("<Hi"))
-            elif op == 5:
-                attr(*rd("<HB"))
-            elif op == 7:
-                attr(*rd("<Hq"))
-            elif op == 8:
-                attr(*rd("<HI"))
-            elif op in (9, 10):
-                i, v, _ = rd("<Hfi" if op == 9 else "<Hdi")
-                attr(i, v)
+                i, n = struct.unpack_from("<Hi", buf, p)
+                p += 6
+                name, val = names.get(i), buf[p:p + n].decode(ENC[cs])
+                p += n
+            elif op in (4, 5, 6, 7, 8, 9, 10):
+                fmt = {4: "<Hi", 5: "<HB", 6: "<Hi", 7: "<Hq", 8: "<HI",
+                       9: "<Hfi", 10: "<Hdi"}[op]
+                v = struct.unpack_from(fmt, buf, p)
+                p += struct.calcsize(fmt)
+                name, val = names.get(v[0]), v[1]
             elif op in (11, 12):
-                n = rd("<i")           # 二進位資料/原始字串,不需要,不解碼
-                p += n                 # (不能寫成 p += rd():會先讀到舊的 p)
+                p += 4 + struct.unpack_from("<i", buf, p)[0]
             elif op in (13, 14):
                 pass
             elif op == 16:
-                _, n = rd("<HI")
-                p += n
+                p += 6 + struct.unpack_from("<HI", buf, p)[1]
             else:
-                raise AupError(f"不認得的 binary XML opcode {op}(位置 {p - 1}),"
+                raise AupError(f"不認得的 binary XML opcode {op}(位置 {st}),"
                                "Audacity 版本是不是又改格式了?")
+            if which:
+                out.append((op, st, p, name, val))
+    return names, cs, out
+
+
+def _decode(dict_blob: bytes, doc_blob: bytes) -> list[tuple]:
+    """→ [("start", tag, attrs) | ("end", tag)]。"""
+    out: list[tuple] = []
+    for op, _, _, name, val in _ops(dict_blob, doc_blob)[2]:
+        if op == 1:
+            out.append(("start", name, {}))
+        elif op == 2:
+            out.append(("end", name))
+        elif 3 <= op <= 10 and out and out[-1][0] == "start":
+            out[-1][2][name] = val
     return out
+
+
+def _tree(dict_blob: bytes, doc_blob: bytes):
+    """→ (names, cs, 頂層元素),元素 = {"tag","s","attr_end","e","attrs","kids"};
+    attrs[名稱] = (op, 起, 迄, 值)。改檔只在這些 byte 位置上剪貼,其餘原封不動。"""
+    names, cs, ops = _ops(dict_blob, doc_blob)
+    top: list[dict] = []
+    stack: list[dict] = []
+    for op, s, e, name, val in ops:
+        if op == 1:
+            if stack and stack[-1]["attr_end"] is None:
+                stack[-1]["attr_end"] = s
+            el = {"tag": name, "s": s, "attr_end": None, "e": None,
+                  "attrs": {}, "kids": []}
+            (stack[-1]["kids"] if stack else top).append(el)
+            stack.append(el)
+        elif op == 2:
+            el = stack.pop()
+            if el["attr_end"] is None:
+                el["attr_end"] = s
+            el["e"] = e
+        elif 3 <= op <= 10 and stack and stack[-1]["attr_end"] is None:
+            stack[-1]["attrs"][name] = (op, s, e, val)
+    return names, cs, top
 
 
 def read_aup4(path: Path) -> list[dict]:
@@ -158,6 +184,153 @@ def read_aup4(path: Path) -> list[dict]:
         elif ev[0] == "end" and ev[1] == "labeltrack":
             cur = None
     return tracks
+
+
+# ── .aup4 寫檔(inject)───────────────────────────────────────────────
+
+def _descend(el, tag):
+    for k in el["kids"]:
+        if k["tag"] == tag:
+            yield k
+        yield from _descend(k, tag)
+
+
+def read_clips(path: Path) -> dict[str, list[tuple[float, float, float]]]:
+    """→ {音軌名: [(offset, trimLeft, trimRight), ...]}(驗證 heal 用)。"""
+    con = _connect(path)
+    try:
+        d, doc = con.execute("SELECT dict, doc FROM project WHERE id = 1").fetchone()
+    finally:
+        con.close()
+    _, _, top = _tree(d, doc)
+    out = {}
+    for prj in top:
+        for wt in (k for k in prj["kids"] if k["tag"] == "wavetrack"):
+            out[wt["attrs"]["name"][3]] = [
+                tuple(c["attrs"][a][3] for a in ("offset", "trimLeft", "trimRight"))
+                for c in wt["kids"] if c["tag"] == "waveclip"]
+    return out
+
+
+def _in_use(path: Path) -> bool:
+    """Audacity 開著:-wal 有內容,或有程式開著這幾個檔。唯讀查詢(read_aup4)
+    會留下 0 byte 的 -wal 與 -shm,不算。"""
+    wal = Path(str(path) + "-wal")
+    if wal.exists() and wal.stat().st_size > 0:
+        return True
+    files = [str(path)] + [str(path) + s for s in ("-wal", "-shm")
+                           if Path(str(path) + s).exists()]
+    try:
+        r = subprocess.run(["lsof", "-t", *files], capture_output=True, text=True)
+    except FileNotFoundError:
+        return False
+    return bool(r.stdout.strip())
+
+
+def inject(path: Path, ai_ranges, drop_label_tracks: bool, heal_clips: bool) -> dict:
+    """把 AI／MM 兩條標籤軌(內容都是 ai_ranges)直接寫進 .aup4。
+
+    - 既有的 AI／MM 軌一律先拿掉(重跑冪等);drop_label_tracks 連其他標籤軌一起拿掉。
+    - heal_clips:同一條音軌被切成多個 clip(Audacity 4 的刪除是非破壞性的,每個
+      clip 都還帶著完整原音)→ 併回一個、trim 取最小,刪掉的段落接回來。只在
+      各 clip 的 offset 與 blockid 全同時才做,否則整個中止、不寫入。
+    - 只在 byte 位置上剪貼,其他元素(音訊、縮圖、效果)原封不動。
+    - Audacity 開著(有 -wal)就拒絕,不跟它搶同一個檔。
+    """
+    if _in_use(path):
+        raise AupError(f"{path.name} 還被 Audacity 開著 —— 先關掉 Audacity"
+                       ",或先複製一份出來改")
+    con = sqlite3.connect(path)
+    try:
+        d, doc = con.execute("SELECT dict, doc FROM project WHERE id = 1").fetchone()
+        names, cs, top = _tree(d, doc)
+        ids = {n: i for i, n in names.items()}
+        need = ["labeltrack", "label", "t", "t1", "title", "name", "numlabels"]
+        miss = [n for n in need if n not in ids]
+        if miss:
+            raise AupError(f"專案字典缺 {'、'.join(miss)} —— 先在 Audacity 隨便加一條"
+                           "標籤軌、存檔,再跑一次")
+        prj = next((el for el in top if el["tag"] == "project"), None)
+        if prj is None:
+            raise AupError("找不到 <project> 元素")
+        edits: list[tuple[int, int, bytes]] = []
+        tracks = [k for k in prj["kids"] if k["tag"] in ("wavetrack", "labeltrack")]
+        lts = [k for k in tracks if k["tag"] == "labeltrack"]
+        # 新軌的屬性抄既有標籤軌(Audacity 認得的那一組),沒有就只給 name/numlabels
+        tpl = lts[0] if lts else None
+        for lt in lts:
+            if drop_label_tracks or lt["attrs"].get("name", (0, 0, 0, ""))[3] in ("AI", "MM"):
+                edits.append((lt["s"], lt["e"], b""))
+
+        def s_(name, v):
+            raw = v.encode(ENC[cs])
+            return b"\x03" + struct.pack("<Hi", ids[name], len(raw)) + raw
+
+        digits = 19
+        if tpl:
+            first = next(_descend(tpl, "label"), None)
+            if first and first["attrs"].get("t", (0,))[0] == 10:
+                _, a, b_, _ = first["attrs"]["t"]
+                digits = struct.unpack_from("<i", doc, b_ - 4)[0]
+
+        def track(name):
+            out = bytearray(b"\x01" + struct.pack("<H", ids["labeltrack"]))
+            if tpl:
+                for an, (op, a, b_, v) in sorted(tpl["attrs"].items(), key=lambda x: x[1][1]):
+                    if an == "name":
+                        out += s_("name", name)
+                    elif an == "numlabels":
+                        out += b"\x04" + struct.pack("<Hi", ids[an], len(ai_ranges))
+                    elif an in ("isSelected", "isFocused") and op in (4, 5, 6):
+                        out += doc[a:a + 3] + b"\x00" * (b_ - a - 3)
+                    else:
+                        out += doc[a:b_]
+            else:
+                out += s_("name", name)
+                out += b"\x04" + struct.pack("<Hi", ids["numlabels"], len(ai_ranges))
+            for i, (a, b_) in enumerate(ai_ranges, 1):
+                out += b"\x01" + struct.pack("<H", ids["label"])
+                out += b"\x0a" + struct.pack("<Hdi", ids["t"], float(a), digits)
+                out += b"\x0a" + struct.pack("<Hdi", ids["t1"], float(b_), digits)
+                out += s_("title", str(i))
+                out += b"\x02" + struct.pack("<H", ids["label"])
+            out += b"\x02" + struct.pack("<H", ids["labeltrack"])
+            return bytes(out)
+
+        at = max(k["e"] for k in tracks) if tracks else prj["attr_end"]
+        edits.append((at, at, track("AI") + track("MM")))
+
+        healed = []
+        if heal_clips:
+            for wt in (k for k in tracks if k["tag"] == "wavetrack"):
+                clips = [c for c in wt["kids"] if c["tag"] == "waveclip"]
+                if len(clips) < 2:
+                    continue
+                sig = {(c["attrs"]["offset"][3],
+                        tuple(b["attrs"]["blockid"][3] for b in _descend(c, "waveblock")))
+                       for c in clips}
+                name = wt["attrs"]["name"][3]
+                if len(sig) != 1:
+                    raise AupError(f"{name} 的 {len(clips)} 個 clip 音訊不同(offset 或"
+                                   " blockid 不一致),不能自動接回;沒有寫入任何東西")
+                keep = clips[0]
+                for an in ("trimLeft", "trimRight"):
+                    op, a, b_, _ = keep["attrs"][an]
+                    v = min(c["attrs"][an][3] for c in clips)
+                    edits.append((a + 3, a + 11, struct.pack("<d", v)))
+                for c in clips[1:]:
+                    edits.append((c["s"], c["e"], b""))
+                healed.append(name)
+
+        new = bytearray(doc)
+        for a, b_, rep in sorted(edits, key=lambda x: (x[0], x[1]), reverse=True):
+            new[a:b_] = rep
+        _tree(d, bytes(new))            # 寫之前自己先解一次,壞了就不寫
+        con.execute("UPDATE project SET doc = ? WHERE id = 1", (bytes(new),))
+        con.commit()
+    finally:
+        con.close()
+    return {"labels": len(ai_ranges), "healed": healed}
 
 
 # ── 區間運算 ────────────────────────────────────────────────────────────
@@ -301,6 +474,21 @@ def cmd_apply(args) -> None:
     print("  下一步:cut.py 出片;出完再 export 一次,下一輪的 AI 軌才是新的")
 
 
+def cmd_inject(args) -> None:
+    cm = work_dir(args.session) / "cut_map.json"
+    if not cm.exists():
+        sys.exit(f"[audacity] FAIL: 找不到 {cm} — 先用 cut.py 出一次片")
+    ranges = [[r["src_start"], r["src_end"]]
+              for r in json.loads(cm.read_text(encoding="utf-8"))["ranges"]]
+    try:
+        r = inject(args.aup, ranges, args.drop_label_tracks, args.heal_clips)
+    except AupError as e:
+        sys.exit(f"[audacity] FAIL: {e}")
+    print(f"[audacity] {args.aup.name}:寫入 AI／MM 兩條標籤軌,各 {r['labels']} 個保留段"
+          + (f";接回 {'、'.join(r['healed'])} 被刪掉的段落" if r["healed"] else ""))
+    print("  打開 Audacity,只拉 MM 那條,⌘S 存檔,再跑 apply")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -311,8 +499,15 @@ def main() -> None:
     a.add_argument("--aup", type=Path, required=True)
     a.add_argument("--plan", default="cutplan.md")
     a.add_argument("--dry-run", action="store_true")
+    j = sub.add_parser("inject", help="cut_map.json → 直接寫進 .aup4 的 AI／MM 標籤軌")
+    j.add_argument("--session", type=Path, required=True)
+    j.add_argument("--aup", type=Path, required=True)
+    j.add_argument("--drop-label-tracks", action="store_true",
+                   help="AI／MM 以外的標籤軌也一起拿掉")
+    j.add_argument("--heal-clips", action="store_true",
+                   help="被切成多段的音軌併回一段(刪掉的段落接回來)")
     args = ap.parse_args()
-    {"export": cmd_export, "apply": cmd_apply}[args.cmd](args)
+    {"export": cmd_export, "apply": cmd_apply, "inject": cmd_inject}[args.cmd](args)
 
 
 if __name__ == "__main__":

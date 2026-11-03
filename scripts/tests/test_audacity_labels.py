@@ -27,7 +27,7 @@ REPO_ROOT = AUDIO_DIR.parent.parent
 sys.path.insert(0, str(AUDIO_DIR))
 
 from audacity_labels import (read_aup4, labels_txt, diff_tracks,  # noqa: E402
-                             merge_edges, AupError)
+                             merge_edges, AupError, inject, read_clips)
 from render_cut import parse_ts  # noqa: E402
 
 
@@ -208,6 +208,163 @@ class TestMergeEdges(unittest.TestCase):
         plan = "# Cutplan\n\n- [x] B0001 [0:00–0:01] 一。\n"
         out = merge_edges(plan, [[1.0, 2.0]], [])
         self.assertLess(out.index("## ✂"), out.index("- [x] B0001"))
+
+
+# ── inject:直接改 .aup4(#1181 第二輪)──────────────────────────────────
+# 通用的樹狀編碼器:(tag, [(attr, op, value)], [children])。
+# op: "s" 字串(3)、"i" int(4)、"d" double(10)、"b" bool(5)
+
+def _enc_tree(root) -> tuple[bytes, bytes]:
+    names: list[str] = []
+
+    def nid(n):
+        if n not in names:
+            names.append(n)
+        return names.index(n)
+
+    def walk(node):
+        tag, attrs, kids = node
+        out = bytearray(b"\x01" + struct.pack("<H", nid(tag)))
+        for k, op, v in attrs:
+            if op == "s":
+                raw = v.encode("utf-32-le")
+                out += b"\x03" + struct.pack("<Hi", nid(k), len(raw)) + raw
+            elif op == "i":
+                out += b"\x04" + struct.pack("<Hi", nid(k), v)
+            elif op == "b":
+                out += b"\x05" + struct.pack("<HB", nid(k), v)
+            else:
+                out += b"\x0a" + struct.pack("<Hdi", nid(k), v, 19)
+        for c in kids:
+            out += walk(c)
+        out += b"\x02" + struct.pack("<H", nid(tag))
+        return out
+
+    head = "<?xml ".encode("utf-32-le")
+    doc = b"\x0c" + struct.pack("<i", len(head)) + head + bytes(walk(root))
+    d = bytearray(b"\x00\x04")
+    for i, n in enumerate(names):
+        raw = n.encode("utf-32-le")
+        d += b"\x0f" + struct.pack("<HH", i, len(raw)) + raw
+    return bytes(d), doc
+
+
+def _clip(trim_l, trim_r, blocks=(1, 2)):
+    seq = ("sequence", [("numsamples", "i", 441000)],
+           [("waveblock", [("start", "i", i * 1000), ("blockid", "i", b)], [])
+            for i, b in enumerate(blocks)])
+    return ("waveclip", [("offset", "d", 0.0), ("trimLeft", "d", trim_l),
+                         ("trimRight", "d", trim_r), ("name", "s", "Sarah")],
+            [seq, ("envelope", [("numpoints", "i", 0)], [])])
+
+
+def _ltrack(name, labels):
+    return ("labeltrack", [("name", "s", name), ("isSelected", "b", 1),
+                           ("height", "i", 60), ("numlabels", "i", len(labels))],
+            [("label", [("t", "d", a), ("t1", "d", b), ("title", "s", s)], [])
+             for a, b, s in labels])
+
+
+def make_project(path: Path, sarah_clips, label_tracks) -> None:
+    root = ("project", [("rate", "d", 44100.0)], [
+        ("tags", [], []),
+        ("wavetrack", [("name", "s", "MIC4_Sarah")], sarah_clips),
+        *label_tracks,
+        ("wavetrack", [("name", "s", "MIC1_Mars")], [_clip(0.0, 0.0, (7,))]),
+        ("effects", [], []),
+    ])
+    d, doc = _enc_tree(root)
+    con = sqlite3.connect(path)
+    con.execute("CREATE TABLE project(id INTEGER PRIMARY KEY, dict BLOB, doc BLOB)")
+    con.execute("INSERT INTO project VALUES (1, ?, ?)", (d, doc))
+    con.commit()
+    con.close()
+
+
+class TestInject(unittest.TestCase):
+    AI = [[1.0, 2.0], [3.0, 4.5]]
+
+    def _proj(self, td, clips=None):
+        p = Path(td) / "ep.aup4"
+        make_project(p, clips or [_clip(0.0, 8.0), _clip(2.5, 0.0)],
+                     [_ltrack("Labels-Sarah", [(0.5, 0.7, "TEST")]),
+                      _ltrack("MM", [(9.0, 9.5, "舊")])])
+        return p
+
+    def test_adds_ai_and_mm_and_drops_other_label_tracks(self):
+        with tempfile.TemporaryDirectory() as td:
+            p = self._proj(td)
+            inject(p, self.AI, drop_label_tracks=True, heal_clips=False)
+            got = read_aup4(p)
+        self.assertEqual([t["name"] for t in got], ["AI", "MM"])
+        self.assertEqual([x[:2] for x in got[0]["labels"]], [(1.0, 2.0), (3.0, 4.5)])
+        self.assertEqual(got[1]["labels"], got[0]["labels"])
+
+    def test_keeps_other_label_tracks_without_flag_but_replaces_ai_mm(self):
+        with tempfile.TemporaryDirectory() as td:
+            p = self._proj(td)
+            inject(p, self.AI, drop_label_tracks=False, heal_clips=False)
+            got = read_aup4(p)
+        self.assertEqual([t["name"] for t in got], ["Labels-Sarah", "AI", "MM"])
+        self.assertEqual(len(got[2]["labels"]), 2)       # 舊 MM 被換掉
+
+    def test_rerun_is_idempotent(self):
+        with tempfile.TemporaryDirectory() as td:
+            p = self._proj(td)
+            inject(p, self.AI, drop_label_tracks=True, heal_clips=True)
+            con = sqlite3.connect(p)
+            once = con.execute("SELECT doc FROM project").fetchone()[0]
+            con.close()
+            inject(p, self.AI, drop_label_tracks=True, heal_clips=True)
+            con = sqlite3.connect(p)
+            twice = con.execute("SELECT doc FROM project").fetchone()[0]
+            con.close()
+        self.assertEqual(once, twice)
+
+    def test_heal_rejoins_split_clip_sharing_same_blocks(self):
+        with tempfile.TemporaryDirectory() as td:
+            p = self._proj(td)
+            inject(p, self.AI, drop_label_tracks=True, heal_clips=True)
+            clips = read_clips(p)
+        self.assertEqual(clips["MIC4_Sarah"], [(0.0, 0.0, 0.0)])
+        self.assertEqual(clips["MIC1_Mars"], [(0.0, 0.0, 0.0)])
+
+    def test_heal_refuses_clips_with_different_audio(self):
+        with tempfile.TemporaryDirectory() as td:
+            p = self._proj(td, clips=[_clip(0.0, 8.0, (1, 2)), _clip(2.5, 0.0, (3, 4))])
+            with self.assertRaises(AupError):
+                inject(p, self.AI, drop_label_tracks=True, heal_clips=True)
+            clips = read_clips(p)
+        self.assertEqual(len(clips["MIC4_Sarah"]), 2)       # 失敗不寫入
+
+    def test_empty_wal_left_by_readonly_query_is_not_in_use(self):
+        with tempfile.TemporaryDirectory() as td:
+            p = self._proj(td)
+            Path(str(p) + "-wal").write_bytes(b"")
+            inject(p, self.AI, drop_label_tracks=True, heal_clips=False)
+            self.assertEqual([t["name"] for t in read_aup4(p)], ["AI", "MM"])
+
+    def test_refuses_while_file_is_open_by_a_process(self):
+        with tempfile.TemporaryDirectory() as td:
+            p = self._proj(td)
+            holder = subprocess.Popen([sys.executable, "-c",
+                                       "import sys,time;f=open(sys.argv[1],'rb');"
+                                       "print('ok',flush=True);time.sleep(30)", str(p)],
+                                      stdout=subprocess.PIPE, text=True)
+            try:
+                holder.stdout.readline()
+                with self.assertRaises(AupError):
+                    inject(p, self.AI, drop_label_tracks=True, heal_clips=False)
+            finally:
+                holder.kill()
+                holder.wait()
+
+    def test_refuses_while_audacity_holds_wal(self):
+        with tempfile.TemporaryDirectory() as td:
+            p = self._proj(td)
+            Path(str(p) + "-wal").write_bytes(b"x")
+            with self.assertRaises(AupError):
+                inject(p, self.AI, drop_label_tracks=True, heal_clips=False)
 
 
 class TestCli(unittest.TestCase):
