@@ -123,7 +123,8 @@ def _decode(dict_blob: bytes, doc_blob: bytes) -> list[tuple]:
                 i, v, _ = rd("<Hfi" if op == 9 else "<Hdi")
                 attr(i, v)
             elif op in (11, 12):
-                p += rd("<i")          # 二進位資料/原始字串,不需要,不解碼
+                n = rd("<i")           # 二進位資料/原始字串,不需要,不解碼
+                p += n                 # (不能寫成 p += rd():會先讀到舊的 p)
             elif op in (13, 14):
                 pass
             elif op == 16:

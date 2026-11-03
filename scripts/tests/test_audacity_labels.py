@@ -49,7 +49,9 @@ def _enc(tracks: list[tuple[str, list[tuple[float, float, str]]]]) -> tuple[byte
     def dbl(n, v):
         return b"\x0a" + struct.pack("<Hdi", ids[n], v, 7)
 
-    doc = bytearray(b"\x01" + struct.pack("<H", ids["project"]) + dbl("rate", 44100.0))
+    head = "<?xml ".encode("utf-32-le")      # 真檔開頭就是 op 12(raw 字串)
+    doc = bytearray(b"\x0c" + struct.pack("<i", len(head)) + head)
+    doc += b"\x01" + struct.pack("<H", ids["project"]) + dbl("rate", 44100.0)
     doc += b"\x01" + struct.pack("<H", ids["wavetrack"]) + s("name", "MIC1_Mars")
     doc += b"\x01" + struct.pack("<H", ids["thumbnail"])
     doc += b"\x10" + struct.pack("<HI", ids["data"], 4) + b"\x89PNG"
