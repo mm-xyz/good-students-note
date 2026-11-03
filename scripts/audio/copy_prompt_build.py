@@ -37,7 +37,7 @@ LINE_RE = re.compile(r"^- \[(x|X)\] ([BS]\d{3,5}) \[([^\]]+)\] (?:\[([^\]]{1,20}
 MUSIC_RE = re.compile(r"^##\s*🎵")
 TEASER_RE = re.compile(r"^##\s*🎬")
 CONFIG_RE = re.compile(r"^##\s*⚙")
-CUT_RE = re.compile(r"^##\s*✂")     # 手動剪除標記,不是章節標題
+CUT_RE = re.compile(r"^##\s*[✂✚]")  # 手動剪除／強制保留(#1181)標記,不是章節標題
 INSERT_RE = re.compile(r"^##\s*➕")  # 外部補錄插入標記,不是章節標題(ADR 0011)
 
 

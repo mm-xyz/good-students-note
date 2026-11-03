@@ -108,7 +108,7 @@ def find_drive_dir(sdir: Path, override: Path | None) -> Path | None:
 
 def semantic_diff(a: Path, b: Path) -> list[str]:
     """兩份 cutplan 的**語意**差異(不是逐行 diff):勾選翻轉、刪除線增減、
-    ✂ 手動剪除、⚙ 參數。逐行 diff 對這種一行幾百字的檔案沒有可讀性。"""
+    ✂ 手動剪除、✚ 強制保留、⚙ 參數。逐行 diff 對這種一行幾百字的檔案沒有可讀性。"""
     tcol_a: dict = {}
     tcol_b: dict = {}
 
@@ -128,8 +128,9 @@ def semantic_diff(a: Path, b: Path) -> list[str]:
                         clip_n[key] = clip_n.get(key, 0) + 1
                         key = f"{key}@🎬{clip_n[key]}"
                     tcol[key] = " ".join(it["tracks"].split())
-            elif it["kind"] == "cut":
-                cuts.add((round(it["a"], 2), round(it["b"], 2)))
+            elif it["kind"] in ("cut", "keep"):
+                mark = "✂" if it["kind"] == "cut" else "✚"
+                cuts.add((mark, round(it["a"], 2), round(it["b"], 2)))
             elif it["kind"] == "config":
                 # params_raw 才含 line=/audio= 這種非數值鍵。用 params 會讓
                 # 「剪輯路線被改掉」在人審 diff 裡完全隱形(2026-09-06 實踩)。
@@ -165,7 +166,10 @@ def semantic_diff(a: Path, b: Path) -> list[str]:
                    + (" …" if len(ds) > 8 else ""))
     for tag, s in (("只在 A", ca - cb), ("只在 B", cb - ca)):
         if s:
-            out.append(f"  ✂ {tag}:" + "、".join(f"{x}-{y}" for x, y in sorted(s)))
+            for mark in ("✂", "✚"):
+                rs = sorted((x, y) for m, x, y in s if m == mark)
+                if rs:
+                    out.append(f"  {mark} {tag}:" + "、".join(f"{x}-{y}" for x, y in rs))
     dg = [k for k in set(ga) | set(gb) if ga.get(k) != gb.get(k)]
     if dg:
         out.append("  ⚙ " + "、".join(f"{k}: {ga.get(k, '無')}→{gb.get(k, '無')}"

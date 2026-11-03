@@ -63,6 +63,13 @@ class TestSemanticDiff(unittest.TestCase):
         self.assertIn("✂ 只在 B", out)
         self.assertIn("12.5-13.5", out)
 
+    def test_keep_rows_diffed_separately_from_cuts(self) -> None:
+        """#1181:✚ 強制保留跟 ✂ 同區間也要分得出來(方向相反)。"""
+        b = write(self.d, "b.md", HEAD + "## ✚ 12.5-13.5 audacity\n" + ROWS)
+        out = "\n".join(semantic_diff(self.a, b))
+        self.assertIn("✚ 只在 B:12.5-13.5", out)
+        self.assertNotIn("✂", out)
+
     def test_config_change_reported(self) -> None:
         b = write(self.d, "b.md", (HEAD.replace("max-pause=1.5", "max-pause=0.9")
                                    + ROWS))

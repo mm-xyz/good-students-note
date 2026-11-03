@@ -261,7 +261,7 @@ test('STRUCTURE_MARKERS: 涵蓋 render_cut.py 目前全部結構行標記', () =
   // render 端新增標記時,這裡會先紅 —— 逼人同步,不讓編輯器默默畫錯。
   assert.deepEqual(
     [...STRUCTURE_MARKERS].sort(),
-    ['⚙', '✂', '🎵', '➕', '🎬', '🔇'].sort(),
+    ['⚙', '✂', '✚', '🎵', '➕', '🎬', '🔇'].sort(),
   );
 });
 
