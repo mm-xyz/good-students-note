@@ -132,6 +132,9 @@ CONFIG_RE = re.compile(r"^##\s*⚙️?\s*(.*)$")
 # `## ⏩ 起-迄 倍率` — 分段變速(原始時間軸;迄可省略＝到結尾,倍率前必須有空白)
 TEMPO_RE = re.compile(r"^##\s*⏩\s*([\d:.]*)\s*[-–~]\s*([\d:.]*)\s+([\d.]+)\s*(.*)$")
 CUT_RE = re.compile(r"^##\s*✂\s*([\d:.]+)\s*[-–~]\s*([\d:.]+)\s*(.*)$")
+# `## ✚ 起-迄 說明` — 強制保留(#1181,Audacity 細剪把保留段拉寬):原始時間軸,
+# 在所有自動剪除與 ✂ 之後才套,蓋過刪除線、停頓收緊、沒勾的列
+KEEP_RE = re.compile(r"^##\s*✚\s*([\d:.]+)\s*[-–~]\s*([\d:.]+)\s*(.*)$")
 # `## ➕ 檔案 [gain=auto|±dB start= end= fade= tempo=0|1]  說明` — 插入外部語音檔
 # (補錄)。檔案不在 source 的時間軸上,所以走自己的 ffmpeg input,不吃 atrim 主軌。
 INSERT_RE = re.compile(r"^##\s*➕\s*(\S+)((?:\s+\w+=[\w.+-]+)*)\s*(.*)$")
@@ -447,6 +450,100 @@ def pad_seams(segments: list[dict], words: list[dict] | None, pad: float,
     return out
 
 
+def apply_review_edges(segments: list[dict], cuts: list[list[float]],
+                       keeps: list[list[float]], tmap: list[tuple[float, float, float]],
+                       default_tempo: float, titem_pool: list[dict] | None = None,
+                       min_frag: float = 0.12) -> tuple[list[dict], list[int]]:
+    """人審邊界最後一次蓋章(#1181):`## ✂` 再剪一次、`## ✚` 強制保留,✚ 贏 ✂。
+
+    unit 迴圈裡的 ✂ 擋不住後面的 seam-pad(跳接處往外補原聲),Audacity 上拉到
+    0.01s 的邊界會被補回 0.3s;✚ 要救的是刪除線、停頓收緊、沒勾的列這些
+    unit 層已經剪掉的東西,只能在 segment 層加回來。所以兩者都在最後套。
+
+    ✚ 碰到(重疊或相接)既有語音段 → 那幾段併成一段拉寬;沒碰到 → 新開一段,
+    插在來源時間在它之前的最後一段語音後面。🎬 集錦段不動。titem_pool 是
+    audio=tracks 的全部 block 軌欄,新開或拉寬的段落補上它覆蓋到的 block。
+
+    回傳 (segments, index_map),index_map 語意同 enforce_monotonic。
+    """
+    if not cuts and not keeps:
+        return list(segments), list(range(len(segments)))
+    eps = 1e-6
+    keeps = merge_ranges([list(k) for k in keeps], min_gap=0.0)
+    cuts = subtract([list(c) for c in cuts], keeps, min_frag=0.0)
+
+    def editable(s):
+        return s["kind"] == "speech" and not s.get("clip")
+
+    out = []                      # [(segment, 原編號集合)]
+    for i, s in enumerate(segments):
+        if not editable(s) or not cuts:
+            out.append((s, {i}))
+            continue
+        pieces = subtract([[s["a"], s["b"]]], cuts, min_frag=min_frag)
+        for j, (a, b) in enumerate(pieces):
+            d = dict(s, a=a, b=b)
+            if j > 0:
+                d.pop("fade_in", None)
+            if j < len(pieces) - 1:
+                d.pop("fade_out", None)
+            out.append((d, {i} if j == 0 else set()))
+        if not pieces:
+            out.append((None, {i}))  # 整段被剪光:編號對到下一個還在的段落
+
+    def with_titems(d, a, b):
+        if titem_pool is None:
+            return d
+        have = list(d.get("titems") or [])
+        seen = {(x["start"], x["end"]) for x in have}
+        have += [x for x in titem_pool if x["start"] < b and x["end"] > a
+                 and (x["start"], x["end"]) not in seen]
+        return dict(d, titems=sorted(have, key=lambda x: x["start"]))
+
+    for ka, kb in keeps:
+        touch = [k for k, (s, _) in enumerate(out)
+                 if s is not None and editable(s)
+                 and s["a"] <= kb + eps and s["b"] >= ka - eps]
+        if touch:
+            base = out[touch[0]][0]
+            lo = min(ka, min(out[k][0]["a"] for k in touch))
+            hi = max(kb, max(out[k][0]["b"] for k in touch))
+            origins = set().union(*(out[k][1] for k in touch))
+            base = {k_: v for k_, v in base.items() if k_ != "fade_out"}
+            if "fade_out" in out[touch[-1]][0]:
+                base["fade_out"] = out[touch[-1]][0]["fade_out"]
+            at = touch[0]
+            for k in reversed(touch):
+                del out[k]
+        else:
+            base = {"kind": "speech", "clip": False}
+            lo, hi, origins = ka, kb, set()
+            at = 0
+            for k, (s, _) in enumerate(out):
+                if s is not None and editable(s) and s["b"] <= ka + eps:
+                    at = k + 1
+        base = with_titems(base, lo, hi)
+        new = [(dict(base, a=pa, b=pb, tempo=pt), set())
+               for pa, pb, pt in tempo_pieces(lo, hi, tmap, default_tempo)]
+        if new:
+            new[0] = (new[0][0], origins)
+        out[at:at] = new
+
+    segs, imap = [], [None] * len(segments)
+    pending = []
+    for s, origins in out:
+        pending += sorted(origins)
+        if s is None:
+            continue
+        for o in pending:
+            imap[o] = len(segs)
+        pending = []
+        segs.append(s)
+    for o in pending:
+        imap[o] = len(segs)
+    return segs, imap
+
+
 def bgm_envelope(m: dict, duck: float, solo: float, predrop: float,
                  rise: float) -> list[tuple[float, float]]:
     """疊軌感知的 BGM 音量包絡(分段線性 keypoints,音樂 local 時間軸,0–1 乘數)。
@@ -543,6 +640,9 @@ def parse_program(path: Path) -> list[dict]:
           手動剪除區間(原始時間軸,秒或 mm:ss.s)。人審的逃生艙:whisper 字級
           時間戳把停頓吃進字的時長時,自動停頓收緊會被 word 保護擋下(EP16 12:00
           「臨時 任務」中間的 1.3s),這時直接標區間,不受 word_guard 攔阻。
+      {"kind":"keep", "a", "b", "note"}              — `## ✚ 12:16.3-12:17.4 說明`
+          強制保留區間(原始時間軸)。Audacity 細剪(#1181)把保留段拉寬時產生,
+          在所有自動剪除、✂、seam-pad 之後才套(apply_review_edges),✚ 贏 ✂。
       {"kind":"chapter", "title"}                    — 其他 `## 標題`
       {"kind":"roomtone", "duration", "note"}       — `## 🔇 秒數 說明`,
                                                           從 source.wav 取室噪
@@ -633,6 +733,12 @@ def parse_program(path: Path) -> list[dict]:
             program.append({"kind": "cut", "a": parse_ts(mx.group(1)),
                             "b": parse_ts(mx.group(2)),
                             "note": mx.group(3).strip()})
+            continue
+        mk = KEEP_RE.match(s)
+        if mk:
+            program.append({"kind": "keep", "a": parse_ts(mk.group(1)),
+                            "b": parse_ts(mk.group(2)),
+                            "note": mk.group(3).strip()})
             continue
         mt = TEASER_RE.match(s)
         if mt:
@@ -1872,7 +1978,7 @@ def main():
         if it["kind"] == "block" and it.get("insert"):
             s_blocks_by_file.setdefault(it["insert"], []).append(it)
     for it in program:
-        if it["kind"] in ("config", "cut"):
+        if it["kind"] in ("config", "cut", "keep"):
             continue
         if it["kind"] == "chapter":
             # 記來源時間而不是只記 unit index:章節的解析度是 block,不是 unit
@@ -2168,6 +2274,27 @@ def main():
         n_pad = sum(1 for x, y in zip(before, [(s.get("a"), s.get("b"))
                     for s in segments if s["kind"] == "speech"]) if x != y)
         print(f"[render] 跳接換氣:{n_pad} 段補了前後原聲(seam-pad={args.seam_pad}s)")
+    review_keeps = sorted([[it["a"], it["b"]] for it in program
+                           if it["kind"] == "keep" and it["b"] > it["a"]])
+    if review_keeps or (manual_cuts and not pertrack):
+        pool = ([{"start": it["block"]["start"], "end": it["block"]["end"],
+                  "on": it["tstate"]} for it in program
+                 if it["kind"] == "block" and it.get("tstate") is not None
+                 and it.get("block") and not it.get("insert")]
+                if audio_tracks else None)
+        before = sum(s["b"] - s["a"] for s in segments if s["kind"] == "speech")
+        segments, imap = apply_review_edges(
+            segments, manual_cuts if not pertrack else [], review_keeps,
+            tmap, args.tempo, titem_pool=pool)
+        unit_first_seg = {ui: imap[i] if i < len(imap) else len(segments)
+                          for ui, i in unit_first_seg.items()}
+        segments = enforce_monotonic(segments, index_map=seg_index_map)
+        unit_first_seg = {ui: seg_index_map[i] if i < len(seg_index_map)
+                          else len(segments) for ui, i in unit_first_seg.items()}
+        if review_keeps:
+            after = sum(s["b"] - s["a"] for s in segments if s["kind"] == "speech")
+            print(f"[render] ✚ 強制保留: {len(review_keeps)} 段標記,保留語音"
+                  f" {after - before:+.2f}s(含 ✂ 最後一次套用)")
     if not any(s["kind"] == "speech" for s in segments):
         sys.exit("[render] FAIL: 沒有任何保留 block")
     if n_strike:

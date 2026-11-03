@@ -34,7 +34,7 @@ from render_cut import (src_to_dst,  # noqa: F401
                         RoomtoneError, load_template, apply_template,
                         TemplateError, bgm_norm_gain_db, measure_lufs_ranges,
                         tempo_map_from_program, tempo_pieces, build_timeline,
-                        pad_seams, run_ffmpeg)
+                        pad_seams, run_ffmpeg, apply_review_edges)
 
 
 
@@ -748,6 +748,97 @@ def write_wav(path: Path, secs: float, bursts: list[tuple[float, float]],
         wf.writeframes(bytes(samples))
 
 
+class TestReviewEdges(unittest.TestCase):
+    """#1181 Audacity 細剪:`## ✂`／`## ✚` 在所有自動步驟(含 seam-pad)之後
+    再套一次,人審拉的邊界是最後一句話。✚ 優先於 ✂。"""
+
+    def _sp(self, a, b, **kw):
+        return {"kind": "speech", "a": a, "b": b, "clip": False, "tempo": 1.0, **kw}
+
+    def _ab(self, segs):
+        return [(round(s["a"], 3), round(s["b"], 3)) for s in segs
+                if s["kind"] == "speech"]
+
+    def test_cut_reapplied_after_padding(self):
+        segs = [self._sp(0.0, 5.0)]
+        out, _ = apply_review_edges(segs, cuts=[[4.0, 6.0]], keeps=[],
+                                    tmap=[], default_tempo=1.0)
+        self.assertEqual(self._ab(out), [(0.0, 4.0)])
+
+    def test_cut_splits_segment_and_keeps_fades_on_ends(self):
+        segs = [self._sp(0.0, 5.0, fade_in=2.0, fade_out=2.0)]
+        out, _ = apply_review_edges(segs, cuts=[[2.0, 3.0]], keeps=[],
+                                    tmap=[], default_tempo=1.0)
+        self.assertEqual(self._ab(out), [(0.0, 2.0), (3.0, 5.0)])
+        self.assertIn("fade_in", out[0]); self.assertNotIn("fade_out", out[0])
+        self.assertIn("fade_out", out[1]); self.assertNotIn("fade_in", out[1])
+
+    def test_keep_extends_adjacent_segment(self):
+        segs = [self._sp(0.0, 2.0), self._sp(5.0, 6.0)]
+        out, _ = apply_review_edges(segs, cuts=[], keeps=[[2.0, 2.6]],
+                                    tmap=[], default_tempo=1.0)
+        self.assertEqual(self._ab(out), [(0.0, 2.6), (5.0, 6.0)])
+
+    def test_keep_bridges_two_segments_into_one(self):
+        segs = [self._sp(0.0, 2.0), self._sp(3.0, 4.0)]
+        out, _ = apply_review_edges(segs, cuts=[], keeps=[[1.9, 3.1]],
+                                    tmap=[], default_tempo=1.0)
+        self.assertEqual(self._ab(out), [(0.0, 4.0)])
+
+    def test_standalone_keep_inserted_in_source_order(self):
+        music = {"kind": "music", "at": 0}
+        segs = [self._sp(0.0, 2.0), music, self._sp(8.0, 9.0)]
+        out, imap = apply_review_edges(segs, cuts=[], keeps=[[5.0, 6.0]],
+                                       tmap=[], default_tempo=1.0)
+        self.assertEqual(self._ab(out), [(0.0, 2.0), (5.0, 6.0), (8.0, 9.0)])
+        # 新段落插在「來源時間在它之前的最後一段語音」後面;音樂錨點跟著換算
+        self.assertEqual([s["kind"] for s in out],
+                         ["speech", "speech", "music", "speech"])
+        self.assertEqual(imap, [0, 2, 3])
+
+    def test_keep_wins_over_cut(self):
+        segs = [self._sp(0.0, 5.0)]
+        out, _ = apply_review_edges(segs, cuts=[[1.0, 3.0]], keeps=[[2.0, 3.0]],
+                                    tmap=[], default_tempo=1.0)
+        self.assertEqual(self._ab(out), [(0.0, 1.0), (2.0, 5.0)])
+
+    def test_keep_takes_tempo_from_tempo_map(self):
+        segs = [self._sp(0.0, 1.0)]
+        out, _ = apply_review_edges(segs, cuts=[], keeps=[[10.0, 12.0]],
+                                    tmap=[(11.0, float("inf"), 1.1)],
+                                    default_tempo=1.0)
+        self.assertEqual([(round(s["a"], 3), round(s["b"], 3), s["tempo"])
+                          for s in out],
+                         [(0.0, 1.0, 1.0), (10.0, 11.0, 1.0), (11.0, 12.0, 1.1)])
+
+    def test_clip_segments_untouched(self):
+        clip = {"kind": "speech", "a": 0.0, "b": 5.0, "clip": True, "tempo": 1.0}
+        out, _ = apply_review_edges([clip], cuts=[[1.0, 2.0]], keeps=[],
+                                    tmap=[], default_tempo=1.0)
+        self.assertEqual(self._ab(out), [(0.0, 5.0)])
+
+    def test_titems_built_for_standalone_keep(self):
+        blocks = [{"start": 5.0, "end": 7.0, "on": {"Mars": True}}]
+        segs = [self._sp(0.0, 1.0, titems=[])]
+        out, _ = apply_review_edges(segs, cuts=[], keeps=[[5.5, 6.0]],
+                                    tmap=[], default_tempo=1.0,
+                                    titem_pool=blocks)
+        self.assertEqual(out[1]["titems"], blocks)
+
+    def test_no_edges_is_identity(self):
+        segs = [self._sp(0.0, 1.0), {"kind": "music"}]
+        out, imap = apply_review_edges(segs, cuts=[], keeps=[], tmap=[],
+                                       default_tempo=1.0)
+        self.assertEqual(out, segs); self.assertEqual(imap, [0, 1])
+
+
+class TestParseKeep(unittest.TestCase):
+    def test_keep_line_parsed_not_chapter(self):
+        prog = parse_program_text("## ✚ 1:02.5-1:03.25 audacity\n")
+        self.assertEqual(prog, [{"kind": "keep", "a": 62.5, "b": 63.25,
+                                 "note": "audacity"}])
+
+
 class TestDryRunE2E(unittest.TestCase):
     """合成 session 的 --dry-run 端對端:不碰 ffmpeg/ffprobe(無音樂、dry-run
     在 src 查找前 return),覆蓋 config 覆蓋、字級精剪、marker 拒跑、FAIL 路徑。"""
@@ -809,6 +900,26 @@ class TestDryRunE2E(unittest.TestCase):
                   if l.strip().startswith("speech")]
         # B0001+B0002 併一個 unit,刪「二」切成兩段;B0003 沒勾不出現
         self.assertEqual(len(speech), 2)
+
+    def test_keep_and_cut_lines_apply_last(self):
+        """#1181:✚ 救回被刪除線剪掉的字與沒勾的列;✂ 照剪。"""
+        with tempfile.TemporaryDirectory() as td:
+            sdir = self._make_session(td)
+            md = (sdir / "cutplan.md").read_text(encoding="utf-8")
+            md = md.replace("## ⚙ max-pause=0\n",
+                            "## ⚙ max-pause=0\n## ✚ 1.4-1.6 audacity\n"
+                            "## ✚ 5.2-5.6 audacity\n## ✂ 0.3-0.6 audacity\n")
+            (sdir / "cutplan.md").write_text(md, encoding="utf-8")
+            dump = Path(td) / "ranges.json"
+            proc = self._render(sdir, "--dump-ranges", str(dump))
+            self.assertEqual(proc.returncode, 0, proc.stderr or proc.stdout)
+            r = json.loads(dump.read_text(encoding="utf-8"))
+        self.assertIn("✚ 強制保留: 2 段", proc.stdout)
+        covered = lambda t: any(a <= t <= b for a, b in r)
+        self.assertTrue(covered(1.5))      # 刪除線的「二」救回來
+        self.assertTrue(covered(5.4))      # 沒勾的 B0003 裡救回一小段
+        self.assertFalse(covered(5.8))
+        self.assertFalse(covered(0.45))    # ✂ 照剪
 
     def test_word_guard_does_not_pull_back_unchecked_row_words(self):
         """#1079 第二條路:沒勾的列緊貼保留列(字連字、沒有靜音),切點被
