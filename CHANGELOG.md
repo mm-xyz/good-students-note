@@ -2,6 +2,20 @@
 
 > 剪輯線（feat/podcast-cut）的功能史。決策的「為什麼」住 `docs/adr/`，這裡只記「什麼時候做了什麼」。
 
+## 2026-11-03
+
+- **Audacity 細剪（#1181，ADR-2026-11-03-audacity-fine-trim）**：新增
+  `scripts/audio/audacity_labels.py`，三個子指令。`export` 把 cut_map 的保留段落寫成
+  `audacity_AI.txt`。`apply` 直接讀 .aup4 裡的 `AI`、`MM` 兩條標籤軌，把兩者的差異寫回
+  cutplan：MM 縮邊寫成 `## ✂`，MM 擴邊寫成 `## ✚`，行尾都帶 `audacity`。`inject` 把
+  AI、MM 兩條標籤軌直接寫進 .aup4；加 `--heal-clips` 會把被刪掉一段的音軌接回完整一條。
+  Audacity 開著或 -wal 有內容時，inject 拒寫。
+- **render_cut 新增 `## ✚` 強制保留**：`apply_review_edges` 在 seam-pad 之後執行，
+  ✂ 先套、✚ 後套，兩者重疊時 ✚ 贏。跨變速界線的 ✚ 只在頭尾保留 fade。cut.py 的語意
+  差異、IG 文案、cutplan 編輯器都已能辨識 `## ✚`。
+  ⚠️ Audacity 4 的 binary XML 比 3.x 多了 op 16（縮圖 PNG）。專案關閉後讀檔要改用
+  `immutable=1`。
+
 ## 2026-09-07
 
 - **新增 `scripts/audio/check_punct_density.py`——逐字稿標點密度稽核**：零標點是個
