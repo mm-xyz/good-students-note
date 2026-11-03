@@ -32,7 +32,7 @@ from render_cut import (src_to_dst,  # noqa: F401
                         env_to_expr, resolve_music, extend_unit_edges,
                         enforce_monotonic, structure_anchors, choose_roomtone,
                         RoomtoneError, load_template, apply_template,
-                        TemplateError)
+                        TemplateError, bgm_norm_gain_db, measure_lufs_ranges)
 
 
 
@@ -486,6 +486,39 @@ class TestBgmEnvelope(unittest.TestCase):
         self.assertIn("st(0,", expr)            # smoothstep 內插
         self.assertIn("*ld(0)*(3-2*ld(0))", expr)
         self.assertIn("0.550", expr)            # 平段常數
+
+
+class TestBgmNormalize(unittest.TestCase):
+    def test_gain_pulls_to_target(self):
+        self.assertAlmostEqual(bgm_norm_gain_db(-6.8, -17.0), -10.2)
+        self.assertAlmostEqual(bgm_norm_gain_db(-23.0, -17.0), 6.0)
+
+    def test_unmeasurable_leaves_volume_alone(self):
+        self.assertEqual(bgm_norm_gain_db(None, -17.0), 0.0)
+
+    def test_gain_lands_measured_loudness_on_target(self):
+        # 真音訊:不同音量的兩段正弦,各自套增益後量出來都該落在 target
+        import math
+        with tempfile.TemporaryDirectory() as td:
+            for name, amp in (("loud", 0.8), ("quiet", 0.05)):
+                path = Path(td) / f"{name}.wav"
+                with wave.open(str(path), "wb") as wf:
+                    wf.setnchannels(1)
+                    wf.setsampwidth(2)
+                    wf.setframerate(48000)
+                    wf.writeframes(b"".join(
+                        int(amp * 32767 * math.sin(2 * math.pi * 440 * i / 48000))
+                        .to_bytes(2, "little", signed=True)
+                        for i in range(48000 * 4)))
+                before = measure_lufs_ranges(path, [[0.0, 4.0]])
+                self.assertIsNotNone(before)
+                g = bgm_norm_gain_db(before, -17.0)
+                after = before + g
+                self.assertAlmostEqual(after, -17.0, places=1)
+            # 響度差要夠大,測試才有意義
+            loud = measure_lufs_ranges(Path(td) / "loud.wav", [[0.0, 4.0]])
+            quiet = measure_lufs_ranges(Path(td) / "quiet.wav", [[0.0, 4.0]])
+            self.assertGreater(loud - quiet, 20.0)
 
 
 class TestResolveMusic(unittest.TestCase):

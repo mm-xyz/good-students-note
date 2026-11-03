@@ -544,6 +544,10 @@ Step 5 只在 `goodedunote` 專案的 hosting 上新增/更新該篇 `<slug>/`,�
   推導(零音訊偵測、零 LLM)。
 - 參數:cutplan 🎵 行管 `fadein/fadeout/lead/tail/start/end`,全域旋鈕
   `--bgm-duck/--bgm-solo/--bgm-predrop/--bgm-rise`。
+- **響度正規化(2026-11-03)**:duck/solo 套用前,每首間奏先以 `bgm-lufs`(樣板設 -17≈人聲)
+  正規化,solo=1.0 即與人聲同大;原檔響度差(EP22:-6.8/-11.1/-8.6 LUFS)不再影響聽感。
+  出片後必量人聲段 vs 間奏窗的 LUFS(見 podcast-cut skill 的「間奏音量」)。
+  決策脈絡:ADR-2026-11-03-bgm-loudness-normalize。
 - 決策脈絡:ADR 0004(overlay 架構)、ADR 0006(本包絡)。
 
 ### 原則 12 — 輸入轉接器:副檔名分流,抽取器只做確定性、理解層跨線共用(2026-07-31 引入)

@@ -137,7 +137,7 @@ INSERT_RE = re.compile(r"^##\s*➕\s*(\S+)((?:\s+\w+=[\w.+-]+)*)\s*(.*)$")
 ROOMTONE_RE = re.compile(r"^##\s*🔇\s*(.*)$")
 # cutplan ⚙ config 區可覆蓋的數值旋鈕(dash 寫法;config > CLI/預設)
 CONFIG_KEYS = {"clip_gap", "clip_fade_in", "clip_fade_out", "music_speech_fade",
-               "bgm_duck", "bgm_solo", "bgm_predrop", "bgm_rise",
+               "bgm_duck", "bgm_solo", "bgm_predrop", "bgm_rise", "bgm_lufs",
                "max_pause", "pause_keep", "crossfade", "snap_window", "fade",
                "tempo", "music_lead_max", "roomtone_word_margin",
                "roomtone_max_db", "roomtone_voice_db", "roomtone_track_db",
@@ -1122,6 +1122,17 @@ def insert_gain_db(ref_l: float, ins_l: float,
     return g + (bus_l - ref_l if bus_l is not None else 0.0)
 
 
+def bgm_norm_gain_db(music_l: float | None, target: float) -> float:
+    """間奏正規化增益:把素材實際用到的那段拉到 target LUFS(人聲響度)。
+
+    素材庫的 opening/break/ending 原檔響度差很多(EP22 實測 -6.8/-11.1/-8.6 LUFS,
+    峰值過 0 dBFS),同一組 solo 乘數壓下去,三首聽感大小各自不同、全都比人聲大。
+    先正規化到人聲響度,env 的 solo=1.0 才代表「跟人聲一樣大」。量不到不動(0dB)。"""
+    if music_l is None:
+        return 0.0
+    return target - music_l
+
+
 def ffprobe_duration(path: Path) -> float:
     out = subprocess.run(
         ["ffprobe", "-v", "error", "-show_entries", "format=duration",
@@ -1132,7 +1143,8 @@ def ffprobe_duration(path: Path) -> float:
 
 def run_ffmpeg(src: Path, segments: list[dict], musics: list[dict], out: Path,
                fade: float, loudnorm: str | None, crossfade: float,
-               dynaudnorm: str | None, tempo: float = 1.0) -> tuple[list[float], float]:
+               dynaudnorm: str | None, tempo: float = 1.0,
+               bgm_lufs: float = 0.0) -> tuple[list[float], float]:
     """出片(節目結構 2026-07-28 v2:音樂改 overlay 疊接,不進 concat 鏈)。
 
     concat 鏈只有 speech/silence:
@@ -1245,11 +1257,22 @@ def run_ffmpeg(src: Path, segments: list[dict], musics: list[dict], out: Path,
                        else dst_starts[m["anchor_seg"]]) - m["lead"])
         m["at"] = at
         total = max(total, at + m["dur"])
+        norm = ""
+        if bgm_lufs:
+            music_l = measure_lufs_ranges(
+                m["path"], [[m["ss"], m["ss"] + m["dur"]]])
+            g = bgm_norm_gain_db(music_l, bgm_lufs)
+            print(f"[render] 🎵 {m['path'].name} 正規化:"
+                  + (f"{music_l:.1f} LUFS → {bgm_lufs:.1f} LUFS ({g:+.1f}dB)"
+                     if music_l is not None else "量不到響度,維持原音量"))
+            if abs(g) > 0.05:
+                norm = f"volume={g:.2f}dB,"
         parts.append(
             f"[{input_idx[m['path']]}:a]atrim=start={m['ss']:.3f}"
             f":end={m['ss'] + m['dur']:.3f},"
             f"asetpts=PTS-STARTPTS,aformat=sample_rates=48000:"
             f"channel_layouts=stereo,"
+            f"{norm}"
             f"volume='{env_to_expr(m['env'])}':eval=frame,"
             f"adelay={int(round(at * 1000))}:all=1[m{k}]")
     if musics:
@@ -1309,6 +1332,9 @@ def main():
                          "標準 speech bed;振幅非響度,0.4 其實只小 8dB)")
     ap.add_argument("--bgm-solo", type=float, default=0.55,
                     help="BGM 獨奏段的振幅乘數(預設 0.55≈-5dB)")
+    ap.add_argument("--bgm-lufs", type=float, default=0.0,
+                    help="間奏素材先正規化到這個 LUFS 再套 duck/solo(0=停用;"
+                         "節目樣板設 -17≈人聲響度,solo=1.0 即與人聲同大)")
     ap.add_argument("--bgm-predrop", type=float, default=2.0,
                     help="人聲進場前幾秒開始把 solo 降回 duck(預設 2.0)")
     ap.add_argument("--bgm-rise", type=float, default=1.5,
@@ -2297,7 +2323,8 @@ def main():
     out = sdir / args.out
     dst_starts, final_dur = run_ffmpeg(src, segments, musics, out, args.fade,
                                        args.loudnorm or None, args.crossfade,
-                                       args.dynaudnorm or None, args.tempo)
+                                       args.dynaudnorm or None, args.tempo,
+                                       args.bgm_lufs)
     if tracks_bus is not None and not args.keep_tracks_bus:
         tracks_bus.unlink(missing_ok=True)
 

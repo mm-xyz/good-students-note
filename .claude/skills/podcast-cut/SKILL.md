@@ -59,6 +59,15 @@ sessions/{錄音日}_{名字}/
    走初剪全自動（本地 whisper→diarize→prosody→cutplan）。或用 `scripts/audio/precut.py` 對已建 session 補跑。交 MM 人審後回到步驟 2。標準流程全文見 ADR 0015。
 5. **定稿歸檔**：`finalize.py --session <目錄> --final v12`（dry-run 預設，`--apply` 才搬）。根只留定稿版本目錄／`raw/`／原始錄音，其餘進 `_archive/`，工作檔進 `_archive/pipeline/`。要重剪 `--restore` 搬回。同一支也吃 Drive 集數資料夾。
 
+## 間奏音量（標準 SOP，2026-11-03）
+
+render 會把每首間奏先正規化到 `bgm-lufs`（樣板 -17≈人聲）再套 duck/solo；樣板 `config` 住 `bgm-lufs`／`bgm-duck`／`bgm-solo`（ADR-2026-11-03-bgm-loudness-normalize）。每次出片後：
+
+1. 看 render.txt 的 `🎵 … 正規化：X LUFS → -17.0 LUFS` 三行（opening/break/ending 各一）；沒有這三行＝樣板沒帶 `bgm-lufs`，先補樣板再出。
+2. 量整集與間奏窗：`ffmpeg -ss <秒> -t 8 -i <mp3> -af ebur128 -f null -`，人聲段約 -17、間奏獨奏窗應在 -17±2 LUFS；超過就是異常，回報 MM 不要放行。
+3. 回報 MM 時附：人聲平均 LUFS、三個間奏窗 LUFS。
+4. 嫌大嫌小調 `## ⚙ bgm-solo=`（0.7≈-3dB），不要動 `bgm-lufs`。
+
 ## cutplan 標記速查
 
 `- [ ]`＝剪整句｜`~~刪除線~~`＝剪字｜`## ✂ 起-迄`＝手動剪空白｜G 列勾＝保留留白（剪停頓是常態、留白才標）｜`## 章節`＝chapters｜`## 🎬`集錦／`## 🎵`BGM／`## ➕`補錄插入（`gain=auto`）／`## 🔇`室噪留白｜`## ⚙`＝render 參數。
