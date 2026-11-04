@@ -1,0 +1,199 @@
+<!doctype html>
+<!--
+  scripts/cutplan-editor/local.html — Cutplan 本機檢視器(Lifov #1199)。
+  Drive 用不了時的替代:雙擊用瀏覽器開,自己選 cutplan.md / cutplan.timeline.json / mp3。
+  純本機、不連網、不寫檔;解析與時間對照共用 cutplan-core.js(同資料夾)。
+  目前只讀:看 block 勾選、刪除線,播放成品時跟著捲動,點卡片跳到成品該處。
+-->
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cutplan 本機檢視器</title>
+<style>
+  :root { color-scheme: light dark; --fg:#1a1a1a; --bg:#fff; --muted:#6b6b6b; --border:#d9d9d9;
+    --accent:#0a6b4d; --danger:#a3321f; --card:#fafafa; --strike:#ffe8b3; }
+  @media (prefers-color-scheme: dark) { :root { --fg:#eaeaea; --bg:#121212; --muted:#9a9a9a;
+    --border:#3a3a3a; --accent:#4fd1a5; --danger:#ff6b52; --card:#1c1c1c; --strike:#4a3a12; } }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family:-apple-system,"PingFang TC","Noto Sans TC",sans-serif; background:var(--bg); color:var(--fg); }
+  header { position:sticky; top:0; z-index:5; background:var(--bg); border-bottom:1px solid var(--border); padding:10px 12px; }
+  h1 { font-size:15px; margin:0 0 8px; color:var(--muted); }
+  .row { display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin-bottom:8px; }
+  .pick { font-size:14px; padding:8px 12px; border-radius:8px; border:1px solid var(--border); background:var(--card); cursor:pointer; }
+  .pick.ok { border-color:var(--accent); color:var(--accent); }
+  .pick input { display:none; }
+  #audio { width:100%; height:36px; }
+  #info, #status { font-size:12px; color:var(--muted); }
+  #status.error { color:var(--danger); }
+  #jump { font-size:16px; padding:6px 8px; width:150px; border-radius:8px; border:1px solid var(--border); background:var(--card); color:var(--fg); }
+  button { font-size:14px; padding:7px 12px; border-radius:8px; border:1px solid var(--border); background:var(--card); color:var(--fg); }
+  #list { padding:8px 12px 60px; }
+  .chap { margin:18px 0 8px; font-size:13px; font-weight:600; color:var(--accent); border-top:1px dashed var(--border); padding-top:10px; }
+  .sys { margin:6px 0; padding:4px 10px; font-size:12px; color:var(--accent); border-left:3px solid var(--accent); background:rgba(127,127,127,.08); }
+  .card { display:flex; gap:10px; padding:8px 10px; margin-bottom:6px; border:1px solid var(--border); border-radius:10px; background:var(--card); cursor:pointer; }
+  .card.off { opacity:.5; }
+  .card.playing { outline:2px solid var(--accent); }
+  .card.mismatch { border:2px solid var(--danger); }
+  .mark { width:22px; flex:none; font-size:18px; }
+  .meta { font-size:11px; color:var(--muted); font-family:ui-monospace,Menlo,monospace; display:flex; gap:6px; flex-wrap:wrap; }
+  .tl { color:var(--accent); } .tl.absent { color:var(--muted); }
+  .body { font-size:15px; line-height:1.6; }
+  .body s { background:var(--strike); }
+</style>
+</head>
+<body>
+<header>
+  <h1>Cutplan 本機檢視器(唯讀)</h1>
+  <div class="row">
+    <label class="pick" id="pDir">選版本資料夾(自動抓三個檔)<input id="fDir" type="file" webkitdirectory></label>
+    <label class="pick" id="pPlan">cutplan.md<input id="fPlan" type="file" accept=".md,text/*"></label>
+    <label class="pick" id="pTl">timeline.json(選填)<input id="fTl" type="file" accept=".json,application/json"></label>
+    <label class="pick" id="pAud">mp3 / m4a / wav<input id="fAud" type="file" accept="audio/*,.mp3,.m4a,.wav"></label>
+  </div>
+  <audio id="audio" controls preload="metadata" hidden></audio>
+  <div class="row">
+    <input id="jump" placeholder="成品時間 12:34 / B0059">
+    <button id="go" type="button">跳到</button>
+    <button id="back" type="button">⏪10s</button><button id="fwd" type="button">10s⏩</button>
+    <label style="font-size:13px"><input id="follow" type="checkbox" checked> 自動捲動</label>
+  </div>
+  <div id="info"></div>
+  <div id="status"></div>
+</header>
+<div id="list"></div>
+<script src="cutplan-core.js"></script>
+<script>
+(function () {
+  'use strict';
+  var Core = window.CutplanCore;
+  var $ = function (id) { return document.getElementById(id); };
+  var st = { doc: null, tl: null, tlBad: false, name: '' };
+  var audio = $('audio'), audioUrl = null, playingLine = null, pausedUntil = 0;
+
+  function status(msg, kind) { $('status').textContent = msg || ''; $('status').className = kind || ''; }
+  function mark(id, ok) { $(id).classList.toggle('ok', !!ok); }
+  function readText(f) { return new Promise(function (res, rej) {
+    var r = new FileReader(); r.onload = function () { res(r.result); }; r.onerror = rej; r.readAsText(f); }); }
+
+  function loadPlan(f) {
+    return readText(f).then(function (text) {
+      st.doc = Core.parseCutplan(text); st.name = f.name; mark('pPlan', true);
+      render(); status('已載入 ' + f.name + '(' + countBlocks() + ' 個 block)', 'ok');
+    });
+  }
+  function loadTl(f) {
+    return readText(f).then(function (text) {
+      st.tl = Core.parseTimeline(text); st.tlBad = Core.timelineFileState(text) === 'bad';
+      mark('pTl', !!st.tl); render();
+      if (st.tlBad) status('timeline.json 格式不合格,未啟用時間對照', 'error');
+    });
+  }
+  function loadAudio(f) {
+    if (audioUrl) URL.revokeObjectURL(audioUrl);
+    audioUrl = URL.createObjectURL(f); audio.src = audioUrl; audio.hidden = false; mark('pAud', true);
+    status('已載入 ' + f.name + '(' + (f.size / 1048576).toFixed(1) + ' MB)', 'ok');
+  }
+  function countBlocks() { return st.doc.lines.filter(function (l) { return l.editable; }).length; }
+
+  $('fPlan').onchange = function () { if (this.files[0]) loadPlan(this.files[0]); };
+  $('fTl').onchange = function () { if (this.files[0]) loadTl(this.files[0]); };
+  $('fAud').onchange = function () { if (this.files[0]) loadAudio(this.files[0]); };
+  $('fDir').onchange = function () {
+    var files = Array.prototype.slice.call(this.files), by = function (re) {
+      return files.filter(function (f) { return re.test(f.name); }); };
+    var plan = by(/^cutplan\.md$/)[0], tl = by(/^cutplan\.timeline\.json$/)[0], au = by(/\.(mp3|m4a|wav)$/i)[0];
+    var jobs = [];
+    if (plan) jobs.push(loadPlan(plan)); if (tl) jobs.push(loadTl(tl)); if (au) loadAudio(au);
+    Promise.all(jobs).then(function () {
+      if (!plan) status('資料夾裡沒有 cutplan.md', 'error');
+    });
+  };
+
+  function fmt(t) { return Core.formatTime(t); }
+
+  function render() {
+    var list = $('list'); list.innerHTML = ''; playingLine = null;
+    if (!st.doc) return;
+    var mism = 0;
+    st.doc.lines.forEach(function (line, idx) {
+      if (line.editable) { var c = card(line, idx); if (c.classList.contains('mismatch')) mism++; list.appendChild(c); return; }
+      var chap = Core.isChapterDivider(line.raw);
+      if (chap) { var d = document.createElement('div'); d.className = 'chap'; d.textContent = '▸ ' + chap.trim(); list.appendChild(d); return; }
+      var m = /^##\s*(🎵|🔇|➕|🎬|✂|✚)/.exec(line.raw || '');
+      if (m) { var s = document.createElement('div'); s.className = 'sys'; s.textContent = line.raw.replace(/^##\s*/, ''); list.appendChild(s); }
+    });
+    $('info').textContent = st.tl
+      ? '對照成品 ' + st.tl.version + (st.tl.generatedAt ? '(' + st.tl.generatedAt.replace('T', ' ') + ' 出片)' : '')
+        + ' · 長度 ' + (st.tl.finalDuration != null ? fmt(st.tl.finalDuration) : '?')
+        + (mism ? ' · 勾選與成品不一致 ' + mism + ' 列' : '')
+      : '沒有 timeline:不會跟著播放捲動,只能用 Block ID 跳';
+  }
+
+  function card(line, idx) {
+    var el = document.createElement('div'), tl = Core.timelineStatus(line, st.tl);
+    el.className = 'card' + (line.mark === ' ' ? ' off' : '') + (tl && tl.mismatch ? ' mismatch' : '');
+    el.dataset.i = idx;
+    var mk = document.createElement('div'); mk.className = 'mark'; mk.textContent = line.mark === ' ' ? '☐' : '☑'; el.appendChild(mk);
+    var main = document.createElement('div'); main.style.minWidth = 0;
+    var meta = document.createElement('div'); meta.className = 'meta';
+    [line.id, '[' + line.timecode + ']', line.prefix && line.prefix.trim()].forEach(function (t) {
+      if (!t) return; var s = document.createElement('span'); s.textContent = t; meta.appendChild(s); });
+    if (tl) { var t = document.createElement('span'); t.className = 'tl' + (tl.times ? '' : ' absent');
+      t.textContent = tl.label + (tl.mismatch ? (tl.times ? '(取消了卻仍在成品)' : '(勾了卻不在成品)') : ''); meta.appendChild(t); }
+    main.appendChild(meta);
+    var body = document.createElement('div'); body.className = 'body';
+    Core.splitStrikes(line.bodyRaw).pieces.forEach(function (p) {
+      var n = document.createTextNode(p.raw);
+      if (p.kind === 'struck') { var s = document.createElement('s'); s.appendChild(n); body.appendChild(s); } else body.appendChild(n);
+    });
+    main.appendChild(body); el.appendChild(main);
+    el.onclick = function () { seek(idx); };
+    return el;
+  }
+
+  function seek(idx) {
+    if (!audio.src) { status('還沒載入音檔', 'error'); return; }
+    var t = Core.findTimeForLine(st.doc, st.tl, idx);
+    if (t === null) { status('這列在成品裡沒有時間(沒有 timeline 或被剪掉)', 'error'); return; }
+    audio.currentTime = Math.max(0, t - 1); audio.play().catch(function () {});
+  }
+
+  function flash(el) { el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    el.style.outline = '3px solid var(--accent)'; setTimeout(function () { el.style.outline = ''; }, 1500); }
+
+  $('go').onclick = function () {
+    var v = $('jump').value.trim(); if (!v || !st.doc) return;
+    var idx;
+    if (/^[A-Za-z]/.test(v)) idx = Core.findLineById(st.doc, v);
+    else {
+      var secs = Core.parseTimeInput(v);
+      if (secs === null) { status('看不懂:' + v, 'error'); return; }
+      if (audio.src) audio.currentTime = secs;
+      idx = st.tl ? Core.findLineAtTime(st.doc, st.tl, secs) : null;
+      if (idx === Core.OUT_OF_RANGE) { status('超出成品長度', 'error'); return; }
+    }
+    var el = (typeof idx === 'number') ? $('list').querySelector('.card[data-i="' + idx + '"]') : null;
+    if (el) flash(el); else status('找不到對應的 block', 'error');
+  };
+  $('jump').onkeydown = function (e) { if (e.key === 'Enter') $('go').click(); };
+  $('back').onclick = function () { audio.currentTime = Math.max(0, audio.currentTime - 10); };
+  $('fwd').onclick = function () { audio.currentTime += 10; };
+  ['wheel', 'touchmove'].forEach(function (ev) { window.addEventListener(ev, function () { pausedUntil = Date.now() + 5000; }, { passive: true }); });
+
+  audio.addEventListener('timeupdate', function () {
+    if (!st.doc || !st.tl) return;
+    var li = Core.findLineAtTime(st.doc, st.tl, audio.currentTime);
+    if (typeof li !== 'number' || li === playingLine) return;
+    var old = $('list').querySelector('.card.playing'); if (old) old.classList.remove('playing');
+    playingLine = li;
+    var el = $('list').querySelector('.card[data-i="' + li + '"]'); if (!el) return;
+    el.classList.add('playing');
+    $('info').textContent = fmt(audio.currentTime) + ' → ' + st.doc.lines[li].id;
+    if ($('follow').checked && Date.now() > pausedUntil) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  });
+  audio.addEventListener('error', function () { status('音檔無法播放(格式不支援?)', 'error'); });
+})();
+</script>
+</body>
+</html>
