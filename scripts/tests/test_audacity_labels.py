@@ -26,7 +26,7 @@ AUDIO_DIR = Path(__file__).resolve().parent.parent / "audio"
 REPO_ROOT = AUDIO_DIR.parent.parent
 sys.path.insert(0, str(AUDIO_DIR))
 
-from audacity_labels import (read_aup4, labels_txt, diff_tracks,  # noqa: E402
+from audacity_labels import (read_aup4, labels_txt, block_titles, diff_tracks,  # noqa: E402
                              merge_edges, AupError, inject, read_clips)
 from render_cut import parse_ts  # noqa: E402
 
@@ -132,6 +132,24 @@ class TestLabelsTxt(unittest.TestCase):
     def test_format_is_audacity_label_import(self):
         txt = labels_txt([[3.03, 17.744], [18.46, 19.49]])
         self.assertEqual(txt, "3.030000\t17.744000\t1\n18.460000\t19.490000\t2\n")
+
+
+class TestBlockTitles(unittest.TestCase):
+    BL = [{"id": "B0001", "start": 1.0, "end": 2.0}, {"id": "B0002", "start": 2.0, "end": 3.0},
+          {"id": "B0003", "start": 3.0, "end": 4.0}, {"id": "B0004", "start": 9.0, "end": 10.0}]
+
+    def test_first_and_last_block_in_range(self):
+        self.assertEqual(block_titles([[1.0, 4.0]], self.BL), ["B0001–B0003"])
+
+    def test_single_block_and_empty_range_fallback(self):
+        self.assertEqual(block_titles([[9.0, 10.0], [5.0, 6.0]], self.BL), ["B0004", "2"])
+
+    def test_edge_block_needs_half_inside(self):
+        # B0003 只有 0.2/1.0 在段內 → 不算;B0002 全在
+        self.assertEqual(block_titles([[1.0, 3.2]], self.BL), ["B0001–B0002"])
+
+    def test_labels_txt_uses_titles(self):
+        self.assertEqual(labels_txt([[1.0, 2.0]], ["B0001"]), "1.000000\t2.000000\tB0001\n")
 
 
 class TestDiffTracks(unittest.TestCase):
@@ -290,6 +308,15 @@ class TestInject(unittest.TestCase):
                      [_ltrack("Labels-Sarah", [(0.5, 0.7, "TEST")]),
                       _ltrack("MM", [(9.0, 9.5, "舊")])])
         return p
+
+    def test_titles_become_label_text(self):
+        with tempfile.TemporaryDirectory() as td:
+            p = self._proj(td)
+            inject(p, self.AI, drop_label_tracks=True, heal_clips=False,
+                   titles=["B0001–B0003", "B0009"])
+            got = {t["name"]: t["labels"] for t in read_aup4(p)}
+            self.assertEqual([l[2] for l in got["AI"]], ["B0001–B0003", "B0009"])
+            self.assertEqual([l[2] for l in got["MM"]], ["B0001–B0003", "B0009"])
 
     def test_adds_ai_and_mm_and_drops_other_label_tracks(self):
         with tempfile.TemporaryDirectory() as td:

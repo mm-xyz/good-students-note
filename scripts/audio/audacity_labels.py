@@ -227,7 +227,8 @@ def _in_use(path: Path) -> bool:
     return bool(r.stdout.strip())
 
 
-def inject(path: Path, ai_ranges, drop_label_tracks: bool, heal_clips: bool) -> dict:
+def inject(path: Path, ai_ranges, drop_label_tracks: bool, heal_clips: bool,
+           titles=None) -> dict:
     """把 AI／MM 兩條標籤軌(內容都是 ai_ranges)直接寫進 .aup4。
 
     - 既有的 AI／MM 軌一律先拿掉(重跑冪等);drop_label_tracks 連其他標籤軌一起拿掉。
@@ -236,6 +237,7 @@ def inject(path: Path, ai_ranges, drop_label_tracks: bool, heal_clips: bool) -> 
       各 clip 的 offset 與 blockid 全同時才做,否則整個中止、不寫入。
     - 只在 byte 位置上剪貼,其他元素(音訊、縮圖、效果)原封不動。
     - Audacity 開著(有 -wal)就拒絕,不跟它搶同一個檔。
+    - titles:每個標籤的文字(block_titles 的輸出),沒給就用序號。
     """
     if _in_use(path):
         raise AupError(f"{path.name} 還被 Audacity 開著 —— 先關掉 Audacity"
@@ -292,7 +294,7 @@ def inject(path: Path, ai_ranges, drop_label_tracks: bool, heal_clips: bool) -> 
                 out += b"\x01" + struct.pack("<H", ids["label"])
                 out += b"\x0a" + struct.pack("<Hdi", ids["t"], float(a), digits)
                 out += b"\x0a" + struct.pack("<Hdi", ids["t1"], float(b_), digits)
-                out += s_("title", str(i))
+                out += s_("title", titles[i - 1] if titles else str(i))
                 out += b"\x02" + struct.pack("<H", ids["label"])
             out += b"\x02" + struct.pack("<H", ids["labeltrack"])
             return bytes(out)
@@ -369,9 +371,40 @@ def diff_tracks(ai, mm) -> tuple[list[list[float]], list[list[float]]]:
     return r(_minus(ai, mm, JITTER)), r(_minus(mm, ai, JITTER))
 
 
-def labels_txt(ranges) -> str:
-    """Audacity 匯入標籤的格式:起\\t迄\\t標籤(秒,六位小數)。標籤只放序號。"""
-    return "".join(f"{a:.6f}\t{b:.6f}\t{i}\n" for i, (a, b) in enumerate(ranges, 1))
+def block_titles(ranges, blocks) -> list[str]:
+    """每個保留段 → 「B0002–B0010」(段內第一個與最後一個 block 的 id)。
+
+    blocks 是 cutplan.json 的 blocks(要有 id/start/end)。block 有一半以上落在
+    段內才算這段的;段內沒有 block 就退回序號。MM 看到標籤就知道拉的是哪幾句,
+    回 cutplan 找得到。apply 只比時間範圍、不看標籤文字,所以這裡怎麼命名都不影響差異。"""
+    out = []
+    for i, (a, b) in enumerate(ranges, 1):
+        ids = [bl["id"] for bl in blocks
+               if bl["end"] > bl["start"]
+               and min(bl["end"], b) - max(bl["start"], a) > 0.5 * (bl["end"] - bl["start"])]
+        if not ids:
+            out.append(str(i))
+        elif len(ids) == 1 or ids[0] == ids[-1]:
+            out.append(ids[0])
+        else:
+            out.append(f"{ids[0]}–{ids[-1]}")
+    return out
+
+
+def _titles_for(wd: Path, ranges):
+    """cutplan.json 在就用 block id 命名,讀不到就 None(序號)。"""
+    cj = wd / "cutplan.json"
+    try:
+        blocks = json.loads(cj.read_text(encoding="utf-8"))["blocks"]
+        return block_titles(ranges, blocks)
+    except (OSError, ValueError, KeyError):
+        return None
+
+
+def labels_txt(ranges, titles=None) -> str:
+    """Audacity 匯入標籤的格式:起\\t迄\\t標籤(秒,六位小數)。沒給 titles 標籤只放序號。"""
+    return "".join(f"{a:.6f}\t{b:.6f}\t{titles[i - 1] if titles else i}\n"
+                   for i, (a, b) in enumerate(ranges, 1))
 
 
 # ── 寫回 cutplan ────────────────────────────────────────────────────────
@@ -426,7 +459,7 @@ def cmd_export(args) -> None:
     ranges = [[r["src_start"], r["src_end"]]
               for r in json.loads(cm.read_text(encoding="utf-8"))["ranges"]]
     out = wd / "audacity_AI.txt"
-    out.write_text(labels_txt(ranges), encoding="utf-8")
+    out.write_text(labels_txt(ranges, _titles_for(wd, ranges)), encoding="utf-8")
     print(f"[audacity] {len(ranges)} 個保留段 → {out}")
     print("  1. Audacity:檔案 → 匯入 → 標籤,選這個檔;標籤軌改名 AI")
     print("  2. 複製 AI 那條軌,改名 MM;之後只動 MM")
@@ -481,7 +514,8 @@ def cmd_inject(args) -> None:
     ranges = [[r["src_start"], r["src_end"]]
               for r in json.loads(cm.read_text(encoding="utf-8"))["ranges"]]
     try:
-        r = inject(args.aup, ranges, args.drop_label_tracks, args.heal_clips)
+        r = inject(args.aup, ranges, args.drop_label_tracks, args.heal_clips,
+                   _titles_for(work_dir(args.session), ranges))
     except AupError as e:
         sys.exit(f"[audacity] FAIL: {e}")
     print(f"[audacity] {args.aup.name}:寫入 AI／MM 兩條標籤軌,各 {r['labels']} 個保留段"

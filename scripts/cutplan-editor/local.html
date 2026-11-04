@@ -1,199 +1,1354 @@
-<!doctype html>
-<!--
-  scripts/cutplan-editor/local.html — Cutplan 本機檢視器(Lifov #1199)。
-  Drive 用不了時的替代:雙擊用瀏覽器開,自己選 cutplan.md / cutplan.timeline.json / mp3。
-  純本機、不連網、不寫檔;解析與時間對照共用 cutplan-core.js(同資料夾)。
-  目前只讀:看 block 勾選、刪除線,播放成品時跟著捲動,點卡片跳到成品該處。
--->
-<html lang="zh-Hant">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Cutplan 本機檢視器</title>
+<!-- local.html 由 tools/build-local.js 自 Index.html 產生,不要手改 -->
 <style>
-  :root { color-scheme: light dark; --fg:#1a1a1a; --bg:#fff; --muted:#6b6b6b; --border:#d9d9d9;
-    --accent:#0a6b4d; --danger:#a3321f; --card:#fafafa; --strike:#ffe8b3; }
-  @media (prefers-color-scheme: dark) { :root { --fg:#eaeaea; --bg:#121212; --muted:#9a9a9a;
-    --border:#3a3a3a; --accent:#4fd1a5; --danger:#ff6b52; --card:#1c1c1c; --strike:#4a3a12; } }
+  :root {
+    color-scheme: light dark;
+    --fg: #1a1a1a;
+    --bg: #ffffff;
+    --muted: #6b6b6b;
+    --border: #d9d9d9;
+    --accent: #0a6b4d;
+    --danger: #a3321f;
+    --card-bg: #fafafa;
+    --strike-bg: #ffe8b3;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --fg: #eaeaea;
+      --bg: #121212;
+      --muted: #9a9a9a;
+      --border: #3a3a3a;
+      --accent: #4fd1a5;
+      --danger: #ff6b52;
+      --card-bg: #1c1c1c;
+      --strike-bg: #4a3a12;
+    }
+  }
   * { box-sizing: border-box; }
-  body { margin:0; font-family:-apple-system,"PingFang TC","Noto Sans TC",sans-serif; background:var(--bg); color:var(--fg); }
-  header { position:sticky; top:0; z-index:5; background:var(--bg); border-bottom:1px solid var(--border); padding:10px 12px; }
-  h1 { font-size:15px; margin:0 0 8px; color:var(--muted); }
-  .row { display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin-bottom:8px; }
-  .pick { font-size:14px; padding:8px 12px; border-radius:8px; border:1px solid var(--border); background:var(--card); cursor:pointer; }
-  .pick.ok { border-color:var(--accent); color:var(--accent); }
-  .pick input { display:none; }
-  #audio { width:100%; height:36px; }
-  #info, #status { font-size:12px; color:var(--muted); }
-  #status.error { color:var(--danger); }
-  #jump { font-size:16px; padding:6px 8px; width:150px; border-radius:8px; border:1px solid var(--border); background:var(--card); color:var(--fg); }
-  button { font-size:14px; padding:7px 12px; border-radius:8px; border:1px solid var(--border); background:var(--card); color:var(--fg); }
-  #list { padding:8px 12px 60px; }
-  .chap { margin:18px 0 8px; font-size:13px; font-weight:600; color:var(--accent); border-top:1px dashed var(--border); padding-top:10px; }
-  .sys { margin:6px 0; padding:4px 10px; font-size:12px; color:var(--accent); border-left:3px solid var(--accent); background:rgba(127,127,127,.08); }
-  .card { display:flex; gap:10px; padding:8px 10px; margin-bottom:6px; border:1px solid var(--border); border-radius:10px; background:var(--card); cursor:pointer; }
-  .card.off { opacity:.5; }
-  .card.playing { outline:2px solid var(--accent); }
-  .card.mismatch { border:2px solid var(--danger); }
-  .mark { width:22px; flex:none; font-size:18px; }
-  .meta { font-size:11px; color:var(--muted); font-family:ui-monospace,Menlo,monospace; display:flex; gap:6px; flex-wrap:wrap; }
-  .tl { color:var(--accent); } .tl.absent { color:var(--muted); }
-  .body { font-size:15px; line-height:1.6; }
-  .body s { background:var(--strike); }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang TC",
+      "Noto Sans TC", sans-serif;
+    background: var(--bg);
+    color: var(--fg);
+    padding-bottom: 88px; /* 留給底部固定的儲存列 */
+  }
+  header {
+    position: sticky;
+    top: 0;
+    z-index: 5;
+    background: var(--bg);
+    border-bottom: 1px solid var(--border);
+    padding: 10px 12px;
+  }
+  header .hrow { display: flex; align-items: center; gap: 8px; margin: 0 0 8px; }
+  header .hrow h1 { margin: 0; flex: 1; min-width: 0; }
+  #hdrToggle {
+    flex: none; font-size: 13px; padding: 6px 10px; border-radius: 8px;
+    border: 1px solid var(--border); background: var(--card-bg); color: var(--fg);
+  }
+  /* 收合:只留橫軸、播放器、播放中的 block、狀態列,畫面讓給 block 列表 */
+  header.collapsed .hrow h1,
+  header.collapsed #openRow,
+  header.collapsed #tlBar,
+  header.collapsed #lastEditBtn,
+    header.collapsed #pickAudio2,
+  header.collapsed #musicWrap { display: none; }
+  header.collapsed .hrow { margin: 0; justify-content: flex-end; position: absolute; right: 12px; top: 10px; z-index: 6; }
+  header.collapsed { padding-top: 10px; }
+  header.collapsed #diffStrip { margin-top: 0; margin-right: 92px; }
+  header.collapsed #player { margin-top: 6px; }
+  header h1 {
+    font-size: 15px;
+    margin: 0 0 8px;
+    color: var(--muted);
+    font-weight: 600;
+  }
+  select {
+    width: 100%;
+    font-size: 16px;
+    padding: 8px;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    background: var(--card-bg);
+    color: var(--fg);
+  }
+  #status {
+    padding: 6px 0 0;
+    font-size: 13px;
+    color: var(--muted);
+  }
+  #status:empty { display: none; }
+  #diffStrip {
+    position: relative;
+    height: 26px;
+    margin-top: 8px;
+    border-radius: 6px;
+    background: var(--card-bg);
+    border: 1px solid var(--border);
+    cursor: pointer;
+    touch-action: manipulation;
+  }
+  #diffStrip i {
+    position: absolute;
+    top: 3px;
+    bottom: 3px;
+    width: 3px;
+    margin-left: -1px;
+    border-radius: 2px;
+    background: var(--danger);
+    pointer-events: none;
+  }
+  #diffStrip i.cur { width: 5px; background: var(--accent); }
+  #diffStrip span {
+    position: absolute;
+    right: 6px;
+    top: 4px;
+    font-size: 11px;
+    color: var(--muted);
+    pointer-events: none;
+  }
+  #player { margin-top: 8px; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  #player[hidden] { display: none; }
+  #loadLatest {
+    font-size: 14px; padding: 8px 12px; border-radius: 8px; border: none;
+    background: var(--accent); color: #04241a; font-weight: 700;
+  }
+  #loadLatest:disabled { opacity: .6; }
+  #clearCache {
+    font-size: 13px; padding: 8px 10px; border-radius: 8px;
+    border: 1px solid var(--border); background: transparent; color: var(--muted);
+  }
+  #pickAudio {
+    font-size: 14px; padding: 8px 12px; border-radius: 8px; cursor: pointer;
+    border: 1px solid var(--border); background: var(--card-bg); color: var(--fg);
+  }
+  #pickAudio input { display: none; }
+  #musicWrap { font-size: 13px; color: var(--muted); display: flex; gap: 4px; align-items: center; }
+  #musicWrap select { width: auto; font-size: 14px; padding: 4px 6px; }
+  #followWrap { font-size: 13px; color: var(--muted); display: flex; gap: 4px; align-items: center; }
+  #playInfo { font-size: 12px; color: var(--accent); flex: 1; min-width: 0; }
+  #skipRow { display: flex; gap: 8px; width: 100%; }
+  #skipRow[hidden] { display: none; }
+  #skipRow button {
+    flex: 1; font-size: 15px; padding: 10px 0; border-radius: 8px;
+    border: 1px solid var(--border); background: var(--card-bg); color: var(--fg);
+  }
+  #audio { width: 100%; height: 36px; }
+  #audio[hidden] { display: none; }
+  #diffStrip b {
+    position: absolute; top: 0; bottom: 0; width: 2px; margin-left: -1px;
+    background: var(--accent); pointer-events: none; display: none;
+  }
+  .block-card.playing { outline: 2px solid var(--accent); outline-offset: 1px; }
+  #lastEditBtn {
+    margin-top: 8px;
+    font-size: 14px;
+    padding: 8px 12px;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    background: var(--card-bg);
+    color: var(--fg);
+  }
+  #lastEditBtn:not([hidden]) { display: block; }
+  #status.error { color: var(--danger); }
+  #status.ok { color: var(--accent); }
+  #blockList { padding: 8px 12px; }
+  .chapter-divider {
+    margin: 18px 0 8px;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--accent);
+    border-top: 1px dashed var(--border);
+    padding-top: 10px;
+  }
+  .roomtone-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 6px 0;
+    padding: 6px 10px;
+    font-size: 13px;
+    color: var(--accent);
+    background: rgba(127, 127, 127, 0.08);
+    border-left: 3px solid var(--accent);
+    border-radius: 4px;
+  }
+  .roomtone-row .grow { flex: 1; }
+  .roomtone-row button,
+  .roomtone-add button {
+    font-size: 12px;
+    padding: 4px 8px;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    background: transparent;
+    color: inherit;
+  }
+  .roomtone-add {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+    padding: 2px 0 8px 30px;
+    font-size: 12px;
+    opacity: 0.75;
+  }
+  .block-card {
+    display: flex;
+    gap: 10px;
+    padding: 10px;
+    margin-bottom: 8px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--card-bg);
+  }
+  .block-card input[type="checkbox"] {
+    width: 22px;
+    height: 22px;
+    margin-top: 2px;
+    flex: none;
+  }
+  .block-main { flex: 1; min-width: 0; }
+  .block-meta {
+    font-size: 11px;
+    color: var(--muted);
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    margin-bottom: 4px;
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+  }
+  .speaker-tag {
+    font-weight: 600;
+    color: var(--fg);
+  }
+  .block-body {
+    font-size: 16px;
+    line-height: 1.6;
+    -webkit-user-select: text;
+    user-select: text;
+  }
+  .block-body s { background: var(--strike-bg); text-decoration: line-through; }
+  /* 成品時間對照(#1078):卡片 id 旁的小字;勾選跟實際成品不一致要醒目 */
+  .tl-tag { color: var(--accent); }
+  .tl-tag.absent { color: var(--muted); }
+  .block-card.tl-mismatch { border: 2px solid var(--danger); }
+  .tl-mismatch .tl-tag { color: var(--danger); font-weight: 700; }
+  .block-card.tl-flash { outline: 3px solid var(--accent); outline-offset: 2px; }
+  #tlBar { display: none; margin-top: 8px; gap: 6px; align-items: center; flex-wrap: wrap; }
+  #tlBar.show { display: flex; }
+  #tlInfo { font-size: 12px; color: var(--muted); flex-basis: 100%; }
+  #tlInput {
+    flex: 1;
+    min-width: 0;
+    font-size: 16px; /* iOS 小於 16px 會自動放大頁面 */
+    padding: 8px;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    background: var(--card-bg);
+    color: var(--fg);
+  }
+  #tlGo {
+    font-size: 15px;
+    padding: 8px 14px;
+    border-radius: 8px;
+    border: none;
+    background: var(--accent);
+    color: #04241a;
+    font-weight: 700;
+  }
+  /* audio=tracks 的軌開關:每軌一個,觸控目標跟列勾選同大小(22px checkbox)。
+     手機一列放得下三個名字;放不下就換行,不縮字。 */
+  .track-toggles {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px 14px;
+    margin-top: 6px;
+  }
+  .track-toggles label {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 14px;
+    color: var(--muted);
+    -webkit-user-select: none;
+    user-select: none;
+  }
+  .track-toggles label.on { color: var(--fg); font-weight: 600; }
+  .track-toggles input[type="checkbox"] {
+    width: 22px;
+    height: 22px;
+    margin: 0;
+    flex: none;
+  }
+  .block-card.unchecked .block-body { opacity: .55; }
+  /* 復原按鈕:絕對定位(不是 fixed)——JS 用「選取範圍的 client rect +
+     window.scrollX/scrollY」換算文件座標,讓按鈕跟著頁面內容一起捲動,
+     不會捲走了還指著錯的位置(見 Index.html 內 JS 註解與 README)。 */
+  #undoFloat {
+    position: absolute;
+    display: none;
+    z-index: 15;
+  }
+  #undoFloat button {
+    font-size: 14px;
+    padding: 8px 16px;
+    border-radius: 999px;
+    border: none;
+    background: var(--accent);
+    color: #04241a;
+    font-weight: 700;
+    box-shadow: 0 2px 10px rgba(0, 0, 0, .35);
+    white-space: nowrap;
+  }
+  footer {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    padding: 10px 12px calc(10px + env(safe-area-inset-bottom));
+    background: var(--bg);
+    border-top: 1px solid var(--border);
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    z-index: 8;
+  }
+  footer .dirty-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--danger);
+    display: none;
+  }
+  footer .dirty-dot.show { display: inline-block; }
+  #saveMsg { flex: 2; font-size: 13px; color: var(--muted); word-break: break-all; }
+  #saveMsg.ok { color: var(--accent); }
+  #saveMsg.error { color: var(--danger); font-weight: 700; }
+  footer button {
+    flex: 1;
+    font-size: 16px;
+    padding: 12px;
+    border-radius: 10px;
+    border: none;
+    background: var(--accent);
+    color: #04241a;
+    font-weight: 700;
+  }
+  footer button:disabled { opacity: .5; }
+  .empty-hint {
+    color: var(--muted);
+    font-size: 14px;
+    padding: 24px 4px;
+    text-align: center;
+  }
+.open-row { display:flex; flex-wrap:wrap; gap:8px; margin-bottom:8px; }
+  .open-row button, .open-row .pick { font-size:14px; padding:8px 12px; border-radius:8px; cursor:pointer;
+    border:1px solid var(--border); background:var(--card-bg); color:var(--fg); }
+  .open-row .ok { border-color:var(--accent); color:var(--accent); }
 </style>
-</head>
-<body>
+
+<title>Cutplan 本機編輯器</title>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <header>
-  <h1>Cutplan 本機檢視器(唯讀)</h1>
-  <div class="row">
-    <label class="pick" id="pDir">選版本資料夾(自動抓三個檔)<input id="fDir" type="file" webkitdirectory></label>
-    <label class="pick" id="pPlan">cutplan.md<input id="fPlan" type="file" accept=".md,text/*"></label>
-    <label class="pick" id="pTl">timeline.json(選填)<input id="fTl" type="file" accept=".json,application/json"></label>
-    <label class="pick" id="pAud">mp3 / m4a / wav<input id="fAud" type="file" accept="audio/*,.mp3,.m4a,.wav"></label>
+  <div class="hrow"><h1>Cutplan 編輯器 — 只能勾選 / 加刪除線,其餘唯讀</h1><button id="hdrToggle" type="button" aria-expanded="true">收起 ▲</button></div>
+  <div id="openRow" class="open-row">
+    <button id="openPlan" type="button">① 開啟 cutplan.md</button>
+    <button id="openTl" type="button">② timeline.json(選填)</button>
+    <label id="pickAudio2" class="pick">③ 音檔 mp3<input id="audioFile2" type="file" accept="audio/*,.mp3,.m4a,.wav" hidden></label>
+    <input id="planFallback" type="file" accept=".md,text/*" hidden>
+    <input id="tlFallback" type="file" accept=".json,application/json" hidden>
   </div>
-  <audio id="audio" controls preload="metadata" hidden></audio>
-  <div class="row">
-    <input id="jump" placeholder="成品時間 12:34 / B0059">
-    <button id="go" type="button">跳到</button>
-    <button id="back" type="button">⏪10s</button><button id="fwd" type="button">10s⏩</button>
-    <label style="font-size:13px"><input id="follow" type="checkbox" checked> 自動捲動</label>
+  <button id="lastEditBtn" type="button" hidden>跳到最後一次修改</button>
+  <form id="tlBar" autocomplete="off">
+    <div id="tlInfo"></div>
+    <input id="tlInput" autocapitalize="characters" placeholder="成品時間 12:34 或 Block ID B0059">
+    <button id="tlGo" type="submit">跳到</button>
+  </form>
+  <div id="diffStrip" hidden title="紅色=勾選跟最新成品不一致(還沒 apply),點一下跳過去"></div>
+  <div id="player" hidden>
+    
+    <label id="musicWrap">音樂版本 <select id="musicVer"><option value="1">v1</option><option value="2">v2</option></select></label>
+    <label id="followWrap"><input id="follow" type="checkbox" checked>自動捲動</label>
+    <span id="playInfo"></span>
+    <div id="skipRow" hidden>
+      <button id="skipBack" type="button">⏪ 10 秒</button>
+      <button id="skipFwd" type="button">10 秒 ⏩</button>
+    </div>
+    <audio id="audio" controls preload="metadata" hidden></audio>
   </div>
-  <div id="info"></div>
   <div id="status"></div>
 </header>
-<div id="list"></div>
+
+<div id="blockList"></div>
+
+<div id="undoFloat"><button id="undoBtn" type="button">復原</button></div>
+
+<footer>
+  <span class="dirty-dot" id="dirtyDot" title="尚未儲存"></span>
+  <span id="saveMsg"></span>
+  <button id="saveBtn" type="button" disabled>儲存</button>
+</footer>
+
 <script src="cutplan-core.js"></script>
 <script>
 (function () {
   'use strict';
   var Core = window.CutplanCore;
-  var $ = function (id) { return document.getElementById(id); };
-  var st = { doc: null, tl: null, tlBad: false, name: '' };
-  var audio = $('audio'), audioUrl = null, playingLine = null, pausedUntil = 0;
 
-  function status(msg, kind) { $('status').textContent = msg || ''; $('status').className = kind || ''; }
-  function mark(id, ok) { $(id).classList.toggle('ok', !!ok); }
-  function readText(f) { return new Promise(function (res, rej) {
-    var r = new FileReader(); r.onload = function () { res(r.result); }; r.onerror = rej; r.readAsText(f); }); }
-
-  function loadPlan(f) {
-    return readText(f).then(function (text) {
-      st.doc = Core.parseCutplan(text); st.name = f.name; mark('pPlan', true);
-      render(); status('已載入 ' + f.name + '(' + countBlocks() + ' 個 block)', 'ok');
-    });
-  }
-  function loadTl(f) {
-    return readText(f).then(function (text) {
-      st.tl = Core.parseTimeline(text); st.tlBad = Core.timelineFileState(text) === 'bad';
-      mark('pTl', !!st.tl); render();
-      if (st.tlBad) status('timeline.json 格式不合格,未啟用時間對照', 'error');
-    });
-  }
-  function loadAudio(f) {
-    if (audioUrl) URL.revokeObjectURL(audioUrl);
-    audioUrl = URL.createObjectURL(f); audio.src = audioUrl; audio.hidden = false; mark('pAud', true);
-    status('已載入 ' + f.name + '(' + (f.size / 1048576).toFixed(1) + ' MB)', 'ok');
-  }
-  function countBlocks() { return st.doc.lines.filter(function (l) { return l.editable; }).length; }
-
-  $('fPlan').onchange = function () { if (this.files[0]) loadPlan(this.files[0]); };
-  $('fTl').onchange = function () { if (this.files[0]) loadTl(this.files[0]); };
-  $('fAud').onchange = function () { if (this.files[0]) loadAudio(this.files[0]); };
-  $('fDir').onchange = function () {
-    var files = Array.prototype.slice.call(this.files), by = function (re) {
-      return files.filter(function (f) { return re.test(f.name); }); };
-    var plan = by(/^cutplan\.md$/)[0], tl = by(/^cutplan\.timeline\.json$/)[0], au = by(/\.(mp3|m4a|wav)$/i)[0];
-    var jobs = [];
-    if (plan) jobs.push(loadPlan(plan)); if (tl) jobs.push(loadTl(tl)); if (au) loadAudio(au);
-    Promise.all(jobs).then(function () {
-      if (!plan) status('資料夾裡沒有 cutplan.md', 'error');
-    });
+  var state = {
+    fileId: null,
+    doc: null,
+    dirty: false,
+    tracksMode: false, // ⚙ audio=tracks:每張卡片多畫各軌開關
+    timeline: null,    // cutplan.timeline.json(#1078),沒有就是 null
+    timelineBad: false, // 有檔但格式不合格(整份不採信)
+    history: Core.createHistory(), // undo 堆疊(純資料,見 cutplan-core.js)
   };
 
-  function fmt(t) { return Core.formatTime(t); }
+  var els = {
+    status: document.getElementById('status'),
+    blockList: document.getElementById('blockList'),
+    undoFloat: document.getElementById('undoFloat'),
+    undoBtn: document.getElementById('undoBtn'),
+    saveBtn: document.getElementById('saveBtn'),
+    saveMsg: document.getElementById('saveMsg'),
+    lastEditBtn: document.getElementById('lastEditBtn'),
+    dirtyDot: document.getElementById('dirtyDot'),
+  };
+
+  function setStatus(msg, kind) {
+    els.status.textContent = msg || '';
+    els.status.className = kind || '';
+  }
+
+  var AUTOSAVE_MS = 3000;   // 最後一次編輯後等這麼久才自動存
+  var SAVE_TIMEOUT_MS = 20000;
+  var rev = 0;              // 每次編輯 +1;存檔回來時用來判斷「存的途中又改了」
+  var saving = false;
+  var autoTimer = null;
+
+  function setDirty(v) {
+    state.dirty = v;
+    els.dirtyDot.classList.toggle('show', v);
+    els.saveBtn.disabled = !v || saving;
+    if (v) {
+      rev++;
+      noteLastEdit();
+      clearTimeout(autoTimer);
+      autoTimer = setTimeout(function () { doSave(true); }, AUTOSAVE_MS);
+    }
+  }
+
+  // ── 最後一次修改 ─────────────────────────────────────────────────────
+  // 每次 dirty 時跟上一份快照逐行比,第一個不同的行就是剛改的那行;
+  // 記它的 Block ID(行號會因補房間音位移),存 localStorage 讓重新整理後還在。
+  var lineSnap = null;
+  function snapLines() {
+    lineSnap = state.doc ? state.doc.lines.map(Core.serializeLine) : null;
+  }
+  function lastEditKey() { return 'cutplan-lastedit:' + state.fileId; }
+  function noteLastEdit() {
+    if (!state.doc || !lineSnap) return;
+    var cur = state.doc.lines, i = 0;
+    while (i < cur.length && i < lineSnap.length && Core.serializeLine(cur[i]) === lineSnap[i]) i++;
+    snapLines();
+    var line = cur[i];
+    if (!line || !line.id) return;
+    try { localStorage.setItem(lastEditKey(), line.id); } catch (e) { /* 無痕/封鎖時略過 */ }
+    els.lastEditBtn.hidden = false;
+  }
+  function refreshLastEditBtn() {
+    var id = null;
+    try { id = localStorage.getItem(lastEditKey()); } catch (e) { /* ignore */ }
+    els.lastEditBtn.hidden = !(id && Core.findLineById(state.doc, id) !== null);
+  }
+  els.lastEditBtn.addEventListener('click', function () {
+    var id = null;
+    try { id = localStorage.getItem(lastEditKey()); } catch (e) { /* ignore */ }
+    var li = id ? Core.findLineById(state.doc, id) : null;
+    var card = li === null ? null
+      : els.blockList.querySelector('[data-line-index="' + li + '"]');
+    if (!card) { setStatus('找不到最後修改的那一列', 'error'); return; }
+    card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    card.classList.add('tl-flash');
+    setTimeout(function () { card.classList.remove('tl-flash'); }, 1600);
+    setStatus('最後一次修改 → ' + id, 'ok');
+  });
+
+  // ── 存不了就下載副本 ─────────────────────────────────────────────────
+  var copiedRev = -1;
+  function download(name, content) {
+    var a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([content], { type: 'text/plain;charset=utf-8' }));
+    a.download = name; document.body.appendChild(a); a.click(); a.remove();
+  }
+  function saveCopyFallback(content, why) {
+    if (copiedRev === rev) return;
+    copiedRev = rev;
+    var d = new Date(), p = function (n) { return String(n).padStart(2, '0'); };
+    var name = 'cutplan_' + String(d.getFullYear()).slice(2) + p(d.getMonth() + 1) + p(d.getDate())
+      + p(d.getHours()) + p(d.getMinutes()) + p(d.getSeconds()) + '.md';
+    download(name, content);
+    setSaveMsg(why + ';已下載副本 ' + name + ',編輯沒丟', 'error');
+  }
+
+  function setSaveMsg(msg, kind) {
+    els.saveMsg.textContent = msg || '';
+    els.saveMsg.className = kind || '';
+  }
+
+  window.addEventListener('beforeunload', function (e) {
+    if (state.dirty) { e.preventDefault(); e.returnValue = ''; }
+  });
+
+  // ── 本機開檔 ──────────────────────────────────────────────────────────
+  var fileHandle = null;      // 可原地寫回的 cutplan.md(File System Access)
+  var origText = '';          // 載入/上次存檔時的內容,護欄用它比對
+  var hasFS = !!window.showOpenFilePicker;
+  function readFile(f) { return new Promise(function (res, rej) {
+    var r = new FileReader(); r.onload = function () { res(r.result); }; r.onerror = rej; r.readAsText(f); }); }
+  function mk(id, ok) { document.getElementById(id).classList.toggle('ok', !!ok); }
+
+  function openPlan() {
+    if (state.dirty && !confirm('目前的編輯還沒儲存,確定要開別的檔嗎?')) return;
+    if (!hasFS) { document.getElementById('planFallback').click(); return; }
+    window.showOpenFilePicker({ types: [{ description: 'cutplan', accept: { 'text/*': ['.md'] } }] })
+      .then(function (hs) { fileHandle = hs[0]; return hs[0].getFile(); })
+      .then(function (f) { return readFile(f).then(function (t) { loadCutplanText(t, f.name); }); })
+      .catch(function (e) { if (e && e.name !== 'AbortError') setStatus('開檔失敗:' + e.message, 'error'); });
+  }
+  function openTl() {
+    if (!hasFS) { document.getElementById('tlFallback').click(); return; }
+    window.showOpenFilePicker({ types: [{ description: 'timeline', accept: { 'application/json': ['.json'] } }] })
+      .then(function (hs) { return hs[0].getFile(); })
+      .then(function (f) { return readFile(f).then(applyTimeline); })
+      .catch(function (e) { if (e && e.name !== 'AbortError') setStatus('開檔失敗:' + e.message, 'error'); });
+  }
+  function applyTimeline(text) {
+    state.timeline = Core.parseTimeline(text);
+    state.timelineBad = Core.timelineFileState(text) === 'bad';
+    mk('openTl', !!state.timeline);
+    if (state.doc) render();
+    if (state.timelineBad) setStatus('timeline.json 格式不合格,未啟用成品時間對照', 'error');
+  }
+  document.getElementById('openPlan').addEventListener('click', openPlan);
+  document.getElementById('openTl').addEventListener('click', openTl);
+  document.getElementById('planFallback').addEventListener('change', function () {
+    var f = this.files[0]; if (!f) return; fileHandle = null;
+    readFile(f).then(function (t) { loadCutplanText(t, f.name); });
+  });
+  document.getElementById('tlFallback').addEventListener('change', function () {
+    var f = this.files[0]; if (f) readFile(f).then(applyTimeline);
+  });
+  document.getElementById('audioFile2').addEventListener('change', function () {
+    var f = this.files && this.files[0]; if (!f) return;
+    if (audioUrl) URL.revokeObjectURL(audioUrl);
+    audioUrl = URL.createObjectURL(f);
+    audio.src = audioUrl; audio.hidden = false;
+    document.getElementById('skipRow').hidden = false;
+    clearPlaying(); mk('pickAudio2', true);
+    var vs = state.timeline && state.timeline.versionShort;
+    if (vs && f.name.indexOf(vs) === -1) {
+      setStatus('注意:檔名沒有「' + vs + '」,跟 timeline 的版本可能不同,橫軸跟捲動會對不上', 'error');
+    } else setStatus('已載入 ' + f.name, 'ok');
+  });
+
+  function loadCutplanText(text, name) {
+    state.fileId = name;
+    origText = text;
+    setDirty(false);
+    state.history = Core.createHistory();
+    hideUndoFloat();
+    state.doc = Core.parseCutplan(text);
+    state.tracksMode = Core.hasTracksAudio(state.doc);
+    mk('openPlan', true);
+    autoCollapseAfterLoad();
+    snapLines();
+    refreshLastEditBtn();
+    render();
+    setStatus('已載入:' + name + (fileHandle ? '(存檔會直接寫回這個檔)'
+      : '(此瀏覽器無法原地寫回,存檔會下載新檔)'), 'ok');
+  }
+
+  // ── 渲染 ──────────────────────────────────────────────────────────────
+
+  // 章節分隔線的判定住 CutplanCore.isChapterDivider() —— 結構行(⚙/✂/🎵/➕/
+  // 🎬/🔇)是 render 用的參數,對人審沒有意義,不顯示(仍然完整保留在 doc 裡,
+  // 只是不在畫面上占位置——存檔時原封不動寫回去)。清單放 core 是因為那裡
+  // 有測試守著;放這裡的話新增標記時沒有任何東西會叫。
 
   function render() {
-    var list = $('list'); list.innerHTML = ''; playingLine = null;
-    if (!st.doc) return;
-    var mism = 0;
-    st.doc.lines.forEach(function (line, idx) {
-      if (line.editable) { var c = card(line, idx); if (c.classList.contains('mismatch')) mism++; list.appendChild(c); return; }
-      var chap = Core.isChapterDivider(line.raw);
-      if (chap) { var d = document.createElement('div'); d.className = 'chap'; d.textContent = '▸ ' + chap.trim(); list.appendChild(d); return; }
-      var m = /^##\s*(🎵|🔇|➕|🎬|✂|✚)/.exec(line.raw || '');
-      if (m) { var s = document.createElement('div'); s.className = 'sys'; s.textContent = line.raw.replace(/^##\s*/, ''); list.appendChild(s); }
+    renderBlocks();
+    showTimelineBar();   // 編輯後不一致的列數、橫軸都要跟著更新
+    renderDiffStrip();
+  }
+
+  function renderBlocks() {
+    els.blockList.innerHTML = '';
+    if (!state.doc) return;
+    var shown = 0;
+    state.doc.lines.forEach(function (line, idx) {
+      if (line.editable) {
+        els.blockList.appendChild(renderBlockCard(line, idx));
+        shown++;
+        return;
+      }
+      if (Core.isRoomtoneLine(state.doc, idx)) {
+        els.blockList.appendChild(renderRoomtoneRow(line, idx));
+        return;
+      }
+      if (Core.isBreakLine(state.doc, idx)) {
+        els.blockList.appendChild(renderBreakRow(idx));
+        return;
+      }
+      var chapterTitle = Core.isChapterDivider(line.raw);
+      if (chapterTitle) {
+        var div = document.createElement('div');
+        div.className = 'chapter-divider';
+        div.textContent = '▸ ' + chapterTitle.trim();
+        els.blockList.appendChild(div);
+      }
     });
-    $('info').textContent = st.tl
-      ? '對照成品 ' + st.tl.version + (st.tl.generatedAt ? '(' + st.tl.generatedAt.replace('T', ' ') + ' 出片)' : '')
-        + ' · 長度 ' + (st.tl.finalDuration != null ? fmt(st.tl.finalDuration) : '?')
-        + (mism ? ' · 勾選與成品不一致 ' + mism + ' 列' : '')
-      : '沒有 timeline:不會跟著播放捲動,只能用 Block ID 跳';
-  }
-
-  function card(line, idx) {
-    var el = document.createElement('div'), tl = Core.timelineStatus(line, st.tl);
-    el.className = 'card' + (line.mark === ' ' ? ' off' : '') + (tl && tl.mismatch ? ' mismatch' : '');
-    el.dataset.i = idx;
-    var mk = document.createElement('div'); mk.className = 'mark'; mk.textContent = line.mark === ' ' ? '☐' : '☑'; el.appendChild(mk);
-    var main = document.createElement('div'); main.style.minWidth = 0;
-    var meta = document.createElement('div'); meta.className = 'meta';
-    [line.id, '[' + line.timecode + ']', line.prefix && line.prefix.trim()].forEach(function (t) {
-      if (!t) return; var s = document.createElement('span'); s.textContent = t; meta.appendChild(s); });
-    if (tl) { var t = document.createElement('span'); t.className = 'tl' + (tl.times ? '' : ' absent');
-      t.textContent = tl.label + (tl.mismatch ? (tl.times ? '(取消了卻仍在成品)' : '(勾了卻不在成品)') : ''); meta.appendChild(t); }
-    main.appendChild(meta);
-    var body = document.createElement('div'); body.className = 'body';
-    Core.splitStrikes(line.bodyRaw).pieces.forEach(function (p) {
-      var n = document.createTextNode(p.raw);
-      if (p.kind === 'struck') { var s = document.createElement('s'); s.appendChild(n); body.appendChild(s); } else body.appendChild(n);
-    });
-    main.appendChild(body); el.appendChild(main);
-    el.onclick = function () { seek(idx); };
-    return el;
-  }
-
-  function seek(idx) {
-    if (!audio.src) { status('還沒載入音檔', 'error'); return; }
-    var t = Core.findTimeForLine(st.doc, st.tl, idx);
-    if (t === null) { status('這列在成品裡沒有時間(沒有 timeline 或被剪掉)', 'error'); return; }
-    audio.currentTime = Math.max(0, t - 1); audio.play().catch(function () {});
-  }
-
-  function flash(el) { el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-    el.style.outline = '3px solid var(--accent)'; setTimeout(function () { el.style.outline = ''; }, 1500); }
-
-  $('go').onclick = function () {
-    var v = $('jump').value.trim(); if (!v || !st.doc) return;
-    var idx;
-    if (/^[A-Za-z]/.test(v)) idx = Core.findLineById(st.doc, v);
-    else {
-      var secs = Core.parseTimeInput(v);
-      if (secs === null) { status('看不懂:' + v, 'error'); return; }
-      if (audio.src) audio.currentTime = secs;
-      idx = st.tl ? Core.findLineAtTime(st.doc, st.tl, secs) : null;
-      if (idx === Core.OUT_OF_RANGE) { status('超出成品長度', 'error'); return; }
+    if (state.timeline) showTimelineBar(); // 不一致列數跟著勾選變
+    if (!shown) {
+      var hint = document.createElement('div');
+      hint.className = 'empty-hint';
+      hint.textContent = '這份 cutplan.md 沒有可編輯的 block 行。';
+      els.blockList.appendChild(hint);
     }
-    var el = (typeof idx === 'number') ? $('list').querySelector('.card[data-i="' + idx + '"]') : null;
-    if (el) flash(el); else status('找不到對應的 block', 'error');
-  };
-  $('jump').onkeydown = function (e) { if (e.key === 'Enter') $('go').click(); };
-  $('back').onclick = function () { audio.currentTime = Math.max(0, audio.currentTime - 10); };
-  $('fwd').onclick = function () { audio.currentTime += 10; };
-  ['wheel', 'touchmove'].forEach(function (ev) { window.addEventListener(ev, function () { pausedUntil = Date.now() + 5000; }, { passive: true }); });
+  }
 
-  audio.addEventListener('timeupdate', function () {
-    if (!st.doc || !st.tl) return;
-    var li = Core.findLineAtTime(st.doc, st.tl, audio.currentTime);
-    if (typeof li !== 'number' || li === playingLine) return;
-    var old = $('list').querySelector('.card.playing'); if (old) old.classList.remove('playing');
-    playingLine = li;
-    var el = $('list').querySelector('.card[data-i="' + li + '"]'); if (!el) return;
-    el.classList.add('playing');
-    $('info').textContent = fmt(audio.currentTime) + ' → ' + st.doc.lines[li].id;
-    if ($('follow').checked && Date.now() > pausedUntil) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  function renderBlockCard(line, idx) {
+    var card = document.createElement('div');
+    var tl = Core.timelineStatus(line, state.timeline);
+    card.className = 'block-card' + (line.mark === ' ' ? ' unchecked' : '')
+      + (tl && tl.mismatch ? ' tl-mismatch' : '');
+    card.dataset.lineIndex = String(idx);
+
+    var checkbox = document.createElement('input');
+    checkbox.type = 'checkbox';
+    checkbox.checked = line.mark !== ' ';
+    checkbox.addEventListener('change', function () {
+      state.doc = Core.toggleCheckbox(state.doc, idx);
+      setDirty(true);
+      render();
+    });
+    card.appendChild(checkbox);
+
+    var main = document.createElement('div');
+    main.className = 'block-main';
+
+    var meta = document.createElement('div');
+    meta.className = 'block-meta';
+    var idSpan = document.createElement('span');
+    idSpan.textContent = line.id;
+    meta.appendChild(idSpan);
+    var tcSpan = document.createElement('span');
+    tcSpan.textContent = '[' + line.timecode + ']';
+    meta.appendChild(tcSpan);
+    if (line.prefix) {
+      var spk = document.createElement('span');
+      spk.className = 'speaker-tag';
+      spk.textContent = line.prefix.trim();
+      meta.appendChild(spk);
+    }
+    if (tl) {
+      // 「▶ v3 12:34」/「v3 未出現」;勾選跟實際成品不一致時加註原因
+      var tag = document.createElement('span');
+      tag.className = 'tl-tag' + (tl.times ? '' : ' absent');
+      tag.textContent = tl.label + (tl.mismatch
+        ? (tl.times ? '(取消了卻仍在成品)' : '(勾了卻不在成品)') : '');
+      meta.appendChild(tag);
+    }
+    main.appendChild(meta);
+
+    var body = document.createElement('div');
+    body.className = 'block-body';
+    body.dataset.lineIndex = String(idx);
+    var pieces = Core.splitStrikes(line.bodyRaw).pieces;
+    pieces.forEach(function (p) {
+      var node = document.createTextNode(p.raw);
+      if (p.kind === 'struck') {
+        var s = document.createElement('s');
+        s.appendChild(node);
+        body.appendChild(s);
+      } else {
+        body.appendChild(node);
+      }
+    });
+    main.appendChild(body);
+
+    // audio=tracks:這段哪幾軌出聲(列勾選＝留不留這段時間,語意不變)。
+    // 只能翻 ●/○;欄位本身(哪幾軌、順序)唯讀,伺服端護欄也只放行翻轉。
+    var cells = state.tracksMode ? Core.parseTracks(line.tracksRaw) : null;
+    if (cells) {
+      var tt = document.createElement('div');
+      tt.className = 'track-toggles';
+      tt.dataset.lineIndex = String(idx);
+      cells.forEach(function (c) {
+        var lab = document.createElement('label');
+        lab.className = c.on ? 'on' : '';
+        lab.dataset.track = c.name;
+        var cb = document.createElement('input');
+        cb.type = 'checkbox';
+        cb.checked = c.on;
+        cb.setAttribute('aria-label', c.name + (c.on ? ' 出聲' : ' 壓低'));
+        cb.addEventListener('change', function () {
+          var r = Core.toggleTrackWithHistory(state.doc, state.history, idx, c.name);
+          state.doc = r.doc;
+          state.history = r.history;
+          setDirty(true);
+          render();
+          positionUndoAtTrack(idx, c.name);
+        });
+        lab.appendChild(cb);
+        lab.appendChild(document.createTextNode(c.name));
+        tt.appendChild(lab);
+      });
+      main.appendChild(tt);
+    }
+
+    // 「在這一句之後留白」—— `## 🔇` 是編輯器裡唯一可新增的結構行(見 core 註解)。
+    // 秒數只給固定檔位:手機上打錯的成本遠高於少幾個選項。
+    var add = document.createElement('div');
+    add.className = 'roomtone-add';
+    var addLabel = document.createElement('span');
+    addLabel.textContent = '＋ 之後留白';
+    add.appendChild(addLabel);
+    Core.ROOMTONE_SECONDS.forEach(function (secs) {
+      var b = document.createElement('button');
+      b.type = 'button';
+      b.textContent = secs.toFixed(1) + 's';
+      b.addEventListener('click', function () {
+        var r = Core.insertRoomtoneWithHistory(state.doc, state.history, idx, secs);
+        state.doc = r.doc;
+        state.history = r.history;
+        setDirty(true);
+        render();
+      });
+      add.appendChild(b);
+    });
+    var brk = document.createElement('button');
+    brk.type = 'button';
+    brk.textContent = '＋ 之後插間奏';
+    brk.addEventListener('click', function () {
+      var r = Core.insertBreakWithHistory(state.doc, state.history, idx);
+      state.doc = r.doc;
+      state.history = r.history;
+      setDirty(true);
+      render();
+    });
+    add.appendChild(brk);
+    main.appendChild(add);
+
+    card.appendChild(main);
+    return card;
+  }
+
+  function renderBreakRow(idx) {
+    var row = document.createElement('div');
+    row.className = 'roomtone-row';
+    row.dataset.lineIndex = String(idx);
+    var label = document.createElement('span');
+    label.className = 'grow';
+    label.textContent = '🎵 間奏';
+    row.appendChild(label);
+    var del = document.createElement('button');
+    del.type = 'button';
+    del.textContent = '刪除';
+    del.addEventListener('click', function () {
+      var r = Core.removeBreakWithHistory(state.doc, state.history, idx);
+      state.doc = r.doc;
+      state.history = r.history;
+      setDirty(true);
+      render();
+    });
+    row.appendChild(del);
+    return row;
+  }
+
+  // `## 🔇` 要**顯示**出來(其他結構行不顯示)——既然人可以插,就必須看得到、
+  // 也刪得掉,否則在手機上插錯沒有退路。
+  function renderRoomtoneRow(line, idx) {
+    var row = document.createElement('div');
+    row.className = 'roomtone-row';
+    var label = document.createElement('span');
+    label.className = 'grow';
+    label.textContent = '⏸ ' + line.raw.replace(/^##\s*🔇\s*/, '').trim() + ' 留白';
+    row.appendChild(label);
+    var del = document.createElement('button');
+    del.type = 'button';
+    del.textContent = '刪除';
+    del.addEventListener('click', function () {
+      var r = Core.removeRoomtoneWithHistory(state.doc, state.history, idx);
+      state.doc = r.doc;
+      state.history = r.history;
+      setDirty(true);
+      render();
+    });
+    row.appendChild(del);
+    return row;
+  }
+
+  // ── 反白 → 選取穩定後自動套用刪除線 ─────────────────────────────────
+
+  // 把目前的 window selection 換算成「某個 .block-body 容器內」的 clean
+  // 字元座標(逐字元累加 textContent 長度;<s> 標籤不影響座標,因為
+  // splitStrikes 的 clean 座標本來就是「畫面上看得到的文字」的座標)。
+  function resolveSelection() {
+    var sel = window.getSelection();
+    if (!sel || sel.rangeCount === 0 || sel.isCollapsed) return null;
+    var range = sel.getRangeAt(0);
+    var container = range.commonAncestorContainer;
+    var bodyEl = (container.nodeType === 1 ? container : container.parentElement);
+    bodyEl = bodyEl ? bodyEl.closest('.block-body') : null;
+    if (!bodyEl) return null;
+
+    function offsetWithin(node, offset) {
+      var walker = document.createTreeWalker(bodyEl, NodeFilter.SHOW_TEXT, null);
+      var acc = 0;
+      var current;
+      while ((current = walker.nextNode())) {
+        if (current === node) return acc + offset;
+        acc += current.textContent.length;
+      }
+      return acc; // 選取終點剛好在容器尾端(元素節點邊界)
+    }
+
+    var start = offsetWithin(range.startContainer, range.startOffset);
+    var end = offsetWithin(range.endContainer, range.endOffset);
+    if (end < start) { var t = start; start = end; end = t; }
+    if (end <= start) return null;
+    return { lineIndex: Number(bodyEl.dataset.lineIndex), start: start, end: end };
+  }
+
+  // offsetWithin 的反向:把某行 clean 座標換算回 DOM 的 (text node, offset),
+  // 給「復原按鈕要畫在畫面哪裡」用——history 只存 lineIndex/start/end 這種
+  // 邏輯位置(見 cutplan-core.js),每次都要在**目前這次 render() 之後**的
+  // 真實 DOM 上重新算一次,不能快取舊的 Range(render() 會整個重建
+  // .block-body,舊 Range 指到的節點早就不在文件裡了)。
+  function nodeAndOffsetForClean(bodyEl, cleanOffset) {
+    var walker = document.createTreeWalker(bodyEl, NodeFilter.SHOW_TEXT, null);
+    var acc = 0;
+    var current;
+    var last = null;
+    while ((current = walker.nextNode())) {
+      var len = current.textContent.length;
+      if (cleanOffset <= acc + len) {
+        return { node: current, offset: cleanOffset - acc };
+      }
+      acc += len;
+      last = current;
+    }
+    return last ? { node: last, offset: last.textContent.length } : null;
+  }
+
+  function rangeForClean(lineIndex, start, end) {
+    var bodyEl = els.blockList.querySelector('.block-body[data-line-index="' + lineIndex + '"]');
+    if (!bodyEl) return null;
+    var a = nodeAndOffsetForClean(bodyEl, start);
+    var b = nodeAndOffsetForClean(bodyEl, end);
+    if (!a || !b) return null;
+    var range = document.createRange();
+    range.setStart(a.node, a.offset);
+    range.setEnd(b.node, b.offset);
+    return range;
+  }
+
+  // ── 選取穩定判定 ─────────────────────────────────────────────────────
+  //
+  // `selectionchange` 在拖曳選取控制點(handle)的過程中會連續觸發,不能
+  // 一有變化就套用,否則手機上「拖著調整範圍」會變成「連續套用又取消」。
+  //
+  // Prior art(這是有風險的互動設計問題,查過才動手,不是自己發明):
+  //   - Robert Knight(Hypothesis 網頁註解工具作者)2016 年的跨瀏覽器
+  //     selection 事件測試筆記,結論是 `selectionchange` 本身無法分辨
+  //     「還在調整」與「調整完了」,必須搭配 `touchend`/`mouseup` 這種
+  //     「手指/滑鼠放開」的完成訊號一起用。
+  //     https://gist.github.com/robertknight/ad9f1bca8280b3fa325817aa3ed9935c
+  //   - W3C selection-api repo issue #146("Having a matching `selectend`
+  //     event?")討論串,現況共識是瀏覽器沒有原生 selectend,一般作法是
+  //     `selectionchange` + debounce/timer,再疊 `mouseup`/`touchend`/
+  //     `pointerup` 當完成訊號。
+  //     https://github.com/w3c/selection-api/issues/146
+  //
+  // 採用的判定策略(在上述兩個來源的共識上,多加一條處理「二次調整」):
+  //   1. `selectionchange`(拖曳全程都會連續觸發)→ 重新排一個「保底」
+  //      debounce 計時器(SETTLE_DEBOUNCE_MS)。這條專門對付鍵盤選取
+  //      (桌機 shift+方向鍵)——鍵盤選取沒有 pointerup/mouseup 可以當
+  //      完成訊號,只能純靠「一段時間沒有再變化」判定穩定。
+  //   2. `pointerup`/`touchend`/`mouseup`(手指/滑鼠放開)→ 排計時器
+  //      (SETTLE_AFTER_POINTER_MS),取代保底的那個。
+  //   3. `pointerdown`/`touchstart`/`mousedown`(手指/滑鼠再次按下)→
+  //      **立刻取消**任何還在等待的計時器。這是本次在兩份 prior art 之外
+  //      自己補的一條:文件/issue 討論的是「單次選取何時算完成」,沒有處理
+  //      「放開後在很短時間內又抓住 handle 二次調整」這個情境——如果不擋,
+  //      使用者放開手指想拖 handle 微調範圍時,放開後的計時器可能在
+  //      手指再次按下之前就先套用了,把選取清掉、剛好搗亂使用者正在做的
+  //      調整動作。加了這條防線後最壞情況只是「多套用一次、可以直接復原」
+  //      (見下方 trySettle 的 try/catch 與 undo 堆疊),不會弄壞資料。
+  //   計時器只有一個(pendingSettleTimer),新排程一律先清舊的——不會有兩個
+  //   計時器互相搶跑的問題。所以等待期間只要再動選取(拖把手會連續觸發
+  //   selectionchange)就重新計時,不會提早套用;時間到時選取若已變空,
+  //   trySettle 什麼都不做。
+  //
+  // 兩個都是 1.2 秒(2026-10-03 MM:「反白選擇的時候,時間可以久一點」)。
+  // 原本放開 60ms 就套用:手機上反白後要再拖選取把手調範圍,手指離開螢幕、
+  // 移到把手、按下去,這一來一回本來就要半秒到一秒多,60ms 早就套用、把選取
+  // 清掉了。1.2 秒蓋得住一次「放開→找把手→按下」;按下會立刻取消計時(第 3
+  // 條),拖完再放開才重新計時。鍵盤選取同樣改等 1.2 秒,兩條規則一致好預期。
+  var SETTLE_AFTER_POINTER_MS = 1200;
+  var SETTLE_DEBOUNCE_MS = 1200;
+  var pendingSettleTimer = null;
+
+  function scheduleSettle(delayMs) {
+    if (pendingSettleTimer) clearTimeout(pendingSettleTimer);
+    pendingSettleTimer = setTimeout(trySettle, delayMs);
+  }
+
+  function cancelPendingSettle() {
+    if (pendingSettleTimer) {
+      clearTimeout(pendingSettleTimer);
+      pendingSettleTimer = null;
+    }
+  }
+
+  function trySettle() {
+    pendingSettleTimer = null;
+    var picked = resolveSelection();
+    // 沒有選取,或選取是 collapsed——這是最常見的狀態(單純點一下移游標、
+    // 點 checkbox…),不是「使用者想套用刪除線但失敗了」,不提示,靜默
+    // 什麼都不做才是對的行為(對照:空選取仍然無法套用,但那是 API 層的
+    // 保證——見 cutplan-core.js classifySelection 的 'empty' 狀態,直接
+    // 呼叫 toggleStrike/applyStrike 一樣會丟錯,不會靜默失敗)。
+    if (!picked) return;
+    var line = state.doc.lines[picked.lineIndex];
+    var mode = Core.classifySelection(line.bodyRaw, picked.start, picked.end);
+    if (mode !== 'add' && mode !== 'remove') return; // 'empty'/'invalid' 防禦,理論上不會走到
+    try {
+      var result = Core.applyStrikeWithHistory(
+        state.doc, state.history, picked.lineIndex, picked.start, picked.end,
+      );
+      state.doc = result.doc;
+      state.history = result.history;
+      setDirty(true);
+      window.getSelection().removeAllRanges();
+      render();
+      positionUndoFloat(picked.lineIndex, picked.start, picked.end);
+    } catch (e) {
+      setStatus('自動套用刪除線失敗:' + e.message, 'error');
+    }
+  }
+
+  document.addEventListener('selectionchange', function () {
+    scheduleSettle(SETTLE_DEBOUNCE_MS);
   });
-  audio.addEventListener('error', function () { status('音檔無法播放(格式不支援?)', 'error'); });
+  document.addEventListener('pointerdown', cancelPendingSettle);
+  document.addEventListener('touchstart', cancelPendingSettle);
+  document.addEventListener('mousedown', cancelPendingSettle);
+  document.addEventListener('pointerup', function () { scheduleSettle(SETTLE_AFTER_POINTER_MS); });
+  document.addEventListener('touchend', function () { scheduleSettle(SETTLE_AFTER_POINTER_MS); });
+  document.addEventListener('mouseup', function () { scheduleSettle(SETTLE_AFTER_POINTER_MS); });
+
+  // ── 復原按鈕:浮動貼在剛套用那段選取範圍的右上角 ─────────────────────
+  //
+  // MM 指定:不要固定在畫面某處的 bar——剪的時候視線停在正在處理的那段
+  // 文字上,undo 要就近才點得到。
+  //
+  // 定位用 absolute + 文件座標(range 的 client rect + window.scrollX/Y),
+  // 不是 fixed + 視窗座標——這樣頁面捲動時按鈕會跟著內容一起移動,不會
+  // 捲走了還指著錯誤的位置。取捨:另一個選項是「捲動就整個隱藏」,兩個
+  // 都在規格允許範圍內,選「跟著捲」是因為剪輯是斷續的,人可能盯著聽一段
+  // 音檔才回頭決定要不要復原,捲動看別的段落時按鈕消失會讓人以為沒得復原
+  // 了(跟「不設自動淡出計時器」是同一個理由:不要在使用者還沒決定的時候
+  // 就把選項收走)。
+  var UNDO_GAP = 8;
+  var VIEWPORT_MARGIN = 8;
+
+  function positionUndoFloat(lineIndex, start, end) {
+    var range = rangeForClean(lineIndex, start, end);
+    if (!range) { hideUndoFloat(); return; }
+    // 選取橫跨多行時 getBoundingClientRect() 回的是整體外框(含中間行的
+    // 滿版寬度),不符合「剛剛選的那裡」的直覺;getClientRects()[0] 是
+    // 第一行(選取起點那一行)的 rect,貼這裡才對。
+    var rects = range.getClientRects();
+    var rect = rects.length ? rects[0] : range.getBoundingClientRect();
+    if (!rect || (rect.width === 0 && rect.height === 0)) { hideUndoFloat(); return; }
+
+    var el = els.undoFloat;
+    el.style.visibility = 'hidden';
+    el.style.display = 'block';
+    var w = el.offsetWidth;
+    var h = el.offsetHeight;
+
+    // 先在「視窗座標」算好貼右上角、clamp 進可視範圍的位置,最後才加
+    // scrollX/scrollY 轉成文件座標存進 style——這樣邏輯只要考慮「現在看
+    // 得到的範圍」,不用同時想文件座標的 clamp 邊界。
+    var viewportLeft = rect.right - w;
+    viewportLeft = Math.min(viewportLeft, window.innerWidth - w - VIEWPORT_MARGIN);
+    viewportLeft = Math.max(viewportLeft, VIEWPORT_MARGIN);
+
+    var viewportTop = rect.top - h - UNDO_GAP; // 預設貼在選取範圍「上方」
+    if (viewportTop < VIEWPORT_MARGIN) {
+      viewportTop = rect.bottom + UNDO_GAP; // 太靠近視窗上緣會被裁掉,改貼下方
+    }
+    viewportTop = Math.min(viewportTop, window.innerHeight - h - VIEWPORT_MARGIN);
+    viewportTop = Math.max(viewportTop, VIEWPORT_MARGIN);
+
+    el.style.left = (viewportLeft + window.scrollX) + 'px';
+    el.style.top = (viewportTop + window.scrollY) + 'px';
+    el.style.visibility = 'visible';
+  }
+
+  function hideUndoFloat() {
+    els.undoFloat.style.display = 'none';
+  }
+
+  // 軌欄切換沒有選取範圍,復原按鈕貼在那顆開關旁邊(同樣是文件座標)。
+  function positionUndoAtTrack(lineIndex, track) {
+    var lab = els.blockList.querySelector(
+      '.track-toggles[data-line-index="' + lineIndex + '"] label[data-track="'
+      + String(track).replace(/"/g, '\\"') + '"]');
+    if (!lab) { hideUndoFloat(); return; }
+    var rect = lab.getBoundingClientRect();
+    var el = els.undoFloat;
+    el.style.visibility = 'hidden';
+    el.style.display = 'block';
+    var w = el.offsetWidth;
+    var h = el.offsetHeight;
+    var left = Math.max(VIEWPORT_MARGIN,
+      Math.min(rect.right + UNDO_GAP, window.innerWidth - w - VIEWPORT_MARGIN));
+    var top = rect.top - h - UNDO_GAP;
+    if (top < VIEWPORT_MARGIN) top = rect.bottom + UNDO_GAP;
+    top = Math.max(VIEWPORT_MARGIN, Math.min(top, window.innerHeight - h - VIEWPORT_MARGIN));
+    el.style.left = (left + window.scrollX) + 'px';
+    el.style.top = (top + window.scrollY) + 'px';
+    el.style.visibility = 'visible';
+  }
+
+  els.undoBtn.addEventListener('click', function () {
+    var result = Core.undo(state.doc, state.history);
+    if (!result.undone) {
+      hideUndoFloat(); // 防禦:理論上按鈕沒東西可復原時本來就該是隱藏的
+      return;
+    }
+    state.doc = result.doc;
+    state.history = result.history;
+    setDirty(true);
+    render();
+    var next = Core.peekHistory(state.history);
+    if (next && next.kind === 'tracks') {
+      positionUndoAtTrack(next.lineIndex, next.track);
+    } else if (next) {
+      // 點一次撤一步,按鈕跳到「再上一步」操作的位置(還有東西可以復原)。
+      positionUndoFloat(next.lineIndex, next.start, next.end);
+    } else {
+      hideUndoFloat();
+    }
+  });
+
+  // ── 成品時間對照(#1078)────────────────────────────────────────────
+  //
+  // 頁首顯示對照的是哪一版(timeline 的版本＋產生時間);輸入成品時間跳到那張卡。
+  // timeline 只反映「出那一版時」的成品,之後改了勾選要重出片才會更新——所以
+  // 一定要把版本與產生時間寫出來。
+
+  var tlEls = {
+    bar: document.getElementById('tlBar'),
+    info: document.getElementById('tlInfo'),
+    input: document.getElementById('tlInput'),
+  };
+
+  // ── 網頁內播放:成品音檔 + 橫軸播放頭 + 自動捲動 ───────────────────────
+  // 音檔由使用者從裝置選(不經 Apps Script 傳 60MB);成品時間 → 哪一張卡
+  // 用的是 timeline 對照(Core.findLineAtTime),所以必須載入跟 timeline 同一版的成品。
+  var musicSel = document.getElementById('musicVer');
+  function refreshMusicVer() {
+    var v = state.doc ? Core.getTemplateVersion(state.doc) : null;
+    musicSel.parentNode.hidden = v === null;
+    if (v !== null) musicSel.value = v;
+  }
+  musicSel.addEventListener('change', function () {
+    state.doc = Core.setTemplateVersion(state.doc, musicSel.value);
+    setDirty(true);
+    setStatus('音樂改用 v' + musicSel.value + '(opening / break / ending),下次出片生效', 'ok');
+  });
+  // ── 收合標題列:只留橫軸+播放器,手機上不用一直捲 ─────────────────────
+  var hdr = document.querySelector('header');
+  var hdrToggle = document.getElementById('hdrToggle');
+  function setCollapsed(on, remember) {
+    hdr.classList.toggle('collapsed', on);
+    hdrToggle.textContent = on ? '更多 ▼' : '收起 ▲';
+    hdrToggle.setAttribute('aria-expanded', on ? 'false' : 'true');
+    if (remember) { try { localStorage.setItem('cutplan-hdr-collapsed', on ? '1' : '0'); } catch (e) { /* ignore */ } }
+  }
+  hdrToggle.addEventListener('click', function () {
+    setCollapsed(!hdr.classList.contains('collapsed'), true);
+  });
+  // 設定類(集數、跳到、音樂版本、快取…)剪輯時不常用:載入 cutplan 後自動收起,
+  // 只有使用者自己按過「收起/更多」選了展開(存 '0')才維持展開。
+  function autoCollapseAfterLoad() {
+    var pref = null;
+    try { pref = localStorage.getItem('cutplan-hdr-collapsed'); } catch (e) { /* ignore */ }
+    if (pref !== '0') setCollapsed(true, false);
+  }
+
+  var playerRow = document.getElementById('player');
+  var audio = document.getElementById('audio');
+  var playInfo = document.getElementById('playInfo');
+  var playhead = document.createElement('b');
+  var playingLine = null;
+  var followPausedUntil = 0;
+  var audioUrl = null;
+  function pauseFollow() { followPausedUntil = Date.now() + 5000; }   // 手動滑動後 5 秒不搶畫面
+  window.addEventListener('wheel', pauseFollow, { passive: true });
+  window.addEventListener('touchmove', pauseFollow, { passive: true });
+  function clearPlaying() {
+    var old = els.blockList.querySelector('.block-card.playing');
+    if (old) old.classList.remove('playing');
+    playingLine = null;
+    playhead.style.display = 'none';
+  }
+  function skip(secs) {
+    if (audio.hidden || !audio.src) return;
+    audio.currentTime = Math.max(0, Math.min(audio.duration || Infinity, audio.currentTime + secs));
+  }
+  document.getElementById('skipBack').addEventListener('click', function () { skip(-10); });
+  document.getElementById('skipFwd').addEventListener('click', function () { skip(10); });
+
+  function useAudioBlob(blob, label) {
+    if (audioUrl) URL.revokeObjectURL(audioUrl);
+    audioUrl = URL.createObjectURL(blob);
+    audio.src = audioUrl;
+    audio.hidden = false;
+    document.getElementById('skipRow').hidden = false;
+    clearPlaying();
+    setStatus('已載入 ' + label, 'ok');
+  }
+  audio.addEventListener('error', function () {
+    setStatus('音檔無法播放(格式不支援或檔案太大),可改選 mp3', 'error');
+  });
+  audio.addEventListener('timeupdate', function () {
+    if (!state.doc || !state.timeline) return;
+    var t = audio.currentTime;
+    var li = Core.findLineAtTime(state.doc, state.timeline, t);
+    if (typeof li !== 'number') { playInfo.textContent = Core.formatTime(t); return; }
+    var n = state.doc.lines.length;
+    playhead.style.display = 'block';
+    playhead.style.left = (n > 1 ? li / (n - 1) * 100 : 0) + '%';
+    playInfo.textContent = Core.formatTime(t) + ' → ' + (state.doc.lines[li].id || '');
+    if (li === playingLine) return;
+    clearPlayingCard();
+    playingLine = li;
+    var card = els.blockList.querySelector('[data-line-index="' + li + '"]');
+    if (!card) return;
+    card.classList.add('playing');
+    if (document.getElementById('follow').checked && Date.now() > followPausedUntil) {
+      card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
+  });
+  // 點橫軸:音檔也跳到那一列在成品裡的位置(被剪掉的列就用前一個有時間的列)並開始播。
+  function seekAndPlay(lineIndex) {
+    if (audio.hidden || !audio.src) return;
+    var t = Core.findTimeForLine(state.doc, state.timeline, lineIndex);
+    if (t === null) return;
+    audio.currentTime = Math.max(0, t - 2);   // 往前 2 秒,聽得到接縫
+    var p = audio.play();
+    if (p && p.catch) p.catch(function () { /* 瀏覽器擋自動播放時,使用者按播放鍵即可 */ });
+  }
+  function clearPlayingCard() {
+    var old = els.blockList.querySelector('.block-card.playing');
+    if (old) old.classList.remove('playing');
+  }
+
+  // ── 橫軸:目前 cutplan 跟最新成品(timeline)還沒 apply 的列 ─────────────
+  // 橫向位置 = 該列在文件裡的相對位置;紅線 = 勾選跟成品不一致。點橫軸任一處
+  // 跳到最近的一條紅線。刪除線(字級)timeline 沒記,所以不會出現在這裡。
+  var diffMarks = [];   // [{ idx, pct }]
+  function jumpToLine(li) {
+    var card = els.blockList.querySelector('[data-line-index="' + li + '"]');
+    if (!card) return false;
+    card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    card.classList.add('tl-flash');
+    setTimeout(function () { card.classList.remove('tl-flash'); }, 1600);
+    return true;
+  }
+  function renderDiffStrip() {
+    var strip = document.getElementById('diffStrip');
+    diffMarks = [];
+    strip.innerHTML = '';
+    refreshMusicVer();
+    playerRow.hidden = !state.doc;
+    if (!state.doc || !state.timeline) { strip.hidden = true; return; }
+    var n = state.doc.lines.length;
+    state.doc.lines.forEach(function (l, idx) {
+      var st = Core.timelineStatus(l, state.timeline);
+      if (st && st.mismatch) diffMarks.push({ idx: idx, pct: n > 1 ? idx / (n - 1) * 100 : 0 });
+    });
+    strip.hidden = false;
+    strip.appendChild(playhead);
+    diffMarks.forEach(function (m) {
+      var t = document.createElement('i');
+      t.style.left = m.pct + '%';
+      strip.appendChild(t);
+    });
+    var lab = document.createElement('span');
+    lab.textContent = diffMarks.length ? diffMarks.length + ' 處未 apply' : '全部已 apply';
+    strip.appendChild(lab);
+  }
+  document.getElementById('diffStrip').addEventListener('click', function (ev) {
+    if (!diffMarks.length) return;
+    var r = this.getBoundingClientRect();
+    var pct = (ev.clientX - r.left) / r.width * 100, best = diffMarks[0];
+    diffMarks.forEach(function (m) {
+      if (Math.abs(m.pct - pct) < Math.abs(best.pct - pct)) best = m;
+    });
+    var id = state.doc.lines[best.idx].id;
+    if (jumpToLine(best.idx)) setStatus('未 apply → ' + id, 'ok');
+    seekAndPlay(best.idx);
+  });
+
+  function showTimelineBar() {
+    var tl = state.timeline;
+    // 跳到 Block ID 不需要 timeline,輸入框一律顯示(有載入 cutplan 就有)
+    tlEls.bar.classList.toggle('show', !!state.doc);
+    if (!tl) {
+      tlEls.info.textContent = state.timelineBad
+        ? 'cutplan.timeline.json 格式錯誤,未啟用成品時間對照' : '';
+      return;
+    }
+    var n = 0;
+    state.doc.lines.forEach(function (l) {
+      var s = Core.timelineStatus(l, tl);
+      if (s && s.mismatch) n++;
+    });
+    tlEls.info.textContent = '對照成品 ' + tl.version
+      + (tl.generatedAt ? '(' + tl.generatedAt.replace('T', ' ') + ' 出片)' : '')
+      + (n ? ' · 勾選與成品不一致 ' + n + ' 列' : '');
+  }
+
+  tlEls.bar.addEventListener('submit', function (ev) {
+    ev.preventDefault();
+    // Block ID(有字母前綴,含改動試聽的檔名)→ 直接跳那一列
+    if (/^\s*[A-Za-z]/.test(tlEls.input.value)) {
+      var li = Core.findLineById(state.doc, tlEls.input.value);
+      var idCard = li === null ? null
+        : els.blockList.querySelector('.block-card[data-line-index="' + li + '"]');
+      if (!idCard) {
+        setStatus('找不到 ' + tlEls.input.value.trim() + '(這份 cutplan 沒有這個 ID)', 'error');
+        return;
+      }
+      tlEls.input.blur();
+      idCard.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      idCard.classList.add('tl-flash');
+      setTimeout(function () { idCard.classList.remove('tl-flash'); }, 1600);
+      setStatus('→ ' + state.doc.lines[li].id, 'ok');
+      return;
+    }
+    var secs = Core.parseTimeInput(tlEls.input.value);
+    if (secs === null) {
+      setStatus('看不懂:' + tlEls.input.value + '(成品時間寫 12:34 或 754,Block ID 寫 B0059)', 'error');
+      return;
+    }
+    if (!state.timeline) {
+      setStatus('這一集還沒有 cutplan.timeline.json,只能用 Block ID 跳', 'error');
+      return;
+    }
+    var idx = Core.findLineAtTime(state.doc, state.timeline, secs);
+    if (idx === Core.OUT_OF_RANGE) {
+      var dur = state.timeline.finalDuration;
+      setStatus((secs < 0 ? '成品時間不能是負數' : '')
+        + (dur !== null && dur !== undefined
+          ? (secs < 0 ? ';' : '') + '成品只有 ' + Core.formatTime(dur) : '')
+        + ',' + tlEls.input.value.trim() + ' 超出範圍', 'error');
+      return;
+    }
+    var card = idx === null ? null
+      : els.blockList.querySelector('.block-card[data-line-index="' + idx + '"]');
+    if (!card) {
+      setStatus('成品 ' + Core.formatTime(secs) + ' 之前沒有任何 block', 'error');
+      return;
+    }
+    tlEls.input.blur();
+    card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    card.classList.add('tl-flash');
+    setTimeout(function () { card.classList.remove('tl-flash'); }, 1600);
+    setStatus('成品 ' + Core.formatTime(secs) + ' → ' + state.doc.lines[idx].id, 'ok');
+  });
+
+  // ── 儲存 ──────────────────────────────────────────────────────────────
+
+  var SAVE_RETRIES = 3;
+  function doSave(auto) {
+    clearTimeout(autoTimer);
+    if (!state.doc || !state.fileId || !state.dirty || saving) return;
+    saving = true;
+    els.saveBtn.disabled = true;
+    var content = Core.serializeCutplan(state.doc);
+    var savedRev = rev;
+
+    function finishFail(msg) {
+      saving = false;
+      els.saveBtn.disabled = false;
+      setSaveMsg(msg, 'error');
+      saveCopyFallback(content, msg);
+      // 不重排 autosave:等下一次編輯或手動按
+    }
+
+    // attempt 從 0 起算;網路/逾時錯誤最多重試 SAVE_RETRIES 次,
+    // 護欄拒絕(「儲存被拒絕」)重試只會一直失敗,直接進另存副本。
+    function attempt(k) {
+      setSaveMsg((auto ? '自動儲存中…' : '儲存中…') + (k ? '(重試 ' + k + '/' + SAVE_RETRIES + ')' : ''));
+      var done = false;
+      function retryOrFail(msg, rejected) {
+        if (!rejected && k < SAVE_RETRIES) {
+          setSaveMsg(msg + ',' + (k + 1) + ' 秒後重試 ' + (k + 1) + '/' + SAVE_RETRIES, 'error');
+          setTimeout(function () { attempt(k + 1); }, (k + 1) * 1000);
+        } else {
+          finishFail(msg + (rejected ? '' : '(已重試 ' + SAVE_RETRIES + ' 次)'));
+        }
+      }
+      var timer = setTimeout(function () {
+        if (done) return;
+        done = true;
+        retryOrFail('儲存沒有回應(超過 ' + (SAVE_TIMEOUT_MS / 1000) + ' 秒)', false);
+      }, SAVE_TIMEOUT_MS);
+      function ok() {
+        if (done) return;
+        done = true; clearTimeout(timer); saving = false;
+        origText = content;
+        state.history = Core.createHistory();
+        hideUndoFloat();
+        if (rev === savedRev) {
+          setDirty(false);
+          setSaveMsg((fileHandle ? '已存回原檔 ✓ ' : '已下載 ✓ ') + new Date().toLocaleTimeString('zh-TW', { hour12: false }), 'ok');
+        } else {
+          els.saveBtn.disabled = false;
+          setSaveMsg('已儲存一部分,繼續編輯中…', 'ok');
+          autoTimer = setTimeout(function () { doSave(true); }, AUTOSAVE_MS);
+        }
+      }
+      function fail(err) {
+        if (done) return;
+        done = true; clearTimeout(timer);
+        var m = err && err.message ? err.message : String(err);
+        retryOrFail('儲存失敗:' + m, true);
+      }
+      var problem = Core.findIllegalEdit(origText, content);   // 同 Code.gs 的護欄
+      if (problem) { fail(new Error('儲存被拒絕(超出允許的編輯範圍):' + problem)); return; }
+      if (fileHandle) {
+        fileHandle.createWritable()
+          .then(function (w) { return w.write(content).then(function () { return w.close(); }); })
+          .then(ok, fail);
+      } else {
+        download(state.fileId || 'cutplan.md', content);
+        ok();
+      }
+    }
+    attempt(0);
+  }
+
+  els.saveBtn.addEventListener('click', function () { doSave(false); });
+
+  setStatus('先按 ① 開啟 cutplan.md');
 })();
 </script>
-</body>
-</html>
