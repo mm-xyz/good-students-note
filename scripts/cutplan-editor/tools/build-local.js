@@ -26,11 +26,9 @@ sub('<header>', '<title>Cutplan 本機編輯器</title>\n<meta charset="utf-8"><
 // 開檔列取代集數下拉
 sub(/<select id="episodeSelect">[\s\S]*?<\/select>/.exec(s)[0],
   `<div id="openRow" class="open-row">
-    <button id="openPlan" type="button">① 開啟 cutplan.md</button>
-    <button id="openTl" type="button">② timeline.json(選填)</button>
-    <label id="pickAudio2" class="pick">③ 音檔 mp3<input id="audioFile2" type="file" accept="audio/*,.mp3,.m4a,.wav" hidden></label>
-    <input id="planFallback" type="file" accept=".md,text/*" hidden>
-    <input id="tlFallback" type="file" accept=".json,application/json" hidden>
+    <button id="openDir" type="button">選資料夾(自動抓 cutplan／timeline／mp3)</button>
+    <span id="openState" style="font-size:13px;color:var(--muted)"></span>
+    <input id="dirFallback" type="file" webkitdirectory hidden>
   </div>`);
 sub('header.collapsed #episodeSelect,', 'header.collapsed #openRow,');
 sub('</style>', `.open-row { display:flex; flex-wrap:wrap; gap:8px; margin-bottom:8px; }
@@ -45,7 +43,6 @@ sub(/    <button id="clearCache"[^\n]*\n/.exec(s)[0], '');
 sub('<label id="pickAudio">改選本機音檔<input id="audioFile" type="file" accept="audio/*,.mp3,.m4a,.wav"></label>', '');
 sub("    episodeSelect: document.getElementById('episodeSelect'),\n", '');
 sub("header.collapsed #clearCache,\n", '');
-sub("header.collapsed #pickAudio,", 'header.collapsed #pickAudio2,');
 
 // 播放列:有載入 cutplan 就顯示(不必等 timeline)
 sub('playerRow.hidden = !(state.doc && (state.timeline || Core.getTemplateVersion(state.doc) !== null));',
@@ -72,59 +69,118 @@ cut('  // ── 存不了就另存副本', '  function setSaveMsg', `  // ─�
 `);
 
 // 集數清單 + loadCutplan → 本機開檔
-cut('  // ── 集數清單', '  // ── 渲染', `  // ── 本機開檔 ──────────────────────────────────────────────────────────
-  var fileHandle = null;      // 可原地寫回的 cutplan.md(File System Access)
+cut('  // ── 集數清單', '  // ── 渲染', `  // ── 本機開資料夾 ──────────────────────────────────────────────────────
+  // 選的資料夾可以是整個 session(…-分軌)或單一 vN_ 版本資料夾:
+  //   cutplan.md  = 資料夾自己的,沒有就用 _asset/cutplan.md(出片吃的那份)
+  //   timeline/mp3 = 資料夾自己的,沒有就取編號最大的 vN_ 子資料夾
+  // Chrome/Edge 用 showDirectoryPicker 可原地寫回 cutplan.md;其他瀏覽器退回下載。
+  var fileHandle = null;      // 可原地寫回的 cutplan.md
   var origText = '';          // 載入/上次存檔時的內容,護欄用它比對
-  var hasFS = !!window.showOpenFilePicker;
+  var hasFS = !!window.showDirectoryPicker;
   function readFile(f) { return new Promise(function (res, rej) {
     var r = new FileReader(); r.onload = function () { res(r.result); }; r.onerror = rej; r.readAsText(f); }); }
-  function mk(id, ok) { document.getElementById(id).classList.toggle('ok', !!ok); }
+  function openState(t) { document.getElementById('openState').textContent = t || ''; }
 
-  function openPlan() {
-    if (state.dirty && !confirm('目前的編輯還沒儲存,確定要開別的檔嗎?')) return;
-    if (!hasFS) { document.getElementById('planFallback').click(); return; }
-    window.showOpenFilePicker({ types: [{ description: 'cutplan', accept: { 'text/*': ['.md'] } }] })
-      .then(function (hs) { fileHandle = hs[0]; return hs[0].getFile(); })
-      .then(function (f) { return readFile(f).then(function (t) { loadCutplanText(t, f.name); }); })
-      .catch(function (e) { if (e && e.name !== 'AbortError') setStatus('開檔失敗:' + e.message, 'error'); });
+  // 目錄抽象:list() → [{name, kind, h}];child(name) → 子目錄;file(name) → File
+  function fsDir(h) {
+    return {
+      label: h.name,
+      list: async function () { var o = []; for await (var e of h.values()) o.push({ name: e.name, kind: e.kind }); return o; },
+      child: async function (n) { return fsDir(await h.getDirectoryHandle(n)); },
+      file: async function (n) { return (await h.getFileHandle(n)).getFile(); },
+      handle: async function (n) { return h.getFileHandle(n); },
+    };
   }
-  function openTl() {
-    if (!hasFS) { document.getElementById('tlFallback').click(); return; }
-    window.showOpenFilePicker({ types: [{ description: 'timeline', accept: { 'application/json': ['.json'] } }] })
-      .then(function (hs) { return hs[0].getFile(); })
-      .then(function (f) { return readFile(f).then(applyTimeline); })
-      .catch(function (e) { if (e && e.name !== 'AbortError') setStatus('開檔失敗:' + e.message, 'error'); });
+  function listDir(files) {   // webkitdirectory 退路:用 webkitRelativePath 還原樹(唯讀)
+    function node(prefix) {
+      return {
+        label: prefix.split('/').filter(Boolean).pop() || '',
+        list: async function () {
+          var seen = {}, out = [];
+          files.forEach(function (f) {
+            var rel = f.webkitRelativePath; if (rel.indexOf(prefix) !== 0) return;
+            var rest = rel.slice(prefix.length), i = rest.indexOf('/'), n = i < 0 ? rest : rest.slice(0, i);
+            if (seen[n]) return; seen[n] = 1; out.push({ name: n, kind: i < 0 ? 'file' : 'directory' });
+          });
+          return out;
+        },
+        child: async function (n) { return node(prefix + n + '/'); },
+        file: async function (n) { return files.filter(function (f) { return f.webkitRelativePath === prefix + n; })[0]; },
+        handle: async function () { return null; },
+      };
+    }
+    var top = files[0].webkitRelativePath.split('/')[0] + '/';
+    return node(top);
   }
+
+  async function has(dir, name) { return (await dir.list()).some(function (e) { return e.name === name; }); }
+  async function findAudio(dir) {
+    var e = (await dir.list()).filter(function (x) { return x.kind === 'file' && /\\.(mp3|m4a|wav)$/i.test(x.name); })[0];
+    return e ? dir.file(e.name) : null;
+  }
+  async function latestVersionDir(dir) {
+    var best = null, n = -1;
+    (await dir.list()).forEach(function (e) {
+      var m = e.kind === 'directory' && /^v(\\d+)_/.exec(e.name);
+      if (m && Number(m[1]) > n) { n = Number(m[1]); best = e.name; }
+    });
+    return best ? dir.child(best) : null;
+  }
+
+  async function openFolder(dir) {
+    // cutplan.md
+    var planDir = null;
+    if (await has(dir, 'cutplan.md')) planDir = dir;
+    else if (await has(dir, '_asset')) { var as = await dir.child('_asset'); if (await has(as, 'cutplan.md')) planDir = as; }
+    if (!planDir) { setStatus('這個資料夾(含 _asset)裡找不到 cutplan.md', 'error'); return; }
+    // 版本資料夾:自己有 mp3 就是它,否則取最新 vN_
+    var verDir = (await findAudio(dir)) ? dir : await latestVersionDir(dir);
+    var audioFile = verDir ? await findAudio(verDir) : null;
+    var tlText = null;
+    for (var d of [verDir, dir, planDir]) {
+      if (d && await has(d, 'cutplan.timeline.json')) { tlText = await readFile(await d.file('cutplan.timeline.json')); break; }
+    }
+    fileHandle = await planDir.handle('cutplan.md');
+    var planFile = await planDir.file('cutplan.md');
+    var text = await readFile(planFile);
+    loadCutplanText(text, 'cutplan.md', planDir.label + '/cutplan.md');
+    if (tlText !== null) applyTimeline(tlText);
+    if (audioFile) loadAudioFile(audioFile);
+    openState((verDir ? verDir.label + ' · ' : '') + [tlText !== null ? 'timeline' : '無 timeline', audioFile ? 'mp3' : '無音檔'].join(' · '));
+  }
+
+  document.getElementById('openDir').addEventListener('click', function () {
+    if (state.dirty && !confirm('目前的編輯還沒儲存,確定要開別的資料夾嗎?')) return;
+    if (!hasFS) { document.getElementById('dirFallback').click(); return; }
+    window.showDirectoryPicker({ mode: 'readwrite' })
+      .then(function (h) { return openFolder(fsDir(h)); })
+      .catch(function (e) { if (e && e.name !== 'AbortError') setStatus('開資料夾失敗:' + e.message, 'error'); });
+  });
+  document.getElementById('dirFallback').addEventListener('change', function () {
+    var files = Array.prototype.slice.call(this.files);
+    if (!files.length) return;
+    openFolder(listDir(files)).catch(function (e) { setStatus('開資料夾失敗:' + e.message, 'error'); });
+  });
+
   function applyTimeline(text) {
     state.timeline = Core.parseTimeline(text);
     state.timelineBad = Core.timelineFileState(text) === 'bad';
-    mk('openTl', !!state.timeline);
     if (state.doc) render();
     if (state.timelineBad) setStatus('timeline.json 格式不合格,未啟用成品時間對照', 'error');
   }
-  document.getElementById('openPlan').addEventListener('click', openPlan);
-  document.getElementById('openTl').addEventListener('click', openTl);
-  document.getElementById('planFallback').addEventListener('change', function () {
-    var f = this.files[0]; if (!f) return; fileHandle = null;
-    readFile(f).then(function (t) { loadCutplanText(t, f.name); });
-  });
-  document.getElementById('tlFallback').addEventListener('change', function () {
-    var f = this.files[0]; if (f) readFile(f).then(applyTimeline);
-  });
-  document.getElementById('audioFile2').addEventListener('change', function () {
-    var f = this.files && this.files[0]; if (!f) return;
+  function loadAudioFile(f) {
     if (audioUrl) URL.revokeObjectURL(audioUrl);
     audioUrl = URL.createObjectURL(f);
     audio.src = audioUrl; audio.hidden = false;
     document.getElementById('skipRow').hidden = false;
-    clearPlaying(); mk('pickAudio2', true);
+    clearPlaying();
     var vs = state.timeline && state.timeline.versionShort;
     if (vs && f.name.indexOf(vs) === -1) {
-      setStatus('注意:檔名沒有「' + vs + '」,跟 timeline 的版本可能不同,橫軸跟捲動會對不上', 'error');
-    } else setStatus('已載入 ' + f.name, 'ok');
-  });
+      setStatus('注意:音檔名沒有「' + vs + '」,跟 timeline 的版本可能不同,橫軸跟捲動會對不上', 'error');
+    }
+  }
 
-  function loadCutplanText(text, name) {
+  function loadCutplanText(text, name, where) {
     state.fileId = name;
     origText = text;
     setDirty(false);
@@ -132,12 +188,11 @@ cut('  // ── 集數清單', '  // ── 渲染', `  // ── 本機開檔 
     hideUndoFloat();
     state.doc = Core.parseCutplan(text);
     state.tracksMode = Core.hasTracksAudio(state.doc);
-    mk('openPlan', true);
     autoCollapseAfterLoad();
     snapLines();
     refreshLastEditBtn();
     render();
-    setStatus('已載入:' + name + (fileHandle ? '(存檔會直接寫回這個檔)'
+    setStatus('已載入:' + where + (fileHandle ? '(存檔會直接寫回這個檔)'
       : '(此瀏覽器無法原地寫回,存檔會下載新檔)'), 'ok');
   }
 
@@ -184,7 +239,7 @@ s = s.replace(gsr, () => `      function ok() {
       }`);
 
 // 啟動
-sub('  loadEpisodeList();\n', '  setStatus(\'先按 ① 開啟 cutplan.md\');\n');
+sub('  loadEpisodeList();\n', '  setStatus(\'按「選資料夾」開始\');\n');
 
 fs.writeFileSync(path.join(dir, 'local.html'), s);
 console.log('local.html', s.length, 'bytes');
