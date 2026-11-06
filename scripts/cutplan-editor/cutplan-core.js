@@ -1566,6 +1566,81 @@ function trimDragSnap(gesture, atMs, options = {}) {
   return Math.max(0, Math.min(durMs, to));
 }
 
+// ── 一鍵剪輯範圍 Playback 排程與游標映射 (#1220 M3) ─────────────────────────
+//
+// 依 Final 保留區間 [[sMs, eMs], ...] 產生無縫跳過切除段的播放清單:
+//   - 若起點 startFromSrcMs 落在被切除區間,自動跳至下一段保留區間起點
+//   - 支援 maxToSrcMs(用於接縫前後 ±1.5s 試聽或選取區試聽)
+//   - 每段帶 fadeInMs / fadeOutMs (預設 4ms 微淡入淡出防切點爆音)
+
+function buildCutPlaylist(finalIntervalsMs, options = {}) {
+  const norm = normalizeIntervals(finalIntervalsMs);
+  const startFrom = options.startFromSrcMs != null ? Math.max(0, Math.round(Number(options.startFromSrcMs))) : 0;
+  const maxTo = options.maxToSrcMs != null ? Math.round(Number(options.maxToSrcMs)) : Infinity;
+  const fadeMs = options.fadeMs != null ? Math.max(0, Number(options.fadeMs)) : 4;
+
+  const playlist = [];
+  let dstCursorMs = 0;
+
+  for (let i = 0; i < norm.length; i++) {
+    const [segS, segE] = norm[i];
+    if (segE <= startFrom) continue;
+    if (segS >= maxTo) break;
+    const s = Math.max(segS, startFrom);
+    const e = Math.min(segE, maxTo);
+    const dur = e - s;
+    if (dur <= 0) continue;
+    const effFade = Math.min(fadeMs, Math.floor(dur / 2));
+    playlist.push({
+      index: playlist.length,
+      srcStartMs: s,
+      srcEndMs: e,
+      durationMs: dur,
+      dstStartMs: dstCursorMs,
+      dstEndMs: dstCursorMs + dur,
+      fadeInMs: effFade,
+      fadeOutMs: effFade,
+    });
+    dstCursorMs += dur;
+  }
+  return playlist;
+}
+
+// 將播放經過時間 elapsedMs 映射回原始音軌時間 srcMs(跨切點自動跳躍)
+function mapPlaybackTimeToSourceMs(playlist, elapsedMs) {
+  if (!Array.isArray(playlist) || !playlist.length) {
+    return { playing: false, srcMs: null, dstMs: 0, segmentIndex: -1 };
+  }
+  const t = Math.max(0, Number(elapsedMs) || 0);
+  const last = playlist[playlist.length - 1];
+  if (t >= last.dstEndMs) {
+    return {
+      playing: false,
+      srcMs: last.srcEndMs,
+      dstMs: last.dstEndMs,
+      segmentIndex: playlist.length - 1,
+    };
+  }
+  for (let i = 0; i < playlist.length; i++) {
+    const seg = playlist[i];
+    if (t >= seg.dstStartMs && t < seg.dstEndMs) {
+      const offset = t - seg.dstStartMs;
+      return {
+        playing: true,
+        srcMs: seg.srcStartMs + offset,
+        dstMs: t,
+        segmentIndex: i,
+      };
+    }
+  }
+  return {
+    playing: true,
+    srcMs: playlist[0].srcStartMs,
+    dstMs: 0,
+    segmentIndex: 0,
+  };
+}
+
 // ── 唯讀護欄(伺服端第二道防線;Code.gs 的 saveCutplan 呼叫它)────────
 //
 // 逐行比對 oldContent → newContent,回傳第一個「超出允許編輯範圍」的說明字串,
@@ -1888,6 +1963,8 @@ const api = {
   findValleySeamMs,
   findNearestSnapMs,
   trimDragSnap,
+  buildCutPlaylist,
+  mapPlaybackTimeToSourceMs,
 };
 
 if (typeof module !== 'undefined' && module.exports) {

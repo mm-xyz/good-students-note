@@ -36,6 +36,8 @@ const {
   queryPeaksRms,
   findValleySeamMs,
   trimDragSnap,
+  buildCutPlaylist,
+  mapPlaybackTimeToSourceMs,
 } = require('../cutplan-core.js');
 
 // ── 1. 全軌與詞級 100% MECE 切分測試 ───────────────────────────────────────
@@ -337,4 +339,42 @@ test('trimDragSnap: 預設硬吸附詞邊界、按住 Alt/Cmd 反轉為 1ms 自�
     trimDragSnap(gesture, 11295, { snapEnabled: true, modifierHeld: true, minKeepMs: 30 }),
     11270,
   );
+});
+
+// ── 5. CutPlayer 一鍵剪輯範圍 Playback 排程與跨切點游標跳躍測試 (#1220 M3) ───
+
+test('buildCutPlaylist + mapPlaybackTimeToSourceMs: 自動跳過切除區間、游標在切點瞬間跳躍', () => {
+  // 假設保留區間為 [1000, 2000) 與 ABBC [10210, 11050),中間 [2000, 10210) 被砍掉
+  const finalIntervals = [[1000, 2000], [10210, 11050]];
+  const pl = buildCutPlaylist(finalIntervals, { startFromSrcMs: 0, fadeMs: 4 });
+  assert.equal(pl.length, 2);
+  assert.deepEqual(
+    pl.map((s) => [s.srcStartMs, s.srcEndMs, s.dstStartMs, s.dstEndMs]),
+    [
+      [1000, 2000, 0, 1000],
+      [10210, 11050, 1000, 1840],
+    ],
+  );
+
+  // 播放至 500ms → 位於第一段 [1000, 2000) 的 1500ms
+  const p1 = mapPlaybackTimeToSourceMs(pl, 500);
+  assert.equal(p1.playing, true);
+  assert.equal(p1.srcMs, 1500);
+  assert.equal(p1.segmentIndex, 0);
+
+  // 播放至 1000ms (剛跨過切點!) → 游標瞬間從 2000ms 跳到 10210ms (ABBC 起點!)
+  const p2 = mapPlaybackTimeToSourceMs(pl, 1000);
+  assert.equal(p2.playing, true);
+  assert.equal(p2.srcMs, 10210);
+  assert.equal(p2.segmentIndex, 1);
+
+  // 播放至 1840ms → 播放結束,停在 11050ms
+  const p3 = mapPlaybackTimeToSourceMs(pl, 1840);
+  assert.equal(p3.playing, false);
+  assert.equal(p3.srcMs, 11050);
+
+  // 若使用者游標停在被剪掉的 5000ms 按下一鍵播放 → 自動從下一段保留區間 10210ms 起播
+  const plFromCut = buildCutPlaylist(finalIntervals, { startFromSrcMs: 5000 });
+  assert.equal(plFromCut.length, 1);
+  assert.equal(plFromCut[0].srcStartMs, 10210);
 });
