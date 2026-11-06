@@ -378,3 +378,22 @@ test('buildCutPlaylist + mapPlaybackTimeToSourceMs: 自動跳過切除區間、�
   assert.equal(plFromCut.length, 1);
   assert.equal(plFromCut[0].srcStartMs, 10210);
 });
+
+// ── 6. local.html 與 wave-editor.js 打包與語法整合測試 (#1221 M4) ─────────────
+
+test('local.html + wave-editor.js: 打包產物包含 WaveEditor 掛載與語法零錯誤', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const vm = require('node:vm');
+  const dir = path.join(__dirname, '..');
+  const localHtml = fs.readFileSync(path.join(dir, 'local.html'), 'utf8');
+  const waveEditorJs = fs.readFileSync(path.join(dir, 'wave-editor.js'), 'utf8');
+
+  assert.ok(localHtml.includes('<script src="cutplan-core.js"></script>'));
+  assert.ok(localHtml.includes('<script src="wave-editor.js"></script>'));
+  assert.ok(localHtml.includes('window.__cutplanApp ='));
+  assert.ok(localHtml.includes('window.WaveEditor.loadSessionAssets'));
+
+  // 驗證 wave-editor.js 語法合法
+  assert.doesNotThrow(() => new vm.Script(waveEditorJs, { filename: 'wave-editor.js' }));
+});
