@@ -619,6 +619,1028 @@ function toggleTrackWithHistory(doc, history, lineIndex, name) {
   };
 }
 
+// ── 波形細剪覆蓋行(`## ✂ 起-迄 wave|audacity` / `## ✚ 起-迄 wave|audacity`)──
+//
+// Lifov #1201:詞級波形編輯器取代 Audacity 細剪。
+// 手動拖拉邊界(包含按住 Alt/Cmd 硬切 AA/BB/CC 成 ABBC)寫入受控的 `## ✂` 與
+// `## ✚` 行(tag 為 wave 或 audacity)。render_cut.py 的 apply_review_edges 在
+// word_guard / snap_boundaries / pad_seams 全部跑完之後才套用,且 ✚ > ✂ > 自動規則,
+// 因此手動覆蓋具有最高優先級。
+const MANAGED_EDGE_RE =
+  /^##\s*(✂|✚)\uFE0F?\s*([\d:.]+)\s*[-–~]\s*([\d:.]+)\s+(wave|audacity)\s*$/;
+const ANY_EDGE_RE =
+  /^##\s*(✂|✚)\uFE0F?\s*([\d:.]+)\s*[-–~]\s*([\d:.]+)(?:\s+(.*?))?\s*$/;
+
+function parseEdgeTimeMs(tok) {
+  const s = String(tok == null ? '' : tok).trim();
+  if (!/^\d+(?:\.\d+)?$|^\d+:\d{1,2}(?:\.\d+)?$|^\d+:\d{1,2}:\d{1,2}(?:\.\d+)?$/.test(s)) {
+    return null;
+  }
+  const parts = s.split(':').map(Number);
+  if (parts.some((n) => !Number.isFinite(n) || n < 0)) return null;
+  for (let i = 1; i < parts.length; i++) {
+    if (parts[i] >= 60) return null;
+  }
+  const secs = parts.reduce((acc, x) => acc * 60 + x, 0);
+  return Math.round(secs * 1000);
+}
+
+function formatEdgeTimeSec(ms) {
+  return (Math.round(ms) / 1000).toFixed(3);
+}
+
+function isReviewEdgeLine(doc, lineIndex) {
+  const line = doc.lines[lineIndex];
+  if (!line || line.editable) return false;
+  const m = MANAGED_EDGE_RE.exec(line.raw || '');
+  if (!m) return false;
+  const s = parseEdgeTimeMs(m[2]);
+  const e = parseEdgeTimeMs(m[3]);
+  return s !== null && e !== null && s >= 0 && e > s && e <= 86400000;
+}
+
+function checkReviewEdgeLines(doc) {
+  let count = 0;
+  for (let i = 0; i < doc.lines.length; i++) {
+    const l = doc.lines[i];
+    if (l.editable) continue;
+    const raw = l.raw || '';
+    if (!/^##\s*(?:✂|✚)\uFE0F?/.test(raw)) continue;
+    // 只針對帶 wave / audacity tag 的管理行驗時間合法性;人類手寫說明的 ✂ 行交給逐行比對守住
+    if (/\s+(?:wave|audacity)\s*$/.test(raw)) {
+      const m = MANAGED_EDGE_RE.exec(raw);
+      if (!m) return `第 ${i + 1} 行 ✂/✚ 格式不合法:${raw}`;
+      const s = parseEdgeTimeMs(m[2]);
+      const e = parseEdgeTimeMs(m[3]);
+      if (s === null || e === null || s < 0 || e <= s || e > 86400000) {
+        return `第 ${i + 1} 行 ✂/✚ 時間範圍不合法:${raw}`;
+      }
+      if (++count > 5000) return '✂/✚ 覆蓋行數超過上限(5000)';
+    }
+  }
+  return null;
+}
+
+// ── 三層區間代數(整數毫秒、半開區間 [s, e))────────────────────────────────
+
+function normalizeIntervals(list) {
+  if (!Array.isArray(list) || !list.length) return [];
+  const xs = [];
+  for (const item of list) {
+    if (!Array.isArray(item) || item.length < 2) continue;
+    const s = Math.round(Number(item[0]));
+    const e = Math.round(Number(item[1]));
+    if (Number.isFinite(s) && Number.isFinite(e) && e > s) {
+      xs.push([s, e]);
+    }
+  }
+  xs.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+  const out = [];
+  for (const [s, e] of xs) {
+    const last = out[out.length - 1];
+    if (last && s <= last[1]) {
+      last[1] = Math.max(last[1], e);
+    } else {
+      out.push([s, e]);
+    }
+  }
+  return out;
+}
+
+function unionIntervals(a, b) {
+  return normalizeIntervals([...(a || []), ...(b || [])]);
+}
+
+function subtractIntervals(a, b) {
+  const src = normalizeIntervals(a);
+  const cut = normalizeIntervals(b);
+  if (!src.length || !cut.length) return src;
+  const out = [];
+  let j = 0;
+  for (let [s, e] of src) {
+    while (j < cut.length && cut[j][1] <= s) j++;
+    for (let k = j; k < cut.length && cut[k][0] < e; k++) {
+      if (cut[k][0] > s) out.push([s, cut[k][0]]);
+      s = Math.max(s, cut[k][1]);
+      if (s >= e) break;
+    }
+    if (s < e) out.push([s, e]);
+  }
+  return out;
+}
+
+function intersectIntervals(a, b) {
+  const xs = normalizeIntervals(a);
+  const ys = normalizeIntervals(b);
+  if (!xs.length || !ys.length) return [];
+  const out = [];
+  let i = 0;
+  let j = 0;
+  while (i < xs.length && j < ys.length) {
+    const lo = Math.max(xs[i][0], ys[j][0]);
+    const hi = Math.min(xs[i][1], ys[j][1]);
+    if (hi > lo) out.push([lo, hi]);
+    if (xs[i][1] < ys[j][1]) i++;
+    else j++;
+  }
+  return out;
+}
+
+// Final = (Base \ Cut) ∪ Keep —— 與 render_cut.py 的 apply_review_edges 完全同構
+function computeFinalIntervals(base, overrides) {
+  const b = normalizeIntervals(base);
+  const cut = normalizeIntervals(overrides && overrides.cut);
+  const keep = normalizeIntervals(overrides && overrides.keep);
+  return unionIntervals(subtractIntervals(b, cut), keep);
+}
+
+// 將單一區間 [s, e) 以 'cut' | 'keep' | 'clear' 套入 overrides,維持 cut ∩ keep = ∅
+function applyTrimOverride(overrides, rangeMs, mode) {
+  const curCut = normalizeIntervals(overrides && overrides.cut);
+  const curKeep = normalizeIntervals(overrides && overrides.keep);
+  if (!Array.isArray(rangeMs) || rangeMs.length < 2) {
+    return { cut: curCut, keep: curKeep };
+  }
+  const s = Math.round(Number(rangeMs[0]));
+  const e = Math.round(Number(rangeMs[1]));
+  if (!Number.isFinite(s) || !Number.isFinite(e) || e <= s) {
+    return { cut: curCut, keep: curKeep };
+  }
+  const R = [[s, e]];
+  let cut = subtractIntervals(curCut, R);
+  let keep = subtractIntervals(curKeep, R);
+  if (mode === 'cut') {
+    cut = unionIntervals(cut, R);
+  } else if (mode === 'keep') {
+    keep = unionIntervals(keep, R);
+  } else if (mode !== 'clear') {
+    throw new Error(`cutplan-core: applyTrimOverride — 未知的 mode「${mode}」`);
+  }
+  return { cut, keep };
+}
+
+// 強制覆蓋指定範圍(例如詞級為 AA/BB/CC [scopeS, scopeE),硬切成 ABBC [keepS, keepE)):
+//   - [scopeS, keepS) → 強制切除 (✂)
+//   - [keepS, keepE)  → 強制保留 (✚,壓過詞邊界/刪除線/停頓規則)
+//   - [keepE, scopeE) → 強制切除 (✂)
+function forceWindowOverride(overrides, scopeRangeMs, keepRangeMs) {
+  const scopeS = Math.round(Number(scopeRangeMs[0]));
+  const scopeE = Math.round(Number(scopeRangeMs[1]));
+  const keepS = Math.max(scopeS, Math.round(Number(keepRangeMs[0])));
+  const keepE = Math.min(scopeE, Math.round(Number(keepRangeMs[1])));
+  if (!(scopeE > scopeS && keepE > keepS)) {
+    throw new Error(
+      `cutplan-core: forceWindowOverride — 範圍不合法 scope=[${scopeS},${scopeE}) keep=[${keepS},${keepE})`,
+    );
+  }
+  let next = {
+    cut: normalizeIntervals(overrides && overrides.cut),
+    keep: normalizeIntervals(overrides && overrides.keep),
+  };
+  if (keepS > scopeS) {
+    next = applyTrimOverride(next, [scopeS, keepS], 'cut');
+  }
+  next = applyTrimOverride(next, [keepS, keepE], 'keep');
+  if (scopeE > keepE) {
+    next = applyTrimOverride(next, [keepE, scopeE], 'cut');
+  }
+  return next;
+}
+
+function extractReviewOverrides(doc) {
+  const mCut = [];
+  const mKeep = [];
+  const roCut = [];
+  const roKeep = [];
+  for (let i = 0; i < doc.lines.length; i++) {
+    const l = doc.lines[i];
+    if (!l || l.editable) continue;
+    const m = ANY_EDGE_RE.exec(l.raw || '');
+    if (!m) continue;
+    const kind = m[1];
+    const s = parseEdgeTimeMs(m[2]);
+    const e = parseEdgeTimeMs(m[3]);
+    const tag = (m[4] || '').trim();
+    if (s === null || e === null || e <= s) continue;
+    const isManaged = tag === 'wave' || tag === 'audacity';
+    if (isManaged) {
+      if (kind === '✂') mCut.push([s, e]);
+      else mKeep.push([s, e]);
+    } else {
+      if (kind === '✂') roCut.push([s, e]);
+      else roKeep.push([s, e]);
+    }
+  }
+  const managedKeep = normalizeIntervals(mKeep);
+  const managedCut = subtractIntervals(mCut, managedKeep);
+  const readonlyKeep = normalizeIntervals(roKeep);
+  const readonlyCut = subtractIntervals(roCut, readonlyKeep);
+  const allKeep = unionIntervals(managedKeep, readonlyKeep);
+  const allCut = subtractIntervals(unionIntervals(managedCut, readonlyCut), allKeep);
+  return {
+    managed: { cut: managedCut, keep: managedKeep },
+    readonly: { cut: readonlyCut, keep: readonlyKeep },
+    combined: { cut: allCut, keep: allKeep },
+  };
+}
+
+function applyReviewOverridesToDoc(doc, overrides, tag = 'wave') {
+  if (tag !== 'wave' && tag !== 'audacity') {
+    throw new Error(`cutplan-core: applyReviewOverridesToDoc — tag 只能是 wave 或 audacity`);
+  }
+  const keep = normalizeIntervals(overrides && overrides.keep);
+  const cut = subtractIntervals(normalizeIntervals(overrides && overrides.cut), keep);
+  const term = dominantTerm(doc);
+  const keptLines = doc.lines.filter((_, i) => !isReviewEdgeLine(doc, i)).map((l) => ({ ...l }));
+  const newEdgeLines = [
+    ...cut.map(([s, e]) => ({
+      editable: false,
+      raw: `## ✂ ${formatEdgeTimeSec(s)}-${formatEdgeTimeSec(e)} ${tag}`,
+      term,
+    })),
+    ...keep.map(([s, e]) => ({
+      editable: false,
+      raw: `## ✚ ${formatEdgeTimeSec(s)}-${formatEdgeTimeSec(e)} ${tag}`,
+      term,
+    })),
+  ];
+  if (!newEdgeLines.length) {
+    return { ...doc, lines: keptLines };
+  }
+  // 錨點:最後一個 `## ⚙` 行之後;若無則在第一個可編輯 block 行之前;若無則接在檔尾
+  let insertAt = -1;
+  for (let i = 0; i < keptLines.length; i++) {
+    if (!keptLines[i].editable && /^##\s*⚙/.test(keptLines[i].raw || '')) {
+      insertAt = i + 1;
+    }
+  }
+  if (insertAt < 0) {
+    insertAt = keptLines.findIndex((l) => l.editable);
+    if (insertAt < 0) insertAt = keptLines.length;
+  }
+  if (insertAt > 0 && !keptLines[insertAt - 1].term) {
+    keptLines[insertAt - 1] = { ...keptLines[insertAt - 1], term };
+  }
+  if (insertAt === keptLines.length && doc.lines.length > 0 && !doc.lines[doc.lines.length - 1].term) {
+    newEdgeLines[newEdgeLines.length - 1] = {
+      ...newEdgeLines[newEdgeLines.length - 1],
+      term: '',
+    };
+  }
+  keptLines.splice(insertAt, 0, ...newEdgeLines);
+  return { ...doc, lines: keptLines };
+}
+
+function applyReviewOverridesWithHistory(doc, history, overrides, tag = 'wave') {
+  const nextDoc = applyReviewOverridesToDoc(doc, overrides, tag);
+  return {
+    doc: nextDoc,
+    history: pushHistory(history, { doc, lineIndex: 0, start: 0, end: 0, kind: 'wave-override' }),
+  };
+}
+
+// ── 全軌與詞級 100% MECE 切分器 ────────────────────────────────────────────
+//
+// 不變式:
+//   1. 區間皆為整數毫秒半開區間 [s, e),且 e > s
+//   2. list[0].s === startMs, list[last].e === endMs
+//   3. 對所有 k > 0, list[k - 1].e === list[k].s (互斥且窮盡 MECE)
+
+function assertMECE(list, startMs, endMs) {
+  if (!Array.isArray(list) || !list.length) {
+    return 'MECE 失敗:空序列';
+  }
+  const s0 = Math.round(Number(startMs));
+  const eN = Math.round(Number(endMs));
+  if (list[0].s !== s0) {
+    return `MECE 失敗:起點未對齊(${list[0].s} !== ${s0})`;
+  }
+  if (list[list.length - 1].e !== eN) {
+    return `MECE 失敗:終點未對齊(${list[list.length - 1].e} !== ${eN})`;
+  }
+  for (let k = 0; k < list.length; k++) {
+    const a = list[k];
+    if (!Number.isInteger(a.s) || !Number.isInteger(a.e) || a.e <= a.s) {
+      return `MECE 失敗:第 ${k} 項(${a.id || '?'})區間不合法 [${a.s}, ${a.e})`;
+    }
+    if (k > 0 && list[k - 1].e !== a.s) {
+      return `MECE 失敗:${list[k - 1].id || k - 1} 與 ${a.id || k} 邊界不連續(${list[k - 1].e} !== ${a.s})`;
+    }
+  }
+  return null;
+}
+
+// 將單一語音 Block [b.s, b.e) 展開為 100% MECE 的詞級子積木 (B0001-1, B0001-2...)
+function atomizeBlock(block, words, options = {}) {
+  const bs = Math.round(Number(block.s != null ? block.s : block.start * 1000));
+  const be = Math.round(Number(block.e != null ? block.e : block.end * 1000));
+  const pauseThresholdMs = options.pauseThresholdMs != null ? options.pauseThresholdMs : 250;
+  const seamFn = typeof options.seamFn === 'function'
+    ? options.seamFn
+    : (lo, hi) => Math.round((lo + hi) / 2);
+
+  if (!(be > bs)) {
+    throw new Error(`cutplan-core: atomizeBlock — block ${block.id} 長度不合法 [${bs}, ${be})`);
+  }
+
+  const matched = [];
+  if (Array.isArray(words) && words.length) {
+    for (const w of words) {
+      const ws = Math.round(Number(w.start) * 1000);
+      const we = Math.round(Number(w.end) * 1000);
+      if (!Number.isFinite(ws) || !Number.isFinite(we) || we <= ws) continue;
+      const mid = (ws + we) / 2;
+      const ov = Math.min(be, we) - Math.max(bs, ws);
+      if ((mid >= bs && mid <= be) || ov > 0.5 * (we - ws)) {
+        const cs = Math.max(bs, Math.min(be - 1, ws));
+        const ce = Math.max(cs + 1, Math.min(be, we));
+        matched.push({ text: String(w.word || ''), s: cs, e: ce });
+      }
+    }
+  }
+
+  matched.sort((a, b) => a.s - b.s || a.e - b.e);
+
+  if (!matched.length) {
+    return [{
+      id: `${block.id}-1`,
+      blockId: block.id,
+      wordIndex: 1,
+      kind: 'word',
+      text: String(block.text || ''),
+      s: bs,
+      e: be,
+    }];
+  }
+
+  // 確保每個詞嚴格遞增且落在 [bs, be] 內
+  const rawWords = [];
+  for (let i = 0; i < matched.length; i++) {
+    const w = { ...matched[i], wordIndex: i + 1 };
+    rawWords.push(w);
+  }
+
+  // 解微重疊與微小空隙,建立 MECE 子積木
+  const atoms = [];
+  const headGap = rawWords[0].s - bs;
+  if (headGap >= pauseThresholdMs) {
+    atoms.push({
+      id: `${block.id}-^`,
+      blockId: block.id,
+      kind: 'silence',
+      text: '',
+      s: bs,
+      e: rawWords[0].s,
+    });
+  } else {
+    rawWords[0].s = bs;
+  }
+
+  for (let i = 0; i < rawWords.length - 1; i++) {
+    const a = rawWords[i];
+    const b = rawWords[i + 1];
+    if (a.e <= a.s) a.e = Math.min(be, a.s + 1);
+    if (a.e > b.s) {
+      // Whisper 時間戳微重疊 → 取能量谷底或中點接齊
+      const lo = Math.max(a.s + 1, b.s);
+      const hi = Math.min(a.e, b.e - 1);
+      const seam = hi >= lo ? Math.max(lo, Math.min(hi, seamFn(lo, hi))) : Math.max(a.s + 1, Math.min(be - 1, Math.round((a.s + b.e) / 2)));
+      a.e = seam;
+      b.s = seam;
+      atoms.push({
+        id: `${block.id}-${a.wordIndex}`,
+        blockId: block.id,
+        wordIndex: a.wordIndex,
+        kind: 'word',
+        text: a.text,
+        s: a.s,
+        e: a.e,
+      });
+    } else if (b.s - a.e < pauseThresholdMs) {
+      // 微小詞間空隙(< pauseThresholdMs) → 直接接齊讓 AA/BB/CC 緊密連續 MECE
+      const seam = Math.max(a.e, Math.min(b.s, seamFn(a.e, b.s)));
+      a.e = seam;
+      b.s = seam;
+      atoms.push({
+        id: `${block.id}-${a.wordIndex}`,
+        blockId: block.id,
+        wordIndex: a.wordIndex,
+        kind: 'word',
+        text: a.text,
+        s: a.s,
+        e: a.e,
+      });
+    } else {
+      // 顯著詞間停頓 → 獨立為靜音子積木
+      atoms.push({
+        id: `${block.id}-${a.wordIndex}`,
+        blockId: block.id,
+        wordIndex: a.wordIndex,
+        kind: 'word',
+        text: a.text,
+        s: a.s,
+        e: a.e,
+      });
+      atoms.push({
+        id: `${block.id}-${a.wordIndex}~${b.wordIndex}`,
+        blockId: block.id,
+        kind: 'silence',
+        text: '',
+        s: a.e,
+        e: b.s,
+      });
+    }
+  }
+
+  const lastW = rawWords[rawWords.length - 1];
+  if (lastW.s >= be) lastW.s = be - 1;
+  const tailGap = be - lastW.e;
+  if (tailGap >= pauseThresholdMs && lastW.e > lastW.s) {
+    atoms.push({
+      id: `${block.id}-${lastW.wordIndex}`,
+      blockId: block.id,
+      wordIndex: lastW.wordIndex,
+      kind: 'word',
+      text: lastW.text,
+      s: lastW.s,
+      e: lastW.e,
+    });
+    atoms.push({
+      id: `${block.id}-$`,
+      blockId: block.id,
+      kind: 'silence',
+      text: '',
+      s: lastW.e,
+      e: be,
+    });
+  } else {
+    lastW.e = be;
+    atoms.push({
+      id: `${block.id}-${lastW.wordIndex}`,
+      blockId: block.id,
+      wordIndex: lastW.wordIndex,
+      kind: 'word',
+      text: lastW.text,
+      s: lastW.s,
+      e: lastW.e,
+    });
+  }
+
+  // 安全修復:若有極端擠壓導致 e <= s 的退化項,併入相鄰項以保證 100% MECE
+  const clean = [];
+  for (const item of atoms) {
+    if (item.e <= item.s) continue;
+    if (clean.length && clean[clean.length - 1].e !== item.s) {
+      item.s = clean[clean.length - 1].e;
+    }
+    if (item.e > item.s) clean.push(item);
+  }
+  if (!clean.length) {
+    clean.push({
+      id: `${block.id}-1`,
+      blockId: block.id,
+      wordIndex: 1,
+      kind: 'word',
+      text: String(block.text || ''),
+      s: bs,
+      e: be,
+    });
+  } else {
+    clean[0].s = bs;
+    clean[clean.length - 1].e = be;
+  }
+  return clean;
+}
+
+// 將整軌 [0, durationMs) 的 blocks 與 gaps 正規化為 100% MECE 時間軸
+function buildTrackPartition(cutplanData, words = [], durationMs = null, options = {}) {
+  const rawBlocks = (cutplanData && Array.isArray(cutplanData.blocks)) ? cutplanData.blocks : [];
+  const rawGaps = (cutplanData && Array.isArray(cutplanData.gaps)) ? cutplanData.gaps : [];
+  const seamFn = typeof options.seamFn === 'function'
+    ? options.seamFn
+    : (lo, hi) => Math.round((lo + hi) / 2);
+
+  let maxMs = durationMs != null ? Math.round(Number(durationMs)) : 0;
+  for (const b of rawBlocks) {
+    const e = Math.round(Number(b.end) * 1000);
+    if (Number.isFinite(e) && e > maxMs) maxMs = e;
+  }
+  for (const g of rawGaps) {
+    const e = Math.round(Number(g.end) * 1000);
+    if (Number.isFinite(e) && e > maxMs) maxMs = e;
+  }
+  if (Array.isArray(words)) {
+    for (const w of words) {
+      const e = Math.round(Number(w.end) * 1000);
+      if (Number.isFinite(e) && e > maxMs) maxMs = e;
+    }
+  }
+  if (maxMs <= 0) maxMs = 1000;
+
+  const speech = [];
+  for (const b of rawBlocks) {
+    const s = Math.max(0, Math.min(maxMs, Math.round(Number(b.start) * 1000)));
+    const e = Math.max(0, Math.min(maxMs, Math.round(Number(b.end) * 1000)));
+    if (e > s) {
+      speech.push({
+        id: String(b.id),
+        kind: 'speech',
+        s,
+        e,
+        speaker: b.speaker || '',
+        text: b.text || '',
+      });
+    }
+  }
+  speech.sort((a, b) => a.s - b.s || a.e - b.e);
+
+  // ① 解相鄰語音 block 的微重疊
+  for (let i = 0; i < speech.length - 1; i++) {
+    const cur = speech[i];
+    const nxt = speech[i + 1];
+    if (cur.e > nxt.s) {
+      const lo = Math.max(cur.s + 1, nxt.s);
+      const hi = Math.min(cur.e, nxt.e - 1);
+      const seam = hi >= lo
+        ? Math.max(lo, Math.min(hi, seamFn(lo, hi)))
+        : Math.max(cur.s + 1, Math.min(nxt.e - 1, Math.round((cur.s + nxt.e) / 2)));
+      cur.e = seam;
+      nxt.s = seam;
+    }
+  }
+
+  const validSpeech = speech.filter((b) => b.e > b.s);
+  const legacyGaps = rawGaps
+    .map((g) => ({
+      id: String(g.id),
+      s: Math.round(Number(g.start) * 1000),
+      e: Math.round(Number(g.end) * 1000),
+    }))
+    .filter((g) => Number.isFinite(g.s) && Number.isFinite(g.e) && g.e > g.s);
+
+  const attachGapMeta = (s, e, fallbackId) => {
+    const hits = [];
+    for (const g of legacyGaps) {
+      const ov = Math.min(e, g.e) - Math.max(s, g.s);
+      if (ov > 0) hits.push({ id: g.id, ov });
+    }
+    hits.sort((a, b) => b.ov - a.ov);
+    const legacyIds = hits.map((h) => h.id);
+    const primaryGapId = legacyIds[0] || null;
+    const dur = e - s;
+    const tags = [];
+    if (s === 0) tags.push('head');
+    if (e === maxMs) tags.push('tail');
+    if (dur >= 2000) tags.push('G');
+    else if (dur > 900) tags.push('P');
+    else tags.push('p');
+    const id = primaryGapId || fallbackId;
+    return {
+      id,
+      fallbackId,
+      primaryGapId,
+      legacyIds,
+      tags,
+      kind: 'silence',
+      s,
+      e,
+      text: '',
+      atoms: [{
+        id: `${id}-1`,
+        blockId: id,
+        wordIndex: 1,
+        kind: 'silence',
+        text: '',
+        s,
+        e,
+      }],
+    };
+  };
+
+  // ② 補齊所有空洞 [0, maxMs)
+  const blocks = [];
+  let cur = 0;
+  let prevSpeechId = '^';
+  for (const b of validSpeech) {
+    if (b.s > cur) {
+      const fbId = prevSpeechId === '^' ? '~^' : `~${prevSpeechId}`;
+      blocks.push(attachGapMeta(cur, b.s, fbId));
+    }
+    const atoms = atomizeBlock(b, words, options);
+    blocks.push({
+      ...b,
+      legacyIds: [b.id],
+      tags: ['B'],
+      atoms,
+    });
+    cur = b.e;
+    prevSpeechId = b.id;
+  }
+  if (cur < maxMs) {
+    const fbId = validSpeech.length ? '~$' : '~^';
+    blocks.push(attachGapMeta(cur, maxMs, fbId));
+  }
+
+  const allAtoms = [];
+  for (const b of blocks) {
+    for (const a of b.atoms) allAtoms.push(a);
+  }
+
+  return {
+    durationMs: maxMs,
+    blocks,
+    allAtoms,
+  };
+}
+
+// 依 cutplan.md 勾選與刪除線 + MECE partition 計算即時 Base 保留區間 (pre-review)
+function computeBaseIntervalsFromDoc(doc, partition, options = {}) {
+  if (!doc || !partition || !Array.isArray(partition.blocks)) return [];
+  const pauseKeepMs = options.pauseKeepMs != null ? options.pauseKeepMs : 600;
+  const byId = new Map();
+  for (const l of doc.lines) {
+    if (l && l.editable && l.id) {
+      // 正片列優先(集錦在前、正片在後,後者覆蓋前者)
+      byId.set(l.id, l);
+    }
+  }
+
+  const kept = [];
+  const blocks = partition.blocks;
+  for (let idx = 0; idx < blocks.length; idx++) {
+    const b = blocks[idx];
+    if (b.kind === 'speech') {
+      const line = byId.get(b.id);
+      const isChecked = line ? line.mark !== ' ' : true;
+      if (!isChecked) continue;
+
+      let ranges = [[b.s, b.e]];
+      if (line && /~~/.test(line.bodyRaw || '') && Array.isArray(b.atoms) && b.atoms.length) {
+        const { clean, pieces } = splitStrikes(line.bodyRaw);
+        const struckSpans = pieces.filter((p) => p.kind === 'struck');
+        if (struckSpans.length && clean.length > 0) {
+          const wordAtoms = b.atoms.filter((a) => a.kind === 'word');
+          // 將字元位置對應到 word atoms
+          const totalWordChars = wordAtoms.reduce((acc, a) => acc + (a.text ? a.text.length : 1), 0) || 1;
+          let charCursor = 0;
+          const struckIntervals = [];
+          for (const wa of wordAtoms) {
+            const wLen = Math.max(1, (wa.text || '').length);
+            const wStartRatio = charCursor / totalWordChars;
+            const wEndRatio = (charCursor + wLen) / totalWordChars;
+            const cleanStart = wStartRatio * clean.length;
+            const cleanEnd = wEndRatio * clean.length;
+            charCursor += wLen;
+            for (const sp of struckSpans) {
+              const ov = Math.min(cleanEnd, sp.cleanEnd) - Math.max(cleanStart, sp.cleanStart);
+              if (ov > 0.3 * (cleanEnd - cleanStart)) {
+                struckIntervals.push([wa.s, wa.e]);
+                break;
+              }
+            }
+          }
+          if (struckIntervals.length) {
+            ranges = subtractIntervals(ranges, struckIntervals);
+          }
+        }
+      }
+      for (const r of ranges) kept.push(r);
+    } else if (b.kind === 'silence') {
+      // 檢查是否有對應的 G 或 P 列
+      let matchedLine = null;
+      for (const lid of (b.legacyIds || [b.id])) {
+        if (byId.has(lid)) {
+          matchedLine = byId.get(lid);
+          break;
+        }
+      }
+      if (matchedLine) {
+        const isChecked = matchedLine.mark !== ' ';
+        if (/^G\d/.test(matchedLine.id)) {
+          if (isChecked) kept.push([b.s, b.e]);
+        } else if (/^P\d/.test(matchedLine.id)) {
+          if (isChecked) {
+            kept.push([b.s, b.e]);
+          } else if (pauseKeepMs > 0) {
+            kept.push([b.s, Math.min(b.e, b.s + pauseKeepMs)]);
+          }
+        }
+      } else {
+        // 未顯式列出的短句間停頓(< 900ms):若前後相鄰的語音 block 都有勾選,預設保留自然換氣
+        const prevB = idx > 0 ? blocks[idx - 1] : null;
+        const nextB = idx + 1 < blocks.length ? blocks[idx + 1] : null;
+        const prevChecked = prevB && prevB.kind === 'speech' && byId.get(prevB.id)?.mark !== ' ';
+        const nextChecked = nextB && nextB.kind === 'speech' && byId.get(nextB.id)?.mark !== ' ';
+        if (prevChecked && nextChecked && (b.e - b.s) <= 900) {
+          kept.push([b.s, b.e]);
+        }
+      }
+    }
+  }
+  return normalizeIntervals(kept);
+}
+
+// ── SoundCraft 移植:Peaks 多解析度金字塔 + 谷底接縫 + Smart Trim 吸附 ─────────
+//
+// 參考 storytold/soundcraft crates/audio-io/src/peaks.rs 與 crates/ui-egui/src/edit_window/drag.rs:
+//   - Level 0 每 PEAKS_BLOCK=32 samples 聚合一次 min / max / squares
+//   - Level k 每 PEAKS_FANOUT=4 個下層 block 聚合一次
+//   - 任意縮放倍率的像素區間查詢 [startSample, endSample) 皆為 O(log N)
+
+const PEAKS_BLOCK = 32;
+const PEAKS_FANOUT = 4;
+
+function buildPeaks(samples) {
+  const len = samples ? samples.length : 0;
+  let n = Math.ceil(len / PEAKS_BLOCK);
+  const levels = [];
+  if (n === 0) {
+    return { len: 0, levels: [] };
+  }
+  const mn0 = new Float32Array(n);
+  const mx0 = new Float32Array(n);
+  const sq0 = new Float64Array(n);
+  for (let b = 0; b < n; b++) {
+    let lo = Infinity;
+    let hi = -Infinity;
+    let s2 = 0;
+    const end = Math.min(len, (b + 1) * PEAKS_BLOCK);
+    for (let i = b * PEAKS_BLOCK; i < end; i++) {
+      const v = samples[i];
+      if (v < lo) lo = v;
+      if (v > hi) hi = v;
+      if (v === v) s2 += v * v;
+    }
+    mn0[b] = lo <= hi ? lo : 0;
+    mx0[b] = lo <= hi ? hi : 0;
+    sq0[b] = s2;
+  }
+  levels.push({ mn: mn0, mx: mx0, sq: sq0 });
+
+  while (n > 1) {
+    const m = Math.ceil(n / PEAKS_FANOUT);
+    const prev = levels[levels.length - 1];
+    const mn = new Float32Array(m);
+    const mx = new Float32Array(m);
+    const sq = new Float64Array(m);
+    for (let b = 0; b < m; b++) {
+      let lo = Infinity;
+      let hi = -Infinity;
+      let s2 = 0;
+      const end = Math.min(n, (b + 1) * PEAKS_FANOUT);
+      for (let i = b * PEAKS_FANOUT; i < end; i++) {
+        if (prev.mn[i] < lo) lo = prev.mn[i];
+        if (prev.mx[i] > hi) hi = prev.mx[i];
+        s2 += prev.sq[i];
+      }
+      mn[b] = lo <= hi ? lo : 0;
+      mx[b] = lo <= hi ? hi : 0;
+      sq[b] = s2;
+    }
+    levels.push({ mn, mx, sq });
+    n = m;
+  }
+  return { len, levels };
+}
+
+function queryPeaksMinMax(peaks, samples, startSample, endSample) {
+  if (!peaks || !samples || !peaks.len) return [0, 0];
+  const s = Math.max(0, Math.floor(startSample));
+  const e = Math.min(peaks.len, samples.length, Math.ceil(endSample));
+  if (s >= e) return [0, 0];
+
+  let lo = Infinity;
+  let hi = -Infinity;
+  const rawRange = (a, b) => {
+    for (let i = a; i < b; i++) {
+      const v = samples[i];
+      if (v < lo) lo = v;
+      if (v > hi) hi = v;
+    }
+  };
+
+  const first = Math.ceil(s / PEAKS_BLOCK);
+  const last = Math.floor(e / PEAKS_BLOCK);
+  if (first >= last) {
+    rawRange(s, e);
+  } else {
+    rawRange(s, first * PEAKS_BLOCK);
+    rawRange(last * PEAKS_BLOCK, e);
+    let l = first;
+    let h = last;
+    for (let lvl = 0; lvl < peaks.levels.length; lvl++) {
+      const { mn, mx } = peaks.levels[lvl];
+      const addBlock = (idx) => {
+        if (mn[idx] < lo) lo = mn[idx];
+        if (mx[idx] > hi) hi = mx[idx];
+      };
+      if (lvl + 1 === peaks.levels.length || h - l < 2 * PEAKS_FANOUT) {
+        for (let i = l; i < h; i++) addBlock(i);
+        break;
+      }
+      while (l % PEAKS_FANOUT !== 0) addBlock(l++);
+      while (h % PEAKS_FANOUT !== 0) addBlock(--h);
+      l = Math.floor(l / PEAKS_FANOUT);
+      h = Math.floor(h / PEAKS_FANOUT);
+    }
+  }
+  return lo > hi ? [0, 0] : [lo, hi];
+}
+
+function queryPeaksRms(peaks, samples, startSample, endSample) {
+  if (!peaks || !samples || !peaks.len) return 0;
+  const s = Math.max(0, Math.floor(startSample));
+  const e = Math.min(peaks.len, samples.length, Math.ceil(endSample));
+  if (s >= e) return 0;
+
+  let sumSq = 0;
+  const rawRange = (a, b) => {
+    for (let i = a; i < b; i++) {
+      const v = samples[i];
+      if (v === v) sumSq += v * v;
+    }
+  };
+
+  const first = Math.ceil(s / PEAKS_BLOCK);
+  const last = Math.floor(e / PEAKS_BLOCK);
+  if (first >= last) {
+    rawRange(s, e);
+  } else {
+    rawRange(s, first * PEAKS_BLOCK);
+    rawRange(last * PEAKS_BLOCK, e);
+    let l = first;
+    let h = last;
+    for (let lvl = 0; lvl < peaks.levels.length; lvl++) {
+      const { sq } = peaks.levels[lvl];
+      if (lvl + 1 === peaks.levels.length || h - l < 2 * PEAKS_FANOUT) {
+        for (let i = l; i < h; i++) sumSq += sq[i];
+        break;
+      }
+      while (l % PEAKS_FANOUT !== 0) sumSq += sq[l++];
+      while (h % PEAKS_FANOUT !== 0) sumSq += sq[--h];
+      l = Math.floor(l / PEAKS_FANOUT);
+      h = Math.floor(h / PEAKS_FANOUT);
+    }
+  }
+  return Math.sqrt(sumSq / (e - s));
+}
+
+// 在 [loMs, hiMs] 內以 stepMs=5ms 滑動,利用 Peaks 尋找 RMS 能量最低的谷底作為切點
+function findValleySeamMs(peaks, samples, sampleRate, loMs, hiMs, stepMs = 5) {
+  const lo = Math.round(Number(loMs));
+  const hi = Math.round(Number(hiMs));
+  if (!(hi > lo)) return lo;
+  const mid = Math.round((lo + hi) / 2);
+  if (!peaks || !samples || !sampleRate || hi - lo < stepMs) return mid;
+
+  let bestMs = mid;
+  let bestRms = Infinity;
+  let bestDist = Infinity;
+  const winHalf = Math.max(2, Math.round(stepMs / 2));
+
+  for (let t = lo; t <= hi; t += stepMs) {
+    const s0 = Math.round(((t - winHalf) / 1000) * sampleRate);
+    const s1 = Math.round(((t + winHalf) / 1000) * sampleRate);
+    const rms = queryPeaksRms(peaks, samples, s0, s1);
+    const dist = Math.abs(t - mid);
+    if (rms < bestRms - 1e-9 || (Math.abs(rms - bestRms) <= 1e-9 && dist < bestDist)) {
+      bestRms = rms;
+      bestMs = t;
+      bestDist = dist;
+    }
+  }
+  return Math.max(lo, Math.min(hi, bestMs));
+}
+
+// 二分搜尋最近吸附點(snapPointsMs 需已升冪排序)
+function findNearestSnapMs(snapPointsMs, targetMs) {
+  if (!snapPointsMs || !snapPointsMs.length) return Math.round(targetMs);
+  let lo = 0;
+  let hi = snapPointsMs.length - 1;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (snapPointsMs[mid] < targetMs) lo = mid + 1;
+    else hi = mid;
+  }
+  let best = snapPointsMs[lo];
+  if (lo > 0 && Math.abs(snapPointsMs[lo - 1] - targetMs) <= Math.abs(best - targetMs)) {
+    best = snapPointsMs[lo - 1];
+  }
+  return best;
+}
+
+// 移植自 SoundCraft drag.rs 的 trim_drag_snap:
+//   - 預設硬吸附 words.json 詞邊界 (snapPointsMs)
+//   - 按住修飾鍵 (Alt/Option 或 Cmd/Ctrl) 反轉為 1ms 自由滑動 (Slip Mode)
+//   - 距離原點 <= originSnapPx (預設 6px) 自動磁吸回原點防呆
+//   - 最小保留長度 minKeepMs (預設 30ms) clamp
+function trimDragSnap(gesture, atMs, options = {}) {
+  const snapEnabled = options.snapEnabled !== false;
+  const modifierHeld = !!options.modifierHeld;
+  const snapOn = snapEnabled !== modifierHeld;
+  const minKeepMs = options.minKeepMs != null ? options.minKeepMs : 30;
+  const durMs = options.durMs != null ? options.durMs : 86400000;
+  const pxPerMs = options.pxPerMs != null ? options.pxPerMs : 0;
+  const originSnapPx = options.originSnapPx != null ? options.originSnapPx : 6;
+
+  let to = snapOn
+    ? findNearestSnapMs(gesture.snapPointsMs, atMs)
+    : Math.round(atMs);
+
+  if (gesture.originMs != null && pxPerMs > 0) {
+    if (Math.abs(to - gesture.originMs) * pxPerMs <= originSnapPx) {
+      to = gesture.originMs;
+    }
+  }
+
+  if (gesture.kind === 'trimStart') {
+    const lo = gesture.minMs != null ? gesture.minMs : 0;
+    const hi = (gesture.regionEndMs != null ? gesture.regionEndMs : durMs) - minKeepMs;
+    return Math.max(lo, Math.min(hi, to));
+  }
+  if (gesture.kind === 'trimEnd') {
+    const lo = (gesture.regionStartMs != null ? gesture.regionStartMs : 0) + minKeepMs;
+    const hi = gesture.maxMs != null ? gesture.maxMs : durMs;
+    return Math.max(lo, Math.min(hi, to));
+  }
+  return Math.max(0, Math.min(durMs, to));
+}
+
+// ── 一鍵剪輯範圍 Playback 排程與游標映射 (#1220 M3) ─────────────────────────
+//
+// 依 Final 保留區間 [[sMs, eMs], ...] 產生無縫跳過切除段的播放清單:
+//   - 若起點 startFromSrcMs 落在被切除區間,自動跳至下一段保留區間起點
+//   - 支援 maxToSrcMs(用於接縫前後 ±1.5s 試聽或選取區試聽)
+//   - 每段帶 fadeInMs / fadeOutMs (預設 4ms 微淡入淡出防切點爆音)
+
+function buildCutPlaylist(finalIntervalsMs, options = {}) {
+  const norm = normalizeIntervals(finalIntervalsMs);
+  const startFrom = options.startFromSrcMs != null ? Math.max(0, Math.round(Number(options.startFromSrcMs))) : 0;
+  const maxTo = options.maxToSrcMs != null ? Math.round(Number(options.maxToSrcMs)) : Infinity;
+  const fadeMs = options.fadeMs != null ? Math.max(0, Number(options.fadeMs)) : 4;
+
+  const playlist = [];
+  let dstCursorMs = 0;
+
+  for (let i = 0; i < norm.length; i++) {
+    const [segS, segE] = norm[i];
+    if (segE <= startFrom) continue;
+    if (segS >= maxTo) break;
+    const s = Math.max(segS, startFrom);
+    const e = Math.min(segE, maxTo);
+    const dur = e - s;
+    if (dur <= 0) continue;
+    const effFade = Math.min(fadeMs, Math.floor(dur / 2));
+    playlist.push({
+      index: playlist.length,
+      srcStartMs: s,
+      srcEndMs: e,
+      durationMs: dur,
+      dstStartMs: dstCursorMs,
+      dstEndMs: dstCursorMs + dur,
+      fadeInMs: effFade,
+      fadeOutMs: effFade,
+    });
+    dstCursorMs += dur;
+  }
+  return playlist;
+}
+
+// 將播放經過時間 elapsedMs 映射回原始音軌時間 srcMs(跨切點自動跳躍)
+function mapPlaybackTimeToSourceMs(playlist, elapsedMs) {
+  if (!Array.isArray(playlist) || !playlist.length) {
+    return { playing: false, srcMs: null, dstMs: 0, segmentIndex: -1 };
+  }
+  const t = Math.max(0, Number(elapsedMs) || 0);
+  const last = playlist[playlist.length - 1];
+  if (t >= last.dstEndMs) {
+    return {
+      playing: false,
+      srcMs: last.srcEndMs,
+      dstMs: last.dstEndMs,
+      segmentIndex: playlist.length - 1,
+    };
+  }
+  for (let i = 0; i < playlist.length; i++) {
+    const seg = playlist[i];
+    if (t >= seg.dstStartMs && t < seg.dstEndMs) {
+      const offset = t - seg.dstStartMs;
+      return {
+        playing: true,
+        srcMs: seg.srcStartMs + offset,
+        dstMs: t,
+        segmentIndex: i,
+      };
+    }
+  }
+  return {
+    playing: true,
+    srcMs: playlist[0].srcStartMs,
+    dstMs: 0,
+    segmentIndex: 0,
+  };
+}
+
 // ── 唯讀護欄(伺服端第二道防線;Code.gs 的 saveCutplan 呼叫它)────────
 //
 // 逐行比對 oldContent → newContent,回傳第一個「超出允許編輯範圍」的說明字串,
@@ -631,15 +1653,20 @@ function trackSkeleton(tracksRaw) {
 }
 
 function findIllegalEdit(oldContent, newContent) {
-  // 留白行(## 🔇)與單獨一行的間奏(## 🎵 break)是編輯器僅有的兩種可增刪結構行
-  // (「＋ 之後留白」「＋ 之後插間奏」),比對前兩邊都拿掉;其餘行照原規則逐行比。
+  const parsedNew = parseCutplan(newContent);
+  const edgeErr = checkReviewEdgeLines(parsedNew);
+  if (edgeErr) return edgeErr;
+  // 留白行(## 🔇)、單獨一行的間奏(## 🎵 break)、與受控波形覆蓋行(## ✂/✚ ... wave|audacity)
+  // 是編輯器可增刪的結構行,比對前兩邊都拿掉;其餘行照原規則逐行比。
   // 拿掉後的行數不同,代表動了別的結構行。
   const dropEditorLines = (doc) => ({
     ...doc,
-    lines: doc.lines.filter((_, i) => !isRoomtoneLine(doc, i) && !isBreakLine(doc, i)),
+    lines: doc.lines.filter(
+      (_, i) => !isRoomtoneLine(doc, i) && !isBreakLine(doc, i) && !isReviewEdgeLine(doc, i),
+    ),
   });
   const oldDoc = dropEditorLines(parseCutplan(oldContent));
-  const newDoc = dropEditorLines(parseCutplan(newContent));
+  const newDoc = dropEditorLines(parsedNew);
   if (oldDoc.lines.length !== newDoc.lines.length) {
     return `行數不一致(${oldDoc.lines.length} → ${newDoc.lines.length})`;
   }
@@ -765,7 +1792,7 @@ function formatTime(secs) {
 }
 
 // 卡片上的小字與不一致判定;timeline 沒有這一列(或沒有 timeline)回 null。
-function timelineStatus(line, timeline) {
+function timelineStatus(line, timeline, overrides = null) {
   if (!timeline || !line || !line.editable) return null;
   // P 停頓列:不勾=收緊、勾=原長保留,兩種狀態成品裡都有,只差長度——不是「剪掉/留下」
   // 的二元決定,比對有沒有出現沒有意義(EP22 v7 的 32 筆假「未 apply」都是它)。
@@ -774,14 +1801,31 @@ function timelineStatus(line, timeline) {
   const times = timeline.blocks[line.id];
   const present = Array.isArray(times) && times.length > 0;
   const checked = line.mark !== ' ';
+  let coveredByManualOverride = false;
+  if (overrides && line.timecode) {
+    const parts = String(line.timecode).split(/[-–~]/);
+    if (parts.length === 2) {
+      const bs = parseEdgeTimeMs(parts[0]);
+      const be = parseEdgeTimeMs(parts[1]);
+      if (bs !== null && be !== null && be > bs) {
+        if (checked && !present && Array.isArray(overrides.cut)) {
+          coveredByManualOverride = intersectIntervals([[bs, be]], overrides.cut).length > 0;
+        } else if (!checked && present && Array.isArray(overrides.keep)) {
+          coveredByManualOverride = intersectIntervals([[bs, be]], overrides.keep).length > 0;
+        }
+      }
+    }
+  }
   return {
     times: present ? times : null,
     label: present
       ? `▶ ${timeline.versionShort} ${times.map(formatTime).join(' · ')}`
       : `${timeline.versionShort} 未出現`,
-    // 勾選但帶刪除線:只剪掉一部分字、其餘仍在成品,但 timeline 只記區塊起點,
+    // 勾選但帶刪除線或有 ✂ 手動覆蓋:只剪掉一部分字、其餘仍在成品,但 timeline 只記區塊起點,
     // 起點被劃掉就會記成「沒出現」——不算不一致。
-    mismatch: checked !== present && !(checked && !present && /~~/.test(line.bodyRaw || '')),
+    mismatch: checked !== present
+      && !(checked && !present && /~~/.test(line.bodyRaw || ''))
+      && !coveredByManualOverride,
   };
 }
 
@@ -891,6 +1935,36 @@ const api = {
   toggleTrack,
   toggleTrackWithHistory,
   findIllegalEdit,
+  MANAGED_EDGE_RE,
+  ANY_EDGE_RE,
+  parseEdgeTimeMs,
+  formatEdgeTimeSec,
+  isReviewEdgeLine,
+  checkReviewEdgeLines,
+  normalizeIntervals,
+  unionIntervals,
+  subtractIntervals,
+  intersectIntervals,
+  computeFinalIntervals,
+  applyTrimOverride,
+  forceWindowOverride,
+  extractReviewOverrides,
+  applyReviewOverridesToDoc,
+  applyReviewOverridesWithHistory,
+  assertMECE,
+  atomizeBlock,
+  buildTrackPartition,
+  computeBaseIntervalsFromDoc,
+  PEAKS_BLOCK,
+  PEAKS_FANOUT,
+  buildPeaks,
+  queryPeaksMinMax,
+  queryPeaksRms,
+  findValleySeamMs,
+  findNearestSnapMs,
+  trimDragSnap,
+  buildCutPlaylist,
+  mapPlaybackTimeToSourceMs,
 };
 
 if (typeof module !== 'undefined' && module.exports) {

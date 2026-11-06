@@ -146,7 +146,39 @@ cut('  // ── 集數清單', '  // ── 渲染', `  // ── 本機開資�
     loadCutplanText(text, 'cutplan.md', planDir.label + '/cutplan.md');
     if (tlText !== null) applyTimeline(tlText);
     if (audioFile) loadAudioFile(audioFile);
-    openState((verDir ? verDir.label + ' · ' : '') + [tlText !== null ? 'timeline' : '無 timeline', audioFile ? 'mp3' : '無音檔'].join(' · '));
+
+    // Lifov #1201: 自動載入 cutplan.json / words.json / cut_map.json / audio16k.wav 供詞級波形編輯器與一鍵剪輯預覽使用
+    var cutplanData = null, wordsData = null, cutMapData = null, waveAudioFile = null;
+    for (var sd of [planDir, dir]) {
+      if (!sd) continue;
+      if (!cutplanData && await has(sd, 'cutplan.json')) {
+        try { cutplanData = JSON.parse(await readFile(await sd.file('cutplan.json'))); } catch (e) {}
+      }
+      if (!wordsData && await has(sd, 'words.json')) {
+        try { wordsData = JSON.parse(await readFile(await sd.file('words.json'))); } catch (e) {}
+      }
+      if (!cutMapData && await has(sd, 'cut_map.json')) {
+        try { cutMapData = JSON.parse(await readFile(await sd.file('cut_map.json'))); } catch (e) {}
+      }
+      if (!waveAudioFile) {
+        for (var wn of ['audio16k.wav', 'source.wav', 'source.flac', 'source.m4a', 'source.mp3']) {
+          if (await has(sd, wn)) { waveAudioFile = await sd.file(wn); break; }
+        }
+      }
+    }
+    if (window.WaveEditor) {
+      window.WaveEditor.loadSessionAssets({
+        cutplanData: cutplanData,
+        wordsData: wordsData,
+        cutMapData: cutMapData,
+        waveAudioFile: waveAudioFile || audioFile,
+      });
+    }
+    openState((verDir ? verDir.label + ' · ' : '') + [
+      tlText !== null ? 'timeline' : '無 timeline',
+      wordsData ? 'words.json' : '無 words',
+      waveAudioFile ? waveAudioFile.name : (audioFile ? 'mp3' : '無音檔'),
+    ].join(' · '));
   }
 
   document.getElementById('openDir').addEventListener('click', function () {
@@ -238,8 +270,20 @@ s = s.replace(gsr, () => `      function ok() {
         ok();
       }`);
 
-// 啟動
-sub('  loadEpisodeList();\n', '  setStatus(\'按「選資料夾」開始\');\n');
+// 啟動與波形編輯器掛載 (#1201)
+sub('    renderDiffStrip();\n  }', '    renderDiffStrip();\n    if (window.WaveEditor && window.WaveEditor.onAppRendered) window.WaveEditor.onAppRendered();\n  }');
+sub('  loadEpisodeList();\n})();\n</script>', `  window.__cutplanApp = {
+    state: state,
+    els: els,
+    render: render,
+    setDirty: setDirty,
+    setStatus: setStatus,
+    doSave: doSave,
+  };
+  setStatus('按「選資料夾」開始');
+})();
+</script>
+<script src="wave-editor.js"></script>`);
 
 fs.writeFileSync(path.join(dir, 'local.html'), s);
 console.log('local.html', s.length, 'bytes');
