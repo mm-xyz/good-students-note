@@ -285,6 +285,15 @@
       '  border: 1px solid var(--border); background: transparent; color: var(--accent);',
       '  margin-left: auto;',
       '}',
+      '.block-card { cursor: pointer; transition: border-color 0.15s, box-shadow 0.15s; }',
+      '.block-card:hover { border-color: var(--accent); }',
+      '.block-card.focused-block { border-color: #2ed573 !important; box-shadow: 0 0 0 2px rgba(46, 213, 115, 0.35); }',
+      '#waveHelpBox {',
+      '  display: none; font-size: 12px; line-height: 1.5; background: var(--card-bg);',
+      '  border: 1px solid var(--border); border-radius: 8px; padding: 10px 14px; margin-bottom: 8px;',
+      '}',
+      '#waveHelpBox.show { display: block; }',
+      '#waveHelpBox code { font-family: ui-monospace, monospace; background: rgba(0,0,0,0.06); padding: 1px 4px; border-radius: 4px; }',
     ].join('\n');
     document.head.appendChild(style);
 
@@ -300,9 +309,23 @@
       '  <button id="wZoomInBtn" type="button" title="放大波形">🔍＋</button>',
       '  <button id="wZoomOutBtn" type="button" title="縮小波形">🔍－</button>',
       '  <button id="wZoomBlockBtn" type="button" title="聚焦目前語音段">🎯 聚焦本句</button>',
+      '  <button id="wHelpBtn" type="button" title="查看加減切點與快捷鍵操作說明">❓ 操作指南</button>',
       '  <label class="w-pick" title="手動載入 audio16k.wav / source.wav">📂 換波形音檔<input id="wAudioInput" type="file" accept="audio/*,.wav,.flac,.m4a,.mp3" hidden></label>',
       '  <span id="wMeceBadge" class="wave-badge">等待載入音訊/詞時間碼…</span>',
       '  <span id="wTimeReadout" style="font-size:12px;color:var(--muted);font-family:ui-monospace,monospace;margin-left:auto">0.000s</span>',
+      '</div>',
+      '<div id="waveHelpBox">',
+      '  <b>加減切點操作指南：</b><br>',
+      '  • <b>加切點（切除 / 保留）</b>：',
+      '    1. <b>點詞積木</b>：點擊下方詞積木（變紅切除；再點一次變綠保留）。<br>',
+      '    2. <b>拖曳邊界</b>：拖拉亮綠波形邊緣手把（預設吸附詞邊界；按住 <code>Alt/Option</code> 自由滑動 1ms 硬切）。<br>',
+      '    3. <b>波形框選</b>：上半部拖曳選取 ➔ 按 <code>X</code> 或 <code>Delete</code>（✂ 切除）／按 <code>A</code>（⚡ ABBC 覆蓋）／按 <code>K</code>（✚ 保留）。<br>',
+      '    4. <b>游標快捷鍵</b>：游標停在詞積木上按 <code>S</code> 鍵切換切除。<br>',
+      '  • <b>減切點（消除手動切點）</b>：',
+      '    1. 框選包含切點的區間 ➔ 按 <code>D</code> 鍵或點「↺ 清除覆蓋」。<br>',
+      '    2. 點擊變紅的詞積木恢復保留。<br>',
+      '    3. 快捷鍵 <code>⌘Z</code> / <code>Ctrl+Z</code> 或點「↩ 復原」。<br>',
+      '  • <b>逐字稿與播放</b>：點擊任何 Block 卡片即自動跳轉對齊；反白文字按 <code>Delete/S</code> 劃線；按 <code>Space</code> 一鍵播放剪輯範圍；按 <code>Shift+Space</code> 試聽接縫。',
       '</div>',
       '<div id="waveStage">',
       '  <canvas id="waveCanvas"></canvas>',
@@ -1079,6 +1102,14 @@
       wUndoBtn.addEventListener('click', triggerAppUndo);
     }
 
+    var wHelpBtn = document.getElementById('wHelpBtn');
+    if (wHelpBtn) {
+      wHelpBtn.addEventListener('click', function () {
+        var box = document.getElementById('waveHelpBox');
+        if (box) box.classList.toggle('show');
+      });
+    }
+
     window.addEventListener('keydown', function (ev) {
       var tag = ev.target && ev.target.tagName ? ev.target.tagName.toUpperCase() : '';
       if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || (ev.target && ev.target.isContentEditable)) {
@@ -1110,6 +1141,60 @@
       } else if ((ev.metaKey || ev.ctrlKey) && !ev.shiftKey && ev.key.toLowerCase() === 'z') {
         ev.preventDefault();
         triggerAppUndo();
+      } else if (wState.selection && wState.selection.endMs > wState.selection.startMs) {
+        // 波形框選時的加減切點快捷鍵
+        if (ev.key === 'Delete' || ev.key === 'Backspace' || ev.key === 'x' || ev.key === 'X') {
+          // 加切點: 強制切除選取範圍
+          ev.preventDefault();
+          var rCut = [wState.selection.startMs, wState.selection.endMs];
+          wState.selection = null;
+          updateSelectionBar();
+          commitOverrideEdit(Core.applyTrimOverride(wState.managedOverrides, rCut, 'cut'), rCut[0]);
+        } else if (ev.key === 'k' || ev.key === 'K' || ev.key === 'c' || ev.key === 'C') {
+          // 加切點: 強制保留選取範圍
+          ev.preventDefault();
+          var rKeep = [wState.selection.startMs, wState.selection.endMs];
+          wState.selection = null;
+          updateSelectionBar();
+          commitOverrideEdit(Core.applyTrimOverride(wState.managedOverrides, rKeep, 'keep'), rKeep[0]);
+        } else if (ev.key === 'a' || ev.key === 'A') {
+          // 加切點: 強制覆蓋 ABBC
+          ev.preventDefault();
+          var selS = wState.selection.startMs;
+          var selE = wState.selection.endMs;
+          var touched = (wState.partition ? wState.partition.allAtoms : []).filter(function (at) {
+            return at.e > selS && at.s < selE;
+          });
+          var scopeS = touched.length ? Math.min(selS, touched[0].s) : selS;
+          var scopeE = touched.length ? Math.max(selE, touched[touched.length - 1].e) : selE;
+          var nextOv = Core.forceWindowOverride(wState.managedOverrides, [scopeS, scopeE], [selS, selE]);
+          wState.selection = null;
+          updateSelectionBar();
+          commitOverrideEdit(nextOv, selS);
+        } else if (ev.key === 'd' || ev.key === 'D') {
+          // 減切點: 清除此區手動覆蓋
+          ev.preventDefault();
+          var rClr = [wState.selection.startMs, wState.selection.endMs];
+          wState.selection = null;
+          updateSelectionBar();
+          commitOverrideEdit(Core.applyTrimOverride(wState.managedOverrides, rClr, 'clear'), rClr[0]);
+        }
+      } else if (!wState.selection && (ev.key === 's' || ev.key === 'S')) {
+        // 無框選時: 在游標處加切點 (若游標落在某個詞積木上,切換該詞切除/保留)
+        if (wState.partition && wState.cursorMs !== null) {
+          var curAtom = wState.partition.allAtoms.find(function (at) {
+            return wState.cursorMs >= at.s && wState.cursorMs < at.e;
+          });
+          if (curAtom) {
+            ev.preventDefault();
+            var st = getAtomKeepStatus(curAtom.s, curAtom.e);
+            var nextMode = st.state === 'cut' ? 'keep' : 'cut';
+            commitOverrideEdit(
+              Core.applyTrimOverride(wState.managedOverrides, [curAtom.s, curAtom.e], nextMode),
+              curAtom.s,
+            );
+          }
+        }
       }
     });
 
@@ -1291,19 +1376,47 @@
     renderAtomsStrip();
     drawWaveLayer();
     drawOverlayLayer();
+
+    // 更新卡片視覺焦點高亮
+    var a = app();
+    if (a && a.state && a.state.doc) {
+      var li = Core.findLineById(a.state.doc, b.id);
+      document.querySelectorAll('#blockList .block-card.focused-block').forEach(function (c) {
+        c.classList.remove('focused-block');
+      });
+      if (li !== null) {
+        var card = document.querySelector('#blockList .block-card[data-line-index="' + li + '"]');
+        if (card) {
+          card.classList.add('focused-block');
+        }
+      }
+    }
   }
 
-  // 在每張 Block 卡片標題列加入「🌊 詞級細剪」按鈕
+  // 在每張 Block 卡片加入整卡點擊跳轉波形與「🌊 詞級細剪」按鈕
   function decorateBlockCards() {
     var a = app();
     if (!a || !a.state || !a.state.doc) return;
     var cards = document.querySelectorAll('#blockList .block-card');
     cards.forEach(function (card) {
-      var meta = card.querySelector('.block-meta');
-      if (!meta || meta.querySelector('.wave-jump-btn')) return;
       var li = Number(card.dataset.lineIndex);
       var line = a.state.doc.lines[li];
       if (!line || !line.id) return;
+
+      // 點擊卡片任何空白/文字處立即跳至該 Block (除非點 checkbox / button 或正在選取文字)
+      if (!card.dataset.waveClickBound) {
+        card.dataset.waveClickBound = '1';
+        card.style.cursor = 'pointer';
+        card.addEventListener('click', function (ev) {
+          if (ev.target.closest('input, button, label, select, a')) return;
+          var sel = window.getSelection();
+          if (sel && sel.toString().trim().length > 0) return;
+          focusBlockInWaveform(line.id);
+        });
+      }
+
+      var meta = card.querySelector('.block-meta');
+      if (!meta || meta.querySelector('.wave-jump-btn')) return;
       var btn = document.createElement('button');
       btn.type = 'button';
       btn.className = 'wave-jump-btn';

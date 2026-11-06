@@ -344,6 +344,15 @@
   .open-row button, .open-row .pick { font-size:14px; padding:8px 12px; border-radius:8px; cursor:pointer;
     border:1px solid var(--border); background:var(--card-bg); color:var(--fg); }
   .open-row .ok { border-color:var(--accent); color:var(--accent); }
+  .strike-pill {
+    position: absolute; z-index: 1000; background: #ff4757; color: #fff;
+    border: none; border-radius: 6px; padding: 4px 10px; font-size: 13px; font-weight: 600;
+    cursor: pointer; box-shadow: 0 4px 12px rgba(0,0,0,0.3); transition: transform 0.1s, background 0.1s;
+  }
+  .strike-pill:hover { background: #ff6b81; transform: scale(1.04); }
+  .block-card { cursor: pointer; transition: border-color 0.15s, box-shadow 0.15s; }
+  .block-card:hover { border-color: var(--accent); }
+  .block-card.focused-block { border-color: #2ed573 !important; box-shadow: 0 0 0 2px rgba(46, 213, 115, 0.35); }
 </style>
 
 <title>Cutplan 本機編輯器</title>
@@ -1028,15 +1037,90 @@
     }
   }
 
-  document.addEventListener('selectionchange', function () {
-    scheduleSettle(SETTLE_DEBOUNCE_MS);
+  // ── 本機版(local.html): 取消選取過幾秒自動畫線,改為主動快捷鍵或浮鈕確認 ──
+  var strikePill = document.createElement('button');
+  strikePill.type = 'button';
+  strikePill.id = 'strikePill';
+  strikePill.className = 'strike-pill';
+  strikePill.textContent = '✂ 劃除 (Del/S)';
+  strikePill.title = '對反白選取的文字套用刪除線 (快捷鍵: Delete / Backspace / S)';
+  strikePill.style.display = 'none';
+  document.body.appendChild(strikePill);
+
+  function hideStrikePill() {
+    strikePill.style.display = 'none';
+  }
+
+  function updateStrikePill() {
+    var picked = resolveSelection();
+    if (!picked) {
+      hideStrikePill();
+      return;
+    }
+    var sel = window.getSelection();
+    if (!sel || sel.rangeCount === 0 || sel.isCollapsed) {
+      hideStrikePill();
+      return;
+    }
+    var range = sel.getRangeAt(0);
+    var rects = range.getClientRects();
+    var rect = rects.length ? rects[0] : range.getBoundingClientRect();
+    if (!rect || (rect.width === 0 && rect.height === 0)) {
+      hideStrikePill();
+      return;
+    }
+    strikePill.style.display = 'block';
+    var w = strikePill.offsetWidth || 90;
+    var h = strikePill.offsetHeight || 26;
+    var top = rect.top + window.scrollY - h - 6;
+    var left = rect.left + window.scrollX;
+    if (top < window.scrollY + 4) top = rect.bottom + window.scrollY + 6;
+    strikePill.style.top = top + 'px';
+    strikePill.style.left = Math.max(8, left) + 'px';
+  }
+
+  strikePill.addEventListener('mousedown', function (ev) {
+    ev.preventDefault(); // 防止選取範圍失去焦點
   });
-  document.addEventListener('pointerdown', cancelPendingSettle);
-  document.addEventListener('touchstart', cancelPendingSettle);
-  document.addEventListener('mousedown', cancelPendingSettle);
-  document.addEventListener('pointerup', function () { scheduleSettle(SETTLE_AFTER_POINTER_MS); });
-  document.addEventListener('touchend', function () { scheduleSettle(SETTLE_AFTER_POINTER_MS); });
-  document.addEventListener('mouseup', function () { scheduleSettle(SETTLE_AFTER_POINTER_MS); });
+  strikePill.addEventListener('click', function (ev) {
+    ev.preventDefault();
+    hideStrikePill();
+    trySettle();
+  });
+
+  document.addEventListener('selectionchange', function () {
+    cancelPendingSettle();
+  });
+  document.addEventListener('pointerup', function () {
+    cancelPendingSettle();
+    setTimeout(updateStrikePill, 40);
+  });
+  document.addEventListener('mouseup', function () {
+    cancelPendingSettle();
+    setTimeout(updateStrikePill, 40);
+  });
+  document.addEventListener('mousedown', function (ev) {
+    if (ev.target !== strikePill) hideStrikePill();
+  });
+
+  // 鍵盤快捷鍵: 反白文字時按 Delete / Backspace / S / X 劃除
+  window.addEventListener('keydown', function (ev) {
+    var tag = ev.target && ev.target.tagName ? ev.target.tagName.toUpperCase() : '';
+    if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || (ev.target && ev.target.isContentEditable)) {
+      return;
+    }
+    if (ev.key === 'Delete' || ev.key === 'Backspace' || ev.key === 's' || ev.key === 'S' || ev.key === 'x' || ev.key === 'X') {
+      var sel = window.getSelection();
+      if (sel && !sel.isCollapsed && sel.toString().trim().length > 0) {
+        var picked = resolveSelection();
+        if (picked) {
+          ev.preventDefault();
+          hideStrikePill();
+          trySettle();
+        }
+      }
+    }
+  });
 
   // ── 復原按鈕:浮動貼在剛套用那段選取範圍的右上角 ─────────────────────
   //
