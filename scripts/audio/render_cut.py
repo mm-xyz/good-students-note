@@ -453,7 +453,7 @@ def pad_seams(segments: list[dict], words: list[dict] | None, pad: float,
 def apply_review_edges(segments: list[dict], cuts: list[list[float]],
                        keeps: list[list[float]], tmap: list[tuple[float, float, float]],
                        default_tempo: float, titem_pool: list[dict] | None = None,
-                       min_frag: float = 0.12) -> tuple[list[dict], list[int]]:
+                       min_frag: float = 0.03) -> tuple[list[dict], list[int]]:
     """人審邊界最後一次蓋章(#1181):`## ✂` 再剪一次、`## ✚` 強制保留,✚ 贏 ✂。
 
     unit 迴圈裡的 ✂ 擋不住後面的 seam-pad(跳接處往外補原聲),Audacity 上拉到

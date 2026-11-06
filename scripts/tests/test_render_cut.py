@@ -859,6 +859,28 @@ class TestReviewEdges(unittest.TestCase):
                                        default_tempo=1.0)
         self.assertEqual(out, segs); self.assertEqual(imap, [0, 1])
 
+    def test_abbc_half_word_trim_and_sub_120ms_fragment_preserved(self):
+        """#1201 詞級波形編輯器:AA[10.0,10.4]/BB[10.4,10.9]/CC[10.9,11.3] 硬切成
+        ABBC[10.21,11.05],或單詞裁剩 50ms(<0.12s)時,apply_review_edges 完整保留。"""
+        segs = [self._sp(9.92, 10.40), self._sp(10.90, 11.38)]
+        out, _ = apply_review_edges(
+            segs,
+            cuts=[[9.92, 10.21], [11.05, 11.38]],
+            keeps=[[10.21, 11.05]],
+            tmap=[],
+            default_tempo=1.0,
+        )
+        self.assertEqual(self._ab(out), [(10.21, 11.05)])
+        # 單段裁切後剩 50ms (0.05s >= min_frag 0.03s) 也不被吃掉
+        short_out, _ = apply_review_edges(
+            [self._sp(1.0, 1.4)],
+            cuts=[[1.0, 1.35]],
+            keeps=[],
+            tmap=[],
+            default_tempo=1.0,
+        )
+        self.assertEqual(self._ab(short_out), [(1.35, 1.4)])
+
 
 class TestParseKeep(unittest.TestCase):
     def test_keep_line_parsed_not_chapter(self):

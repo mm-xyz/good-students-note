@@ -31,6 +31,11 @@ const {
   atomizeBlock,
   buildTrackPartition,
   computeBaseIntervalsFromDoc,
+  buildPeaks,
+  queryPeaksMinMax,
+  queryPeaksRms,
+  findValleySeamMs,
+  trimDragSnap,
 } = require('../cutplan-core.js');
 
 // ── 1. 全軌與詞級 100% MECE 切分測試 ───────────────────────────────────────
@@ -248,4 +253,88 @@ test('computeBaseIntervalsFromDoc + timelineStatus: 即時反映勾選、刪除�
     blocks: { B0001: null },
   }));
   assert.equal(timelineStatus(docNoStrike.lines[0], tl, { cut: [[0, 1000]], keep: [] }).mismatch, false);
+});
+
+// ── 4. SoundCraft Peaks 金字塔 + ValleySeam + Smart Trim Snap 測試 (#1219 M2) ──
+
+test('SoundCraft Peaks: 多解析度 queryPeaksMinMax 與 queryPeaksRms 與暴力掃描逐 sample 完全一致', () => {
+  const N = 4096;
+  const samples = new Float32Array(N);
+  for (let i = 0; i < N; i++) {
+    samples[i] = Math.sin(i * 0.03) * 0.8 + Math.cos(i * 0.17) * 0.15;
+  }
+  const peaks = buildPeaks(samples);
+  assert.equal(peaks.len, N);
+  assert.ok(peaks.levels.length >= 4);
+
+  const ranges = [
+    [0, N],
+    [13, 29],       // 同一 block 內
+    [17, 311],      // 跨 1 層
+    [5, 3891],      // 跨多層金字塔
+  ];
+  for (const [s, e] of ranges) {
+    let bruteLo = Infinity;
+    let bruteHi = -Infinity;
+    let bruteSq = 0;
+    for (let i = s; i < e; i++) {
+      const v = samples[i];
+      if (v < bruteLo) bruteLo = v;
+      if (v > bruteHi) bruteHi = v;
+      bruteSq += v * v;
+    }
+    const bruteRms = Math.sqrt(bruteSq / (e - s));
+    const [lo, hi] = queryPeaksMinMax(peaks, samples, s, e);
+    const rms = queryPeaksRms(peaks, samples, s, e);
+    assert.ok(Math.abs(lo - bruteLo) < 1e-6, `lo [${s},${e}): ${lo} vs ${bruteLo}`);
+    assert.ok(Math.abs(hi - bruteHi) < 1e-6, `hi [${s},${e}): ${hi} vs ${bruteHi}`);
+    assert.ok(Math.abs(rms - bruteRms) < 1e-6, `rms [${s},${e}): ${rms} vs ${bruteRms}`);
+  }
+});
+
+test('findValleySeamMs: 在兩詞交界區間內準確找到能量谷底', () => {
+  const sr = 16000;
+  // 1 秒音訊,在 480ms~520ms 之間做一個明顯的靜音谷底 (500ms 處振幅接近 0)
+  const samples = new Float32Array(sr);
+  for (let i = 0; i < sr; i++) {
+    const ms = (i / sr) * 1000;
+    const env = Math.min(1, Math.abs(ms - 500) / 50);
+    samples[i] = Math.sin(i * 0.2) * env;
+  }
+  const peaks = buildPeaks(samples);
+  const seam = findValleySeamMs(peaks, samples, sr, 420, 580, 5);
+  assert.ok(Math.abs(seam - 500) <= 5, `谷底應落在 500ms 附近,拿到 ${seam}ms`);
+});
+
+test('trimDragSnap: 預設硬吸附詞邊界、按住 Alt/Cmd 反轉為 1ms 自由滑動、原點 6px 磁吸防呆', () => {
+  const gesture = {
+    kind: 'trimStart',
+    originMs: 10000,
+    regionEndMs: 11300,
+    snapPointsMs: [10000, 10400, 10900, 11300],
+  };
+
+  // 1) 未按修飾鍵:拖到 10213ms → 吸附到最近詞邊界 10400ms (或 10000ms,10213 距 10400 為 187 < 213)
+  assert.equal(
+    trimDragSnap(gesture, 10213, { snapEnabled: true, modifierHeld: false, pxPerMs: 0.2 }),
+    10400,
+  );
+
+  // 2) 按住 Alt/Cmd 修飾鍵 (modifierHeld=true): 自由滑動,保留精確 10213ms (切出 ABBC!)
+  assert.equal(
+    trimDragSnap(gesture, 10213, { snapEnabled: true, modifierHeld: true, pxPerMs: 0.2 }),
+    10213,
+  );
+
+  // 3) 距離原點 <= 6px (pxPerMs=0.2 時 20ms = 4px <= 6px) → 自動磁吸回原點 10000ms
+  assert.equal(
+    trimDragSnap(gesture, 10020, { snapEnabled: true, modifierHeld: true, pxPerMs: 0.2 }),
+    10000,
+  );
+
+  // 4) 超過 regionEndMs - minKeepMs (11300 - 30 = 11270) 時自動 clamp
+  assert.equal(
+    trimDragSnap(gesture, 11295, { snapEnabled: true, modifierHeld: true, minKeepMs: 30 }),
+    11270,
+  );
 });

@@ -1340,6 +1340,232 @@ function computeBaseIntervalsFromDoc(doc, partition, options = {}) {
   return normalizeIntervals(kept);
 }
 
+// ── SoundCraft 移植:Peaks 多解析度金字塔 + 谷底接縫 + Smart Trim 吸附 ─────────
+//
+// 參考 storytold/soundcraft crates/audio-io/src/peaks.rs 與 crates/ui-egui/src/edit_window/drag.rs:
+//   - Level 0 每 PEAKS_BLOCK=32 samples 聚合一次 min / max / squares
+//   - Level k 每 PEAKS_FANOUT=4 個下層 block 聚合一次
+//   - 任意縮放倍率的像素區間查詢 [startSample, endSample) 皆為 O(log N)
+
+const PEAKS_BLOCK = 32;
+const PEAKS_FANOUT = 4;
+
+function buildPeaks(samples) {
+  const len = samples ? samples.length : 0;
+  let n = Math.ceil(len / PEAKS_BLOCK);
+  const levels = [];
+  if (n === 0) {
+    return { len: 0, levels: [] };
+  }
+  const mn0 = new Float32Array(n);
+  const mx0 = new Float32Array(n);
+  const sq0 = new Float64Array(n);
+  for (let b = 0; b < n; b++) {
+    let lo = Infinity;
+    let hi = -Infinity;
+    let s2 = 0;
+    const end = Math.min(len, (b + 1) * PEAKS_BLOCK);
+    for (let i = b * PEAKS_BLOCK; i < end; i++) {
+      const v = samples[i];
+      if (v < lo) lo = v;
+      if (v > hi) hi = v;
+      if (v === v) s2 += v * v;
+    }
+    mn0[b] = lo <= hi ? lo : 0;
+    mx0[b] = lo <= hi ? hi : 0;
+    sq0[b] = s2;
+  }
+  levels.push({ mn: mn0, mx: mx0, sq: sq0 });
+
+  while (n > 1) {
+    const m = Math.ceil(n / PEAKS_FANOUT);
+    const prev = levels[levels.length - 1];
+    const mn = new Float32Array(m);
+    const mx = new Float32Array(m);
+    const sq = new Float64Array(m);
+    for (let b = 0; b < m; b++) {
+      let lo = Infinity;
+      let hi = -Infinity;
+      let s2 = 0;
+      const end = Math.min(n, (b + 1) * PEAKS_FANOUT);
+      for (let i = b * PEAKS_FANOUT; i < end; i++) {
+        if (prev.mn[i] < lo) lo = prev.mn[i];
+        if (prev.mx[i] > hi) hi = prev.mx[i];
+        s2 += prev.sq[i];
+      }
+      mn[b] = lo <= hi ? lo : 0;
+      mx[b] = lo <= hi ? hi : 0;
+      sq[b] = s2;
+    }
+    levels.push({ mn, mx, sq });
+    n = m;
+  }
+  return { len, levels };
+}
+
+function queryPeaksMinMax(peaks, samples, startSample, endSample) {
+  if (!peaks || !samples || !peaks.len) return [0, 0];
+  const s = Math.max(0, Math.floor(startSample));
+  const e = Math.min(peaks.len, samples.length, Math.ceil(endSample));
+  if (s >= e) return [0, 0];
+
+  let lo = Infinity;
+  let hi = -Infinity;
+  const rawRange = (a, b) => {
+    for (let i = a; i < b; i++) {
+      const v = samples[i];
+      if (v < lo) lo = v;
+      if (v > hi) hi = v;
+    }
+  };
+
+  const first = Math.ceil(s / PEAKS_BLOCK);
+  const last = Math.floor(e / PEAKS_BLOCK);
+  if (first >= last) {
+    rawRange(s, e);
+  } else {
+    rawRange(s, first * PEAKS_BLOCK);
+    rawRange(last * PEAKS_BLOCK, e);
+    let l = first;
+    let h = last;
+    for (let lvl = 0; lvl < peaks.levels.length; lvl++) {
+      const { mn, mx } = peaks.levels[lvl];
+      const addBlock = (idx) => {
+        if (mn[idx] < lo) lo = mn[idx];
+        if (mx[idx] > hi) hi = mx[idx];
+      };
+      if (lvl + 1 === peaks.levels.length || h - l < 2 * PEAKS_FANOUT) {
+        for (let i = l; i < h; i++) addBlock(i);
+        break;
+      }
+      while (l % PEAKS_FANOUT !== 0) addBlock(l++);
+      while (h % PEAKS_FANOUT !== 0) addBlock(--h);
+      l = Math.floor(l / PEAKS_FANOUT);
+      h = Math.floor(h / PEAKS_FANOUT);
+    }
+  }
+  return lo > hi ? [0, 0] : [lo, hi];
+}
+
+function queryPeaksRms(peaks, samples, startSample, endSample) {
+  if (!peaks || !samples || !peaks.len) return 0;
+  const s = Math.max(0, Math.floor(startSample));
+  const e = Math.min(peaks.len, samples.length, Math.ceil(endSample));
+  if (s >= e) return 0;
+
+  let sumSq = 0;
+  const rawRange = (a, b) => {
+    for (let i = a; i < b; i++) {
+      const v = samples[i];
+      if (v === v) sumSq += v * v;
+    }
+  };
+
+  const first = Math.ceil(s / PEAKS_BLOCK);
+  const last = Math.floor(e / PEAKS_BLOCK);
+  if (first >= last) {
+    rawRange(s, e);
+  } else {
+    rawRange(s, first * PEAKS_BLOCK);
+    rawRange(last * PEAKS_BLOCK, e);
+    let l = first;
+    let h = last;
+    for (let lvl = 0; lvl < peaks.levels.length; lvl++) {
+      const { sq } = peaks.levels[lvl];
+      if (lvl + 1 === peaks.levels.length || h - l < 2 * PEAKS_FANOUT) {
+        for (let i = l; i < h; i++) sumSq += sq[i];
+        break;
+      }
+      while (l % PEAKS_FANOUT !== 0) sumSq += sq[l++];
+      while (h % PEAKS_FANOUT !== 0) sumSq += sq[--h];
+      l = Math.floor(l / PEAKS_FANOUT);
+      h = Math.floor(h / PEAKS_FANOUT);
+    }
+  }
+  return Math.sqrt(sumSq / (e - s));
+}
+
+// 在 [loMs, hiMs] 內以 stepMs=5ms 滑動,利用 Peaks 尋找 RMS 能量最低的谷底作為切點
+function findValleySeamMs(peaks, samples, sampleRate, loMs, hiMs, stepMs = 5) {
+  const lo = Math.round(Number(loMs));
+  const hi = Math.round(Number(hiMs));
+  if (!(hi > lo)) return lo;
+  const mid = Math.round((lo + hi) / 2);
+  if (!peaks || !samples || !sampleRate || hi - lo < stepMs) return mid;
+
+  let bestMs = mid;
+  let bestRms = Infinity;
+  let bestDist = Infinity;
+  const winHalf = Math.max(2, Math.round(stepMs / 2));
+
+  for (let t = lo; t <= hi; t += stepMs) {
+    const s0 = Math.round(((t - winHalf) / 1000) * sampleRate);
+    const s1 = Math.round(((t + winHalf) / 1000) * sampleRate);
+    const rms = queryPeaksRms(peaks, samples, s0, s1);
+    const dist = Math.abs(t - mid);
+    if (rms < bestRms - 1e-9 || (Math.abs(rms - bestRms) <= 1e-9 && dist < bestDist)) {
+      bestRms = rms;
+      bestMs = t;
+      bestDist = dist;
+    }
+  }
+  return Math.max(lo, Math.min(hi, bestMs));
+}
+
+// 二分搜尋最近吸附點(snapPointsMs 需已升冪排序)
+function findNearestSnapMs(snapPointsMs, targetMs) {
+  if (!snapPointsMs || !snapPointsMs.length) return Math.round(targetMs);
+  let lo = 0;
+  let hi = snapPointsMs.length - 1;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (snapPointsMs[mid] < targetMs) lo = mid + 1;
+    else hi = mid;
+  }
+  let best = snapPointsMs[lo];
+  if (lo > 0 && Math.abs(snapPointsMs[lo - 1] - targetMs) <= Math.abs(best - targetMs)) {
+    best = snapPointsMs[lo - 1];
+  }
+  return best;
+}
+
+// 移植自 SoundCraft drag.rs 的 trim_drag_snap:
+//   - 預設硬吸附 words.json 詞邊界 (snapPointsMs)
+//   - 按住修飾鍵 (Alt/Option 或 Cmd/Ctrl) 反轉為 1ms 自由滑動 (Slip Mode)
+//   - 距離原點 <= originSnapPx (預設 6px) 自動磁吸回原點防呆
+//   - 最小保留長度 minKeepMs (預設 30ms) clamp
+function trimDragSnap(gesture, atMs, options = {}) {
+  const snapEnabled = options.snapEnabled !== false;
+  const modifierHeld = !!options.modifierHeld;
+  const snapOn = snapEnabled !== modifierHeld;
+  const minKeepMs = options.minKeepMs != null ? options.minKeepMs : 30;
+  const durMs = options.durMs != null ? options.durMs : 86400000;
+  const pxPerMs = options.pxPerMs != null ? options.pxPerMs : 0;
+  const originSnapPx = options.originSnapPx != null ? options.originSnapPx : 6;
+
+  let to = snapOn
+    ? findNearestSnapMs(gesture.snapPointsMs, atMs)
+    : Math.round(atMs);
+
+  if (gesture.originMs != null && pxPerMs > 0) {
+    if (Math.abs(to - gesture.originMs) * pxPerMs <= originSnapPx) {
+      to = gesture.originMs;
+    }
+  }
+
+  if (gesture.kind === 'trimStart') {
+    const lo = gesture.minMs != null ? gesture.minMs : 0;
+    const hi = (gesture.regionEndMs != null ? gesture.regionEndMs : durMs) - minKeepMs;
+    return Math.max(lo, Math.min(hi, to));
+  }
+  if (gesture.kind === 'trimEnd') {
+    const lo = (gesture.regionStartMs != null ? gesture.regionStartMs : 0) + minKeepMs;
+    const hi = gesture.maxMs != null ? gesture.maxMs : durMs;
+    return Math.max(lo, Math.min(hi, to));
+  }
+  return Math.max(0, Math.min(durMs, to));
+}
+
 // ── 唯讀護欄(伺服端第二道防線;Code.gs 的 saveCutplan 呼叫它)────────
 //
 // 逐行比對 oldContent → newContent,回傳第一個「超出允許編輯範圍」的說明字串,
@@ -1654,6 +1880,14 @@ const api = {
   atomizeBlock,
   buildTrackPartition,
   computeBaseIntervalsFromDoc,
+  PEAKS_BLOCK,
+  PEAKS_FANOUT,
+  buildPeaks,
+  queryPeaksMinMax,
+  queryPeaksRms,
+  findValleySeamMs,
+  findNearestSnapMs,
+  trimDragSnap,
 };
 
 if (typeof module !== 'undefined' && module.exports) {
