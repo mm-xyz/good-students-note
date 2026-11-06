@@ -2,6 +2,16 @@
 
 > 剪輯線（feat/podcast-cut）的功能史。決策的「為什麼」住 `docs/adr/`，這裡只記「什麼時候做了什麼」。
 
+## 2026-11-06
+
+- **詞級波形編輯器（#1201，ADR-2026-11-06-wave-editor-mece-override）**：
+  在 `scripts/cutplan-editor/local.html` 整合詞級波形編輯面板與一鍵剪輯範圍預覽，逐步取代 Audacity 外置細剪流程。
+  - **SoundCraft 架構移植**：移植 `storytold/soundcraft` 的 Peaks 多解析度金字塔（`PEAKS_BLOCK=32, PEAKS_FANOUT=4`）至 `cutplan-core.js`，任意縮放倍率查詢波形與 RMS 能量谷底（`findValleySeamMs`）皆為 $O(\log N)$；移植 Smart Tool 手把狀態機，支援 TrimStart/TrimEnd 拖拉、Selector 框選與 Grabber 積木切換。
+  - **全軌與詞級 100% MECE（Mutually Exclusive, Collectively Exhaustive）**：切分與標籤分離，全軌時間軸由整數毫秒半開區間 `[s, e)` 窮盡劃分（消除 G/P 重疊與 319 處短停頓空隙）；語音區塊展開為 `B0001-1/-2/-3` 詞級子積木，載入時由 `assertMECE` 嚴格把關。
+  - **強制覆蓋最高優先級（`AA/BB/CC` 硬切成 `ABBC`）**：三層區間代數 $\text{Final} = (\text{Base} \setminus \text{Cut}) \cup \text{Keep}$，手動精剪自動寫入受控 `## ✂` / `## ✚ <start>-<end> wave`。`render_cut.py` 的 `apply_review_edges` 在所有自動規則之後套用且 `min_frag` 下調至 0.03s（30ms），確保半詞精剪邊界 100% 不被抹除。
+  - **Web Audio API `CutPlayer` 一鍵剪輯範圍播放**：依即時 Final 區間排程播放並自動跳過切除段，帶 4ms 微淡入淡出防切點爆音，播放游標同步跨切點跳躍；支援 Space 鍵隨時播放/暫停、Shift+Space 切點前後 ±1.5s 試聽。
+  - **`build-local.js` 自動載入升級**：開資料夾時自動載入 `audio16k.wav`（或 `source.wav`）、`words.json`、`cutplan.json`、`cut_map.json`，每張 block 卡片加入「🌊 詞級細剪」按鈕一鍵聚焦。
+
 ## 2026-11-03
 
 - **Audacity 細剪（#1181，ADR-2026-11-03-audacity-fine-trim）**：新增
