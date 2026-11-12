@@ -21,6 +21,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 from common import (SESSIONS_DIR, dhash, ffprobe_duration, frames_workdir,
                     hamming, load_config, save_manifest, slugify)
+sys.path.insert(0, str(Path(__file__).parent.parent / "audio"))
+from session_paths import work_dir  # noqa: E402
 
 VIDEO_EXTS = (".mp4", ".mov", ".mkv", ".webm", ".m4v", ".avi")
 
@@ -31,9 +33,13 @@ def resolve_session(session: Path) -> tuple[Path, Path | None, str]:
                   if p.suffix.lower() in VIDEO_EXTS), None)
     if not video:
         sys.exit(f"{session} 沒有影片（source.mp4/mov/…）— frames 線只吃影片")
-    srt = next((session / n for n in
+    # session.py keeps pipeline workfiles (including SRT) in _asset/;
+    # work_dir() retains the fallback for older sessions whose files are still
+    # at the session root.
+    asset_dir = work_dir(session)
+    srt = next((asset_dir / n for n in
                 ("transcript.speakers.srt", "cleaned.srt", "transcript.srt")
-                if (session / n).exists()), None)
+                if (asset_dir / n).exists()), None)
     return video.resolve(), srt, session.name
 
 
@@ -55,12 +61,25 @@ def run_scene_detect(video: Path, frames_dir: Path, threshold: float,
         ["ffmpeg", "-hide_banner", "-i", str(video),
          "-vf", vf,
          "-fps_mode", "vfr", "-q:v", "3", pattern],
-        capture_output=True, text=True,
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
     )
-    if proc.returncode != 0:
-        sys.exit(f"ffmpeg 失敗：\n{proc.stderr[-2000:]}")
     times = [float(m) for m in re.findall(r"pts_time:([0-9.]+)", proc.stderr)]
     raws = sorted(frames_dir.glob("raw_*.jpg"))
+    if proc.returncode != 0:
+        # ffmpeg 8 exits non-zero when select=scene emits no frames.  That is
+        # a valid result for a static-slide video; the opening-frame fallback
+        # below still gives the VLM something to inspect.  Keep real decode /
+        # encode failures fatal.
+        no_selected_frames = (
+            not raws
+            and "No filtered frames" in proc.stderr
+            and "Nothing was written into output file" in proc.stderr
+        )
+        if no_selected_frames:
+            print("⚠️ 場景偵測沒有候選幀，改用開場幀", file=sys.stderr)
+            times = []
+        else:
+            sys.exit(f"ffmpeg 失敗：\n{proc.stderr[-2000:]}")
     if len(times) != len(raws):
         print(f"⚠️ showinfo 時間戳 {len(times)} 筆 vs 幀 {len(raws)} 張，取 min 對齊")
     pairs = list(zip(times, raws))
@@ -71,7 +90,7 @@ def run_scene_detect(video: Path, frames_dir: Path, threshold: float,
         x0, y0, x1, y1 = region
         opening_cmd += ["-vf", f"crop=iw*{x1 - x0:.4f}:ih*{y1 - y0:.4f}:iw*{x0:.4f}:ih*{y0:.4f}"]
     subprocess.run(opening_cmd + ["-frames:v", "1", "-q:v", "3", str(opening)],
-                   capture_output=True, text=True)
+                   capture_output=True, text=True, encoding="utf-8", errors="replace")
     if opening.exists():
         pairs.insert(0, (1.0, opening))
     return pairs
