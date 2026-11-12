@@ -1,6 +1,6 @@
 # studio MCP — 架構與分期計畫（卡 #1267，併 #1175＋ai-reels）
 
-> 2026-11-12 · 狀態：**提案，等 MM 拍板 §11 剩下的三件事**（第 1、2、6、7 項已定）。本檔只有架構與規劃，沒有實作。
+> 2026-11-12 · 狀態：**提案，等 MM 拍板 §11 最後一件事**（第 3 項；其餘已定）。本檔只有架構與規劃，沒有實作。
 > 範圍（MM 2026-11-12）：#1267 ＋ #1175 ＋ ai-reels 的 HyperFrames 短影音線，整個重構。
 > 分工：Fable 做架構與規劃；實作由 worker 照 §8 工單做。
 > 2026-11-12 追加（MM）：skill 整組重新設計，跟 MCP 一起翻修，見 §13。
@@ -14,7 +14,7 @@
 3a. **先搬家，後改裝**：搬的那一期只改路徑，不改行為，以既有測試全過為準。加 `--json`、做工具都排在搬完之後。
 4. **MCP server 不匯入任何管線程式**：一律開子行程，用該產線自己的直譯器跑。
 5. **長工作走 job**：轉錄、初剪、出片先回 job id，再查狀態。
-6. **會傷到 MM 人審的寫入預設關閉**：推回 Drive 要明示；兩份 cutplan 不同時，要明示用哪一份。
+6. **出片不碰雲端**：`cut_render` 只寫本地。推到雲端是另一個工具，裡面就是 rclone 加目的路徑。兩份 cutplan 不同時，要明示用哪一份。
 7. **skill 從 8 顆收成 4 顆**（§13）：skill 只寫何時用、順序、判斷點；路徑與參數全部交給工具。每條產線的 skill 跟該線的工具同一期做。
 8. 分 8 期。P1 搬家，P2 骨架做完就能在 Claude Code 裡找 session，P3 做完剪輯線可用。
 
@@ -59,7 +59,7 @@
 | CLAUDE.md 原則 6 | 確定性工作用工具，LLM 只做判斷 | marker 的驗字數、刪 marker、改 metadata 做成工具 |
 | ADR 0001 | render 真相源是 session 的 cutplan；人審介面是 Drive 副本 | 兩份不同時不得自動挑 |
 | ADR-2026-09-11-session-paths-single-source | 管線執行中不得建立 `_asset/` | **job 紀錄不放 session 裡**（見 §4.4） |
-| 記憶：審稿中勿寫 Drive cutplan | 寫入 Drive 會讓 MM 開著的編輯器整份存檔被拒 | 推回 Drive 預設關閉 |
+| 記憶：審稿中勿寫 Drive cutplan | 寫入 Drive 會讓 MM 開著的編輯器整份存檔被拒 | 出片不寫雲端；覆蓋雲端 cutplan 要另外明示 |
 | podcast-cut skill | AI 介入剪輯決策必加 `--ai` | `ai` 是必填參數，沒有預設值 |
 | 卡 #1267 邊界 | `finalize --apply` 不開放 | 只開 dry-run |
 | run_all.sh | 不退回系統 python | 轉接頭找不到 venv 就報錯，不換直譯器 |
@@ -131,7 +131,7 @@ studio-mcp/                     新 repo，私有（Forgejo），不對外發布
 | :--- | :--- |
 | `NOT_FOUND`／`AMBIGUOUS` | 找不到 session；一個查詢對到多個（列出候選，不自動挑） |
 | `ENV_MISSING` | 缺 venv、ffmpeg、node、hyperframes |
-| `DRIVE_TCC` | Drive 路徑回 Operation not permitted。提示改用 orca terminal 開 Claude |
+| `REMOTE_FAILED` | rclone 回非零：遠端沒設定、授權過期、路徑不存在。附 rclone 的錯誤原文 |
 | `CUTPLAN_DIVERGED` | Drive 與 session 的 cutplan 不同，呼叫時沒指定用哪一份 |
 | `REVIEW_PENDING` | `.cutplan_pending.json` 還在，人審或提案沒結束 |
 | `JOB_BUSY` | 已有重工作在跑 |
@@ -181,7 +181,7 @@ claude mcp add --scope user studio -- <studio-mcp>/.venv-studio/bin/python -m st
 
 搬家那一期（P1）的完成定義只有一條：**新 repo 裡 `scripts/tests/run_all.sh` 與 cutplan-editor 的 node 測試全過，數量與舊 repo 相同；對 adopt 過來的 EP22 跑 `cut.py --check`，輸出與在舊 repo 跑的逐行相同。** 這一期不加任何新功能。
 
-## 5. 工具清單（18 個）
+## 5. 工具清單（19 個）
 
 「寫入」欄：無＝只讀；本地＝只寫 session 或工作目錄；Drive＝會寫 Google Drive。
 
@@ -189,7 +189,7 @@ claude mcp add --scope user studio -- <studio-mcp>/.venv-studio/bin/python -m st
 
 | 工具 | 做什麼 | 型態 | 寫入 |
 | :--- | :--- | :--- | :--- |
-| `doctor` | 檢查三個直譯器、ffmpeg、node、hyperframes、Drive 可讀、llm-node 可連 | 同步 | 無 |
+| `doctor` | 檢查三個直譯器、ffmpeg、node、hyperframes、rclone 遠端可列目錄、llm-node 可連 | 同步 | 無 |
 | `session_find(query, line?)` | 用 EP 編號、slug 片段、日期找 session。回路徑、產線、Drive 目錄、最新版本 | 同步 | 無 |
 | `session_status(session)` | 各階段產物在不在、待辦 marker、版本清單、cutplan 是否漂移、建議下一步 | 同步 | 無 |
 | `job_status(job_id, wait_s)` | 見 §4.4 | 同步 | 無 |
@@ -207,13 +207,14 @@ claude mcp add --scope user studio -- <studio-mcp>/.venv-studio/bin/python -m st
 
 `ingest` 一律以 marker 模式執行（轉接頭明帶 engine，不靠環境變數偵測）。出版（`publish_goodedunote.sh`，會部署 Firebase）不做成工具。
 
-### 剪輯線（6）
+### 剪輯線（7）
 
 | 工具 | 包哪支 | 型態 | 寫入 |
 | :--- | :--- | :--- | :--- |
 | `precut(session, line, num_speakers)` | `precut.py` | job | 本地 |
 | `cut_check(session, plan?)` | `cut.py --check --json`：cutplan 兩份的語意差異＋dry-run 摘要 | 同步 | 無 |
-| `cut_render(session, ai, use?, push=false, plan?)` | `cut.py --yes --json`。`ai` 必填。兩份不同時 `use` 必填（`drive`／`session`） | job | 本地；`push=true` 才寫 Drive |
+| `cut_render(session, ai, use?, plan?)` | `cut.py --yes --json`。`ai` 必填。兩份不同時 `use` 必填（`remote`／`session`）。**不寫雲端** | job | 本地 |
+| `publish_version(session, version?, sync_cutplan=false)` | 新增 `scripts/audio/remote.py`：`rclone copy <版本目錄> <遠端>:<集數資料夾>/<版本目錄>`。預設推最新一版。`sync_cutplan=true` 才把工作版 cutplan 覆蓋到集數根 | job | 雲端 |
 | `loudness_report(session, version?)` | 新增 `scripts/audio/loudness.py`：人聲平均 LUFS、三個間奏窗 LUFS、是否在 -17±2 | 同步 | 無 |
 | `diff_clips(session, old?)` | `diff_clips.py` | 同步 | 本地 |
 | `audacity(session, action, aup?)` | `audacity_labels.py`。action：`export`／`apply_preview`／`apply`／`inject` | 同步 | 本地（`inject` 改 .aup4） |
@@ -233,11 +234,11 @@ claude mcp add --scope user studio -- <studio-mcp>/.venv-studio/bin/python -m st
 
 | 風險 | 閘 |
 | :--- | :--- |
-| 推回 Drive 撞上 MM 開著的編輯器 | `push` 預設 false。`push=true` 時工具說明寫明：先問 MM 編輯器是否已關。雜湊相同不算確認 |
+| 推回雲端撞上 MM 開著的編輯器 | 推版本目錄是新增資料夾，不會撞。會撞的只有覆蓋集數根的 cutplan，所以 `sync_cutplan` 預設 false；設 true 前先問 MM 編輯器是否已關。雜湊相同不算確認 |
 | 自動選錯 cutplan | 有 `--json` 時，兩份不同且沒帶 `--use` 就回 `CUTPLAN_DIVERGED` 並附語意差異。不再依修改時間挑 |
 | 跳過人審 | `.cutplan_pending.json` 存在時 `cut_render` 回 `REVIEW_PENDING` |
 | AI 版本沒標記 | `ai` 沒有預設值，漏填即參數錯誤 |
-| `--plan` 不是 cutplan.md 時蓋掉 Drive 合軌節目單（卡 #1081） | P3 一併修：推回的目標檔名跟著 `--plan` 走 |
+| `--plan` 不是 cutplan.md 時蓋掉 Drive 合軌節目單（卡 #1081） | P3 一併修：`publish_version` 推的 cutplan 檔名跟著 `--plan` 走 |
 | 歸檔誤搬 | `finalize --apply`、`tidy --apply` 不開放 |
 | 打到付費 API | 轉接頭不帶任何 API key 類環境變數給子行程；`scripts/lang/` 整個不包 |
 | Audacity 開著時改專案檔 | `inject` 沿用腳本既有的 `lsof` 檢查，失敗回 `GATE_FAILED` |
@@ -272,7 +273,7 @@ claude mcp add --scope user studio -- <studio-mcp>/.venv-studio/bin/python -m st
 | P0 | 逐檔盤點表（每支腳本：家族、誰呼叫它、有無測試、搬不搬、進不進 MCP）；重複腳本清單；兩條文件管線差異表；沒有定稿的 podcast session 清單；全機器引用 good-students-note 路徑的地方（launchd、mars-cc 腳本、skill symlink、llm-node 上的批次） | in-process Explore | 表列檔數＝`find` 實數 | 1 小時 |
 | P1 | **搬家，不改行為**：建 `studio-mcp`（本地＋Forgejo 私有）；照盤點表複製 `scripts/`、`reels/`、`dict/`、`prompts/`、`shared-material/`、ADR、設計文件；重建兩個 venv；adopt 進行中的 session；舊 repo 打 tag、加指路說明 | Claude sonnet | §4.7 的完成定義 | 3–4 小時 |
 | P2 | `studio/` 骨架：config、runners、jobs、result、sessions（含封存根目錄與 `archived` 標示）；工具 `doctor`、`session_find`、`session_status`、`job_*`；`session adopt` 命令列；`.venv-studio`；註冊 | Claude sonnet | 用 stdio 起 server，列得出 6 個工具；`session_find("EP16")` 回封存的 session 並標 `archived`；殺掉 server 後 job 還活著 | 2–3 小時 |
-| P3 | 剪輯線 6 個工具。`cut.py` 加 `--json`、`--use`；修 #1081；新增 `loudness.py`；**重寫 podcast-cut skill** | Claude sonnet | EP22 的 `cut_check` 摘要行與 `cut.py --check` 逐行相同；§6 每一個閘各有一個失敗案例測試；對封存 session 出片被拒；skill 過 §13.5 三項檢查 | 4–5 小時 |
+| P3 | 剪輯線 7 個工具。`cut.py` 加 `--json`、`--use`，雲端讀寫改走新增的 `remote.py`（rclone）；修 #1081；新增 `loudness.py`；**重寫 podcast-cut skill** | Claude sonnet | EP22 的 `cut_check` 摘要行與 `cut.py --check` 逐行相同；§6 每一個閘各有一個失敗案例測試；對封存 session 出片被拒；`cut_render` 全程沒有呼叫 rclone 的寫入；skill 過 §13.5 三項檢查 | 4–5 小時 |
 | P4 | server 的共用說明（`instructions` 欄位）定稿：job 怎麼等、錯誤碼怎麼處置、三條產線怎麼選、封存 session 的限制 | Claude sonnet | 新 session 不載任何 skill，只靠共用說明能完成「找 EP22 → 看狀態」 | 30 分鐘 |
 | P5a | 兩條文件管線的取捨（§13.4），寫成 ADR | Claude opus | 差異表每一列有實跑證據；結論是「留哪一條、另一條的獨有能力怎麼搬」 | 1–2 小時 |
 | P5b | 知識線 4 個工具。`session.py new` 加 `--json`；新增 `markers.py`、`input_probe.py`；**新寫 to-md skill、重寫 good-student skill**；舊 skill 下架；astro-chunking 封存 | Claude sonnet | 用一個 30 秒音檔與一個 3 頁 PDF 跑完 `ingest`；marker 字數不足時 `marker_done` 拒絕；skill 過 §13.5 三項檢查 | 5–6 小時 |
@@ -299,27 +300,29 @@ claude mcp add --scope user studio -- <studio-mcp>/.venv-studio/bin/python -m st
 | :--- | :--- |
 | ❗ [Major] good-students-note 主樹現有 3 個未提交的改動（`good-student/SKILL.md`、`scripts/frames/extract.py`、`scripts/audio/restore_punct_txt.py`），不是本案的 | **P1 打 tag 前必須先處理**：請當初改的 session 提交，或由 MM 決定丟棄。沒提交就打 tag，這三處改動不會被搬過去 |
 | ❗ [Major] 卡 #564（review:modifying）與 #1083 都會動 `cut.py` | P1 開工前先確認這兩張卡的改動已進舊 repo 的 main，或明確延到新 repo 做 |
-| MCP server 由 tmux 底下的 Claude 啟動時讀不到 Drive | `doctor` 與 `DRIVE_TCC` 明確回報；處置不變：用 orca terminal 開 |
+| rclone 的 Google 授權過期 | `doctor` 每次核對遠端可列目錄；失敗回 `REMOTE_FAILED`，由 MM 重新授權 |
 | ❗ [Major] 搬家期間舊 repo 又被改，新 repo 落後 | 以 tag 為準；P1 期間舊 repo 凍結（§8）；P1 驗收時核對舊 repo 自 tag 以來沒有新 commit |
 | ❗ [Major] 別處寫死了 good-students-note 的路徑（skill symlink、mars-cc 腳本、排程），搬完後靜默失效 | P0 全機器 `grep` 列清單，P1 逐一改；改不到的在舊 repo 原位留著仍可跑 |
 | 新 venv 的套件版本跟舊的不同，結果有細微差異 | P1 先 `pip freeze` 舊 venv，新 venv 照同一份版本裝 |
 | 封存的 session 之後格式跟不上新程式 | 封存 session 只讀、不保證能被新程式處理；要用就 adopt，adopt 時跑一次 `session_status` 檢查 |
-| 工具數量吃 context | 18 個為上限。要加新工具先看能不能併進既有工具的參數 |
+| 工具數量吃 context | 19 個為上限。要加新工具先看能不能併進既有工具的參數 |
 | `--json` 加進 2,650 行的 `render_cut.py` 牽動大 | 不動 `render_cut.py` 的輸出。由 `cut.py` 收集它既有的 `[render]` 行，組進自己的 JSON |
 
 ## 11. 請 MM 拍板
 
-每一項都有預設。回「好」就照預設走。第 1、2、6、7 項已定，剩 3、4、5。
+每一項都有預設。回「好」就照預設走。第 1、2、4、5、6、7 項已定，只剩第 3 項。
 
 | # | 問題 | 預設 | 另一個選項 |
 | :--- | :--- | :--- | :--- |
 | 1 | studio MCP 放哪個 repo | ✔ **已定（MM 2026-11-12）：自己的 repo `studio-mcp`** | — |
 | 2 | 管線程式要不要也搬進新 repo | ✔ **已定（MM 2026-11-12）：搬。過去的 session 封存**，做法見 §4.7 | — |
 | 3 | 搬過去的命令列（`cut.py`、`precut.py`、`session.py` 等約 20 支可直接執行的腳本） | **保留原樣，各加一個 `--json`**。你手動跑的指令只差在換 repo 目錄 | 收成單一入口 `studio <產線> <動作>`，舊腳本不能再直接跑。要重寫所有 ADR 與測試裡的指令 |
-| 4 | `cut_render` 推回 Drive | **預設不推**，要明示 `push=true` | 照 `cut.py` 現行預設會推 |
-| 5 | 卡 #1175 | **標為被 #1267 取代並 discard** | 留著當 P2 的卡 |
+| 4 | 出片後推回雲端 | ✔ **已定（MM 2026-11-12）：包一個 rclone 加目的路徑**。獨立成 `publish_version` 工具，見 §5 與下方說明 | — |
+| 5 | 卡 #1175 | ✔ **已定（MM 2026-11-12）：discard**，已執行 | — |
 | 6 | 給外部使用者的版本 | ✔ **已定（MM 2026-11-12）：不需要**。Windows 安裝包、Claude Desktop 沙箱用法、兩個 installer 目錄直接刪除（git 歷史留得到），不另外凍結 | — |
 | 7 | astro-chunking skill | ✔ **已定（MM 2026-11-12）：封存**。切卡方法已在 good-student；占星專用的三段先搬進 `good-student/references/astro.md` 再封存（§13.3） | — |
+
+**第 4 項的落地（rclone）**：本機已有 rclone 1.75 與 `gdrive:`、`pcloud:` 兩個遠端。目的地寫在 `studio.local.toml`（例：`podcast.remote = "gdrive:<節目資料夾>"`），換雲端只改這一行，卡 #1202（編輯器改接 pCloud）之後可以直接沿用。P3 把 `cut.py` 裡讀寫 Drive 掛載路徑的部分全部換成 `remote.py`：讀遠端 cutplan 用 `rclone copyto` 抓到暫存檔再比對，寫用 `rclone copy`。好處是不再經過 macOS 的資料夾權限，tmux 底下被擋的問題（Operation not permitted）跟著消失；`.drive_dir` 的配對改記遠端路徑。
 
 拍板後接著做的事：寫 ADR（`ADR-<拍板日>-1267.md`）、開 P0–P7 九張卡、派 P0。P1 要等 P0 的盤點表與你勾的進行中集數清單。
 
