@@ -1,21 +1,22 @@
 # studio MCP — 架構與分期計畫（卡 #1267，併 #1175＋ai-reels）
 
-> 2026-11-12 · 狀態：**提案，等 MM 拍板 §11 剩下的四件事**（第 1、6、7 項已定）。本檔只有架構與規劃，沒有實作。
+> 2026-11-12 · 狀態：**提案，等 MM 拍板 §11 剩下的三件事**（第 1、2、6、7 項已定）。本檔只有架構與規劃，沒有實作。
 > 範圍（MM 2026-11-12）：#1267 ＋ #1175 ＋ ai-reels 的 HyperFrames 短影音線，整個重構。
 > 分工：Fable 做架構與規劃；實作由 worker 照 §8 工單做。
 > 2026-11-12 追加（MM）：skill 整組重新設計，跟 MCP 一起翻修，見 §13。
-> 2026-11-12 拍板（MM）：studio MCP 有自己的 repo；不需要給外部使用者。見 §4.2、§11。
+> 2026-11-12 拍板（MM）：studio MCP 有自己的 repo；不需要給外部使用者；管線程式搬進新 repo，過去的 session 封存。見 §4.2、§4.7、§11。
 
 ## 0. 一頁結論
 
 1. **三條產線，一個入口**：知識線（good-student）、剪輯線（podcast-cut）、短影音線（ai-reels），共用 session 容器。
 2. **CLI 是合約，MCP 是轉接頭**：每個能力先有一支吐 JSON 的命令列，MCP 工具只負責轉呼叫。沒有 MCP 的執行器（agy、cron）用同一支命令列。
-3. **自己的 repo，但不搬管線**：新 repo `studio-mcp` 放轉接頭、命令列入口、4 顆 skill、測試。管線程式留在 good-students-note 與 ai-reels，只加 `--json`。
+3. **自己的 repo，管線一起搬**：新 repo `studio-mcp` 放管線程式、轉接頭、命令列入口、4 顆 skill、測試。good-students-note 與 ai-reels 凍結；過去的 session 留在原地封存，只讀。
+3a. **先搬家，後改裝**：搬的那一期只改路徑，不改行為，以既有測試全過為準。加 `--json`、做工具都排在搬完之後。
 4. **MCP server 不匯入任何管線程式**：一律開子行程，用該產線自己的直譯器跑。
 5. **長工作走 job**：轉錄、初剪、出片先回 job id，再查狀態。
 6. **會傷到 MM 人審的寫入預設關閉**：推回 Drive 要明示；兩份 cutplan 不同時，要明示用哪一份。
 7. **skill 從 8 顆收成 4 顆**（§13）：skill 只寫何時用、順序、判斷點；路徑與參數全部交給工具。每條產線的 skill 跟該線的工具同一期做。
-8. 分 6 期。P1 骨架做完就能在 Claude Code 裡找 session；P2 做完剪輯線可用。
+8. 分 8 期。P1 搬家，P2 骨架做完就能在 Claude Code 裡找 session，P3 做完剪輯線可用。
 
 ## 1. 名詞
 
@@ -68,59 +69,52 @@
 ### 4.1 分層
 
 ```
-【studio-mcp repo】
 Claude Code ──stdio──▶ studio/mcp_server.py      轉接頭（.venv-studio，只裝 mcp）
 agy / cron / MM ─────▶ bin/studio <line> <verb> --json     同一個入口
                               │
                               ▼
                        studio/core/              stdlib only
                        config · runners · jobs · result · sessions
-                              │ 開子行程（路徑來自設定檔）
-【good-students-note repo】                    【ai-reels repo】
+                              │ 開子行程
         ┌─────────────────────┼──────────────────────┐
         ▼                     ▼                      ▼
   .venv-audio            .venv-doc / python3        node
-  scripts/audio/*        scripts/session.py …       ai-reels/scripts/reel-build.mjs
+  scripts/audio/*        scripts/session.py …       reels/scripts/reel-build.mjs
 ```
 
 規則：
 
 1. `studio/` 只用標準函式庫。`mcp` 套件只有 `mcp_server.py` 匯入。
-2. `studio/` 不匯入管線 repo 的任何模組，只用設定檔裡的路徑開子行程。原因：`cut.py` 匯入 `render_cut`，後者需要 numpy；一匯入，server 就綁死在 `.venv-audio`，而且 pyannote 與 torch 會留在長駐行程裡。
+2. `studio/` 不匯入 `scripts/` 與 `reels/` 的任何模組，只開子行程。同一個 repo 也一樣。原因：`cut.py` 匯入 `render_cut`，後者需要 numpy；一匯入，server 就綁死在 `.venv-audio`，而且 pyannote 與 torch 會留在長駐行程裡。
 3. 每支被包的腳本加 `--json`：stdout 最後一行是一個 JSON 物件。人讀的訊息照舊印，行為不變。
 4. 轉接頭不解析人讀的文字。腳本沒有 `--json` 就不包，先補腳本。
 
-### 4.2 目錄（三個 repo 各放什麼）
+### 4.2 目錄
 
 ```
 studio-mcp/                     新 repo，私有（Forgejo），不對外發布
-├── bin/studio                  命令列入口（shell，轉呼叫 python3 -m studio）
-├── studio/
-│   ├── __main__.py             studio <line> <verb> [參數] --json
-│   ├── mcp_server.py           FastMCP；一個工具對一個 verb
-│   ├── core/
-│   │   ├── config.py           讀 studio.toml ＋ studio.local.toml
-│   │   ├── runners.py          line → 哪個 repo 的哪個直譯器
-│   │   ├── jobs.py             start／status／cancel／list，單一重工作鎖
-│   │   ├── result.py           回傳信封與錯誤碼
-│   │   └── sessions.py         find／status（只讀檔案系統）
-│   └── lines/                  knowledge.py／podcast.py／reels.py：參數 → 命令列
+├── bin/studio                  命令列入口（轉呼叫 python3 -m studio）
+├── studio/                     轉接頭：__main__.py、mcp_server.py、core/、lines/
+├── scripts/                    從 good-students-note 搬來，子目錄結構照舊
+│   ├── audio/                  剪輯核心、轉錄、歸檔
+│   ├── doc/  frames/           文件線、影片線
+│   ├── cutplan-editor/         MM 的人審介面（Apps Script＋本機版）與它的 node 測試
+│   ├── session.py 等           知識線統籌、閘、圖片線
+│   └── tests/                  36 支測試與真音訊 fixture
+├── reels/                      從 ai-reels 搬來：scripts/、template/
 ├── skills/                     to-md／good-student／podcast-cut／reel-cut（§13）
-├── tests/                      unittest：合約、失敗注入、MCP 冒煙
-├── docs/                       本檔與 ADR 在 P1 搬過來
-├── studio.toml                 進版控的預設值（門檻、逾時）
-├── studio.local.toml           不進版控：兩個管線 repo 的位置、Drive 根、素材根
+├── dict/  prompts/  shared-material/     管線讀的字典、規則、節目配樂
+├── docs/adr/  docs/design/     兩個舊 repo 的 ADR 與本檔
+├── tests/                      轉接頭的測試：合約、失敗注入、MCP 冒煙
+├── studio.toml                 進版控的預設值
+├── studio.local.toml           不進版控：Drive 根、封存 session 的位置、hyperframes 位置
+├── sessions/                   不進版控：新的 session 從這裡開始
 └── _local/jobs/                不進版控：job 紀錄
-
-good-students-note/             管線留在原地
-└── scripts/                    不搬。逐支加 --json、改讀設定；新增 markers.py、input_probe.py、audio/loudness.py
-                                .claude/skills/ 的舊 skill 在各期下架
-
-ai-reels/
-└── scripts/reel-build.mjs      加 --json
 ```
 
-跨 repo 的合約：每支被包的命令列在 JSON 裡帶 `schema` 版號。`doctor` 會核對 studio-mcp 期待的版號與兩個管線 repo 實際吐出的版號，不合就回 `ENV_MISSING` 並寫明是哪一支、差在哪一版。改管線的輸出欄位時，同一張卡要同時改兩邊。
+`scripts/` 的子目錄在搬家時不改名。理由：23 個檔靠相對位置找彼此與專案根目錄，測試也是。目錄重整排在最後一期，那時已有合約測試保護。
+
+**不搬、留在 good-students-note 的**：`web/`（上游網站與 Web 工作室）、`scripts/lang/`、`build_genai2026_day*.py`、出版部署（`publish_goodedunote.sh` 一組）、上游的講稿與 `SRT/`。逐檔的去留由 P0 盤點表定。
 
 ### 4.3 回傳信封
 
@@ -159,7 +153,7 @@ ai-reels/
 
 `studio.toml`（進版控）放不含個資的預設值；`studio.local.toml`（不進版控）放機器相關路徑。llm-node 位址照既有規定讀 `mars-cc/.env` 的 `LLM_NODE_URL`、`LLM_NODE_MODEL`，不複製。
 
-第一批只改兩處寫死的路徑：`cut.py` 的 `DRIVE_ROOT`、`render_cut.py` 的 `MATERIAL_ROOT`。改成「有設定讀設定，沒有設定用原值」，舊用法不壞。其餘 20 多個檔留到 P6。
+第一批只改兩處寫死的路徑：`cut.py` 的 `DRIVE_ROOT`、`render_cut.py` 的 `MATERIAL_ROOT`。改成「有設定讀設定，沒有設定用原值」，舊用法不壞。其餘 20 多個檔留到 P7。
 
 ### 4.6 註冊
 
@@ -170,6 +164,22 @@ claude mcp add --scope user studio -- <studio-mcp>/.venv-studio/bin/python -m st
 ```
 
 `/mcp-add` skill 只處理 npm 套件，這裡不適用。
+
+### 4.7 搬遷與 session 封存（MM 2026-11-12 拍板）
+
+| 項目 | 做法 |
+| :--- | :--- |
+| 來源定版 | good-students-note 與 ai-reels 各打一個 tag `pre-studio-split`。搬的內容以這個 tag 為準，ADR 記下兩個 commit |
+| 歷史 | 不帶 git 歷史，用複製。要查舊的 blame 回原 repo 看。40 多份 ADR 一起搬，「為什麼」不會丟 |
+| 過去的 session | 124 個全部留在 `good-students-note/sessions/`，不搬、不改。`studio.local.toml` 的 `archive_roots` 指過去 |
+| 封存的 session 能做什麼 | `session_find`、`session_status` 找得到，標示 `archived`。可以當短影音線的輸入（`reel_prepare` 只讀）。**不能**初剪、出片、處理 marker，這些工具對封存 session 回 `GATE_FAILED` |
+| 要重剪舊集數 | 用命令列 `bin/studio session adopt <路徑>`：把該 session 整個搬進新的 `sessions/`（連同 `.drive_dir`）。不做成 MCP 工具，由 MM 或在 MM 指示下執行 |
+| 還在進行中的集數 | P0 列出「沒有定稿版本」的 podcast session 清單給 MM 勾，勾到的在 P1 一併 adopt。預設：只 adopt EP22 兩個 session（最後出片 2026-11-05） |
+| 舊 repo | 搬完後 good-students-note 的 README 加一段指向新 repo；`.claude/skills/` 清空；程式不刪，維持可跑，但不再修改 |
+| ai-reels | `scripts/`、`template/`、3 份 ADR 搬走；PoC 四版與 `runs/` 留在原 repo。原 repo 凍結 |
+| 直譯器 | `.venv-audio`、`.venv-doc` 在新 repo 重建（照 `requirements-*.txt`）。模型快取在家目錄，不必重抓 |
+
+搬家那一期（P1）的完成定義只有一條：**新 repo 裡 `scripts/tests/run_all.sh` 與 cutplan-editor 的 node 測試全過，數量與舊 repo 相同；對 adopt 過來的 EP22 跑 `cut.py --check`，輸出與在舊 repo 跑的逐行相同。** 這一期不加任何新功能。
 
 ## 5. 工具清單（18 個）
 
@@ -227,7 +237,7 @@ claude mcp add --scope user studio -- <studio-mcp>/.venv-studio/bin/python -m st
 | 自動選錯 cutplan | 有 `--json` 時，兩份不同且沒帶 `--use` 就回 `CUTPLAN_DIVERGED` 並附語意差異。不再依修改時間挑 |
 | 跳過人審 | `.cutplan_pending.json` 存在時 `cut_render` 回 `REVIEW_PENDING` |
 | AI 版本沒標記 | `ai` 沒有預設值，漏填即參數錯誤 |
-| `--plan` 不是 cutplan.md 時蓋掉 Drive 合軌節目單（卡 #1081） | P2 一併修：推回的目標檔名跟著 `--plan` 走 |
+| `--plan` 不是 cutplan.md 時蓋掉 Drive 合軌節目單（卡 #1081） | P3 一併修：推回的目標檔名跟著 `--plan` 走 |
 | 歸檔誤搬 | `finalize --apply`、`tidy --apply` 不開放 |
 | 打到付費 API | 轉接頭不帶任何 API key 類環境變數給子行程；`scripts/lang/` 整個不包 |
 | Audacity 開著時改專案檔 | `inject` 沿用腳本既有的 `lsof` 檢查，失敗回 `GATE_FAILED` |
@@ -238,20 +248,20 @@ claude mcp add --scope user studio -- <studio-mcp>/.venv-studio/bin/python -m st
 
 | 家族 | 檔數 | 進 MCP | 理由 |
 | :--- | :--- | :--- | :--- |
-| `scripts/audio/` 剪輯核心（cut、render_cut、cutplan、precut、pertrack_*、tracks_columns、ingest_tracks、prosody、diarize、pause_rows、change_preview、diff_clips、audacity_labels） | 約 17 | 是，P2 | 剪輯線主體 |
+| `scripts/audio/` 剪輯核心（cut、render_cut、cutplan、precut、pertrack_*、tracks_columns、ingest_tracks、prosody、diarize、pause_rows、change_preview、diff_clips、audacity_labels） | 約 17 | 是，P3 | 剪輯線主體 |
 | `scripts/audio/` 轉錄與標點（transcribe_*、resegment_srt、restore_punct*、check_punct_density、fillers_local） | 約 8 | 間接 | 由 `ingest`／`precut` 帶動，不單獨開工具 |
 | `scripts/audio/` 歸檔（finalize、tidy_session、migrate_marks） | 3 | 只預覽 | 破壞性 |
 | `scripts/audio/` 文案（copy_prompt_build、finalize_copy） | 2 | 暫不 | 跟卡 #680 一起做 |
-| `scripts/session.py` 與閘（qaqc_phase_b、normalize_punctuation、prepublish_gate、pipeline_logger） | 約 6 | 是，P4 | 知識線主體 |
+| `scripts/session.py` 與閘（qaqc_phase_b、normalize_punctuation、prepublish_gate、pipeline_logger） | 約 6 | 是，P5 | 知識線主體 |
 | 圖片線（describe_images、insert_images、placement_*、propose_anchors…） | 約 10 | 間接 | 由 `ingest` 的 `images` 選項帶動 |
 | `scripts/doc/`、`scripts/frames/` | 10 | 間接 | 由 `ingest` 依副檔名分流 |
 | 出版（publish_goodedunote.sh、publish_qaqc、md_to_html、compress_images） | 4 | 否 | 對外發布，MM 手動 |
 | `scripts/lang/`（義、日、英批次） | 17 | 否 | 上游遺留，走付費 API |
 | `build_genai2026_day*.py` | 2 | 否 | 一次性 |
 | `scripts/cutplan-editor/` | 13 | 否 | MM 的人審介面；它的 node 測試接進總測試 |
-| skill 自帶腳本（doc-vlm-to-md 17 支等） | 約 25 | P4 評估 | 先盤點重複，再決定併入 `ingest` 或維持 skill 內呼叫 |
+| skill 自帶腳本（doc-vlm-to-md 17 支等） | 約 25 | P5 評估 | 先盤點重複，再決定併入 `ingest` 或維持 skill 內呼叫 |
 | `web/` | — | 否 | Web 工作室，另一條軌 |
-| ai-reels `scripts/` | 7 | 是，P5 | 短影音線主體 |
+| ai-reels `scripts/` | 7 | 是，P6 | 短影音線主體 |
 
 ## 8. 分期
 
@@ -259,57 +269,64 @@ claude mcp add --scope user studio -- <studio-mcp>/.venv-studio/bin/python -m st
 
 | 期 | 內容 | 執行體 | 驗收重點 | 預估 |
 | :--- | :--- | :--- | :--- | :--- |
-| P0 | 逐檔盤點表（每支腳本：家族、誰呼叫它、有無測試、進不進 MCP）；重複腳本清單 | in-process Explore | 表列檔數＝`find` 實數 | 30 分鐘 |
-| P1 | 建 `studio-mcp` repo（本地＋Forgejo 私有）；設計文件搬過去；`studio/` 骨架：config、runners、jobs、result、sessions；工具 `doctor`、`session_find`、`session_status`、`job_*`；`.venv-studio`；註冊 | Claude sonnet | 用 stdio 起 server，列得出 6 個工具；`session_find("EP22")` 回兩個 session 且不自動挑；殺掉 server 後 job 還活著 | 2–3 小時 |
-| P2 | 剪輯線 6 個工具。`cut.py` 加 `--json`、`--use`；修 #1081；新增 `loudness.py`；**重寫 podcast-cut skill** | Claude sonnet | EP22 的 `cut_check` 摘要行與 `cut.py --check` 逐行相同；§6 每一個閘各有一個失敗案例測試；skill 過 §13.5 三項檢查 | 4–5 小時 |
-| P3 | server 的共用說明（`instructions` 欄位）定稿：job 怎麼等、錯誤碼怎麼處置、三條產線怎麼選 | Claude sonnet | 新 session 不載任何 skill，只靠共用說明能完成「找 EP22 → 看狀態」 | 30 分鐘 |
-| P4a | 兩條文件管線的取捨（§13.4），寫成 ADR | Claude opus | 差異表每一列有實跑證據；結論是「留哪一條、另一條的獨有能力怎麼搬」 | 1–2 小時 |
-| P4b | 知識線 4 個工具。`session.py new` 加 `--json`；新增 `markers.py`、`input_probe.py`；**新寫 to-md skill、重寫 good-student skill**，舊 5 顆下架 | Claude sonnet | 用一個 30 秒音檔與一個 3 頁 PDF 跑完 `ingest`；marker 字數不足時 `marker_done` 拒絕；skill 過 §13.5 三項檢查 | 5–6 小時 |
-| P5 | 短影音線 2 個工具。`reel-build.mjs` 加 `--json`；**新寫 reel-cut skill** | Claude sonnet | EP15 `runs/ep15` 重跑，產物與既有的 `config.used.json`、`captions.json` 相同；skill 過 §13.5 三項檢查 | 2–3 小時 |
-| P6 | 清理：其餘寫死路徑改讀設定；`doc_to_md.py` 三份併一份；`render_cut.py` 拆檔另開卡評估 | Claude sonnet，機械部分 haiku | 全部測試通過；`grep` 寫死的家目錄路徑歸零（`scripts/lang/` 除外） | 2–3 小時 |
+| P0 | 逐檔盤點表（每支腳本：家族、誰呼叫它、有無測試、搬不搬、進不進 MCP）；重複腳本清單；兩條文件管線差異表；沒有定稿的 podcast session 清單；全機器引用 good-students-note 路徑的地方（launchd、mars-cc 腳本、skill symlink、llm-node 上的批次） | in-process Explore | 表列檔數＝`find` 實數 | 1 小時 |
+| P1 | **搬家，不改行為**：建 `studio-mcp`（本地＋Forgejo 私有）；照盤點表複製 `scripts/`、`reels/`、`dict/`、`prompts/`、`shared-material/`、ADR、設計文件；重建兩個 venv；adopt 進行中的 session；舊 repo 打 tag、加指路說明 | Claude sonnet | §4.7 的完成定義 | 3–4 小時 |
+| P2 | `studio/` 骨架：config、runners、jobs、result、sessions（含封存根目錄與 `archived` 標示）；工具 `doctor`、`session_find`、`session_status`、`job_*`；`session adopt` 命令列；`.venv-studio`；註冊 | Claude sonnet | 用 stdio 起 server，列得出 6 個工具；`session_find("EP16")` 回封存的 session 並標 `archived`；殺掉 server 後 job 還活著 | 2–3 小時 |
+| P3 | 剪輯線 6 個工具。`cut.py` 加 `--json`、`--use`；修 #1081；新增 `loudness.py`；**重寫 podcast-cut skill** | Claude sonnet | EP22 的 `cut_check` 摘要行與 `cut.py --check` 逐行相同；§6 每一個閘各有一個失敗案例測試；對封存 session 出片被拒；skill 過 §13.5 三項檢查 | 4–5 小時 |
+| P4 | server 的共用說明（`instructions` 欄位）定稿：job 怎麼等、錯誤碼怎麼處置、三條產線怎麼選、封存 session 的限制 | Claude sonnet | 新 session 不載任何 skill，只靠共用說明能完成「找 EP22 → 看狀態」 | 30 分鐘 |
+| P5a | 兩條文件管線的取捨（§13.4），寫成 ADR | Claude opus | 差異表每一列有實跑證據；結論是「留哪一條、另一條的獨有能力怎麼搬」 | 1–2 小時 |
+| P5b | 知識線 4 個工具。`session.py new` 加 `--json`；新增 `markers.py`、`input_probe.py`；**新寫 to-md skill、重寫 good-student skill**；舊 skill 下架；astro-chunking 封存 | Claude sonnet | 用一個 30 秒音檔與一個 3 頁 PDF 跑完 `ingest`；marker 字數不足時 `marker_done` 拒絕；skill 過 §13.5 三項檢查 | 5–6 小時 |
+| P6 | 短影音線 2 個工具。`reel-build.mjs` 加 `--json`；**新寫 reel-cut skill** | Claude sonnet | 以封存的 EP15 session 為輸入重跑，產物與 ai-reels `runs/ep15` 的 `config.used.json`、`captions.json` 相同；skill 過 §13.5 三項檢查 | 2–3 小時 |
+| P7 | 清理：其餘寫死路徑改讀設定；`doc_to_md.py` 三份併一份；`scripts/` 目錄重整與 `render_cut.py` 拆檔另開卡評估 | Claude sonnet，機械部分 haiku | 全部測試通過；`grep` 寫死的家目錄路徑歸零 | 2–3 小時 |
 
-依賴：P1 → P2 → P3；P1 → P4a → P4b；P1 → P5。P2、P4、P5 互不相依，但 Pro 方案同時只撐 2 條線，所以一次派一期實作＋一期驗收。P6 最後。
+依賴：P0 → P1 → P2，之後 P3 → P4、P5a → P5b、P6 三條互不相依。Pro 方案同時只撐 2 條線，所以一次派一期實作＋一期驗收。P7 最後。
+
+**P1 開工到驗收通過之間，兩個舊 repo 不收任何程式改動**，否則搬過去的版本會落後。進行中的卡（#564、#1083、#1081 等）一律等 P1 完成後改在新 repo 做。
 
 驗收一律由另一個 agent 做（agy，複雜判斷用 `claude-opus-5-5-high` 或 `gemini-4-argon-high`），工單要求注入失敗並對發現編號。
 
 ## 9. 測試策略
 
 1. **合約測試**：每個 verb 的 `--json` 輸出欄位固定；轉接頭的工具清單與參數有快照。
-2. **等價測試**：新入口與舊命令列在同一個 fixture session 上結果相同（P2 用既有的真音訊 fixture）。
+2. **等價測試**：新入口與舊命令列在同一個 fixture session 上結果相同（P3 用既有的真音訊 fixture）。P1 另有一次跨 repo 的等價測試（§4.7）。
 3. **失敗注入**：§4.3 每個錯誤碼至少一個案例。Drive 不可讀用一個權限為 000 的假目錄模擬。
 4. **不靠重跑比對**：本地 whisper 不是確定性的，轉錄相關只驗結構，不驗文字。
-5. **測試分兩邊**：管線腳本新增的 `--json` 與新腳本，測試放 good-students-note 的 `scripts/tests/`，照舊由 `run_all.sh` 跑。轉接頭的測試放 studio-mcp 的 `tests/`，用 unittest，只需要標準函式庫。
+5. **測試分兩處**：管線腳本的測試照舊在 `scripts/tests/`，由 `run_all.sh` 跑（要 `.venv-audio`）。轉接頭的測試在 `tests/`，用 unittest，只需要標準函式庫。
 
 ## 10. 風險
 
 | 風險 | 處置 |
 | :--- | :--- |
-| ❗ [Major] good-students-note 主樹現有 3 個未提交的改動（`good-student/SKILL.md`、`scripts/frames/extract.py`、`scripts/audio/restore_punct_txt.py`），不是本案的 | worker 一律在 worktree 做；P4 動 good-student skill 前先確認那份改動已提交 |
-| ❗ [Major] 卡 #564（review:modifying）與 #1083 都會動 `cut.py` | P2 開工前先看這兩張卡的狀態；有人在改就排在後面 |
+| ❗ [Major] good-students-note 主樹現有 3 個未提交的改動（`good-student/SKILL.md`、`scripts/frames/extract.py`、`scripts/audio/restore_punct_txt.py`），不是本案的 | **P1 打 tag 前必須先處理**：請當初改的 session 提交，或由 MM 決定丟棄。沒提交就打 tag，這三處改動不會被搬過去 |
+| ❗ [Major] 卡 #564（review:modifying）與 #1083 都會動 `cut.py` | P1 開工前先確認這兩張卡的改動已進舊 repo 的 main，或明確延到新 repo 做 |
 | MCP server 由 tmux 底下的 Claude 啟動時讀不到 Drive | `doctor` 與 `DRIVE_TCC` 明確回報；處置不變：用 orca terminal 開 |
-| ❗ [Major] 三個 repo 的版本會漂：管線改了輸出，轉接頭沒跟上 | `schema` 版號＋`doctor` 核對（§4.2）；合約測試在 studio-mcp 這邊對真的管線 repo 跑 |
+| ❗ [Major] 搬家期間舊 repo 又被改，新 repo 落後 | 以 tag 為準；P1 期間舊 repo 凍結（§8）；P1 驗收時核對舊 repo 自 tag 以來沒有新 commit |
+| ❗ [Major] 別處寫死了 good-students-note 的路徑（skill symlink、mars-cc 腳本、排程），搬完後靜默失效 | P0 全機器 `grep` 列清單，P1 逐一改；改不到的在舊 repo 原位留著仍可跑 |
+| 新 venv 的套件版本跟舊的不同，結果有細微差異 | P1 先 `pip freeze` 舊 venv，新 venv 照同一份版本裝 |
+| 封存的 session 之後格式跟不上新程式 | 封存 session 只讀、不保證能被新程式處理；要用就 adopt，adopt 時跑一次 `session_status` 檢查 |
 | 工具數量吃 context | 18 個為上限。要加新工具先看能不能併進既有工具的參數 |
 | `--json` 加進 2,650 行的 `render_cut.py` 牽動大 | 不動 `render_cut.py` 的輸出。由 `cut.py` 收集它既有的 `[render]` 行，組進自己的 JSON |
 
 ## 11. 請 MM 拍板
 
-每一項都有預設。回「好」就照預設走。第 1、6、7 項已定，剩 2、3、4、5。
+每一項都有預設。回「好」就照預設走。第 1、2、6、7 項已定，剩 3、4、5。
 
 | # | 問題 | 預設 | 另一個選項 |
 | :--- | :--- | :--- | :--- |
-| 1 | studio MCP 放哪個 repo | ✔ **已定（MM 2026-11-12）：自己的 repo `studio-mcp`**。管線不搬，見 §4.2 | — |
-| 2 | 管線程式要不要也搬進新 repo | **不搬**。good-students-note 與 ai-reels 維持原 repo，新 repo 用設定檔指路徑。sessions 6.6 GB、36 支測試、40 多份 ADR 都綁在原地 | 全部搬進 `studio-mcp`，一個 repo 管到底。要多一期搬遷，所有既有路徑與 ADR 引用要改 |
-| 3 | 既有命令列 | **保留**，加 `--json`。MM 手動跑的習慣與 ADR 裡的指令都不變 | 邏輯搬進 `studio/`，舊命令列變空殼。風險高，收益是目錄好看 |
+| 1 | studio MCP 放哪個 repo | ✔ **已定（MM 2026-11-12）：自己的 repo `studio-mcp`** | — |
+| 2 | 管線程式要不要也搬進新 repo | ✔ **已定（MM 2026-11-12）：搬。過去的 session 封存**，做法見 §4.7 | — |
+| 3 | 搬過去的命令列（`cut.py`、`precut.py`、`session.py` 等約 20 支可直接執行的腳本） | **保留原樣，各加一個 `--json`**。你手動跑的指令只差在換 repo 目錄 | 收成單一入口 `studio <產線> <動作>`，舊腳本不能再直接跑。要重寫所有 ADR 與測試裡的指令 |
 | 4 | `cut_render` 推回 Drive | **預設不推**，要明示 `push=true` | 照 `cut.py` 現行預設會推 |
 | 5 | 卡 #1175 | **標為被 #1267 取代並 discard** | 留著當 P2 的卡 |
 | 6 | 給外部使用者的版本 | ✔ **已定（MM 2026-11-12）：不需要**。Windows 安裝包、Claude Desktop 沙箱用法、兩個 installer 目錄直接刪除（git 歷史留得到），不另外凍結 | — |
 | 7 | astro-chunking skill | ✔ **已定（MM 2026-11-12）：封存**。切卡方法已在 good-student；占星專用的三段先搬進 `good-student/references/astro.md` 再封存（§13.3） | — |
 
-拍板後接著做的事：寫 ADR（`ADR-<拍板日>-1267.md`）、開 P0–P6 八張卡、派 P0 與 P1。
+拍板後接著做的事：寫 ADR（`ADR-<拍板日>-1267.md`）、開 P0–P7 九張卡、派 P0。P1 要等 P0 的盤點表與你勾的進行中集數清單。
 
 ## 12. 不做
 
-- 不搬 `scripts/` 的檔案，不改既有命令列的預設行為。
+- 搬家時不改 `scripts/` 的子目錄結構，不改既有命令列的預設行為。
+- 不搬過去的 session，不帶 git 歷史。
 - 不包 Web 工作室、cutplan 編輯器、出版部署、`scripts/lang/`。
 - 不開放 `finalize --apply`、`tidy --apply`。
 - 不自動寫 `summary.json`、不自動翻 cutplan 勾選。這些是判斷，留給 agent 與 MM。
@@ -360,11 +377,11 @@ claude mcp add --scope user studio -- <studio-mcp>/.venv-studio/bin/python -m st
 
 本文合計約 490 行，是現在的四分之一。
 
-astro-chunking 的去處（2026-11-12 實查）：通用的切卡方法（一概念一檔、frontmatter 鎖死、驗收清單、派工守則）已經在 good-student。但 good-student 第 648 行仍把三段占星專用內容指回 astro-chunking：受控詞彙表、目錄結構、ASR 錯字對照。astro-chunking 本體在 `good-students-note/.claude/skills/`，`mars-cc/000_Agent/skills/astro-chunking` 是指過去的 symlink（good-student 寫的是後者）。P4b 把這三段搬進 `good-student/references/astro.md`、改掉那個指標，再封存本體並移除 symlink。白瑜、唐綺陽的占星知識庫之後補切會用到，不能直接丟。
+astro-chunking 的去處（2026-11-12 實查）：通用的切卡方法（一概念一檔、frontmatter 鎖死、驗收清單、派工守則）已經在 good-student。但 good-student 第 648 行仍把三段占星專用內容指回 astro-chunking：受控詞彙表、目錄結構、ASR 錯字對照。astro-chunking 本體在 `good-students-note/.claude/skills/`，`mars-cc/000_Agent/skills/astro-chunking` 是指過去的 symlink（good-student 寫的是後者）。P5b 把這三段搬進 `good-student/references/astro.md`、改掉那個指標，再封存本體並移除 symlink。白瑜、唐綺陽的占星知識庫之後補切會用到，不能直接丟。
 
 舊名稱的處理：四顆轉檔 skill 的觸發語（「只要逐字稿」「把這份 PDF 轉成 Markdown 就好」「帶截圖的逐字稿」）全部併進 `to-md` 的 description。`/audio-to-md` 等舊斜線指令不留別名；`~/.claude/skills/` 的 symlink 同步增刪。
 
-4 顆都住 `studio-mcp/skills/`，跟轉接頭同一個 repo、同一個 commit 改；`~/.claude/skills/` 用 symlink 指過去。good-students-note 的 `.claude/skills/` 在各期把對應的舊 skill 刪掉。
+4 顆都住 `studio-mcp/skills/`，跟工具同一個 repo、同一個 commit 改；`~/.claude/skills/` 用 symlink 指過去。P1 先把舊 skill 原樣搬來（只改 repo 路徑）讓日常工作不中斷，各期再換成新版。
 
 不對外發布（§11 第 6 項）之後，skill 只需要寫給這台機器的 agent 看：不寫安裝步驟、不寫 Windows 路徑、不寫「沒有外網時的降級路徑」。
 
@@ -377,7 +394,7 @@ astro-chunking 的去處（2026-11-12 實查）：通用的切卡方法（一概
 | A | `session.py new <pdf>`（ADR 0008） | `scripts/doc/extract.py`、`scripts/doc/figures.py` |
 | B | doc-to-md、doc-vlm-to-md 兩顆 skill | skill 目錄裡的 `doc_to_md.py`、`kb_prep.py` 等 17 支 |
 
-`ingest` 只能包一條。我沒有實跑比較過，不在這裡下結論。P0 盤點要交出兩條的差異表（各自獨有的能力：直排轉橫排、EPUB 內嵌圖、OCR-first、語料倉同步、打包 zip），P4a 由 opus 定案並寫 ADR。這是整案裡唯一還沒有答案的設計問題。
+`ingest` 只能包一條。我沒有實跑比較過，不在這裡下結論。P0 盤點要交出兩條的差異表（各自獨有的能力：直排轉橫排、EPUB 內嵌圖、OCR-first、語料倉同步、打包 zip），P5a 由 opus 定案並寫 ADR。這是整案裡唯一還沒有答案的設計問題。
 
 ### 13.5 skill 的驗收（三項，每顆都要過）
 
@@ -390,7 +407,7 @@ astro-chunking 的去處（2026-11-12 實查）：通用的切卡方法（一概
 ### 13.6 連帶要改的地方
 
 - `good-students-note/CLAUDE.md` 的三軌分工表與 Quick Start：加上 studio MCP 這個入口。
-- `mars-cc` 裡提到舊 skill 名稱的地方（其他 skill、protocols、記憶索引）：P4b 的工單要求先 `grep` 列出，再逐一改。
-- `doc-to-md-installer/`、`doc-vlm-to-md-installer/`：P4b 刪除（§11 第 6 項）。
+- `mars-cc` 裡提到舊 skill 名稱的地方（其他 skill、protocols、記憶索引）：P5b 的工單要求先 `grep` 列出，再逐一改。
+- `doc-to-md-installer/`、`doc-vlm-to-md-installer/`：不搬進新 repo（§11 第 6 項），留在舊 repo 隨它凍結。
 - 卡 #719（skill set 對外發布）：前提跟這四顆 skill 脫鉤，留言註明，不動狀態。
 
