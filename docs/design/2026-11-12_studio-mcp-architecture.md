@@ -360,7 +360,7 @@ claude mcp add --scope user studio -- <studio-mcp>/.venv-studio/bin/python -m st
 
 本文合計約 490 行，是現在的四分之一。
 
-astro-chunking 的去處（2026-11-12 實查）：通用的切卡方法（一概念一檔、frontmatter 鎖死、驗收清單、派工守則）已經在 good-student。但 good-student 第 648 行仍把三段占星專用內容指回 astro-chunking：受控詞彙表、目錄結構、ASR 錯字對照；而且指的路徑 `mars-cc/000_Agent/skills/astro-chunking/` 已不存在。P4b 把這三段搬進 `good-student/references/astro.md`、修掉那個指標，再封存 astro-chunking。白瑜、唐綺陽的占星知識庫之後補切會用到，不能直接丟。
+astro-chunking 的去處（2026-11-12 實查）：通用的切卡方法（一概念一檔、frontmatter 鎖死、驗收清單、派工守則）已經在 good-student。但 good-student 第 648 行仍把三段占星專用內容指回 astro-chunking：受控詞彙表、目錄結構、ASR 錯字對照。astro-chunking 目前有兩份：`good-students-note/.claude/skills/` 與 `mars-cc/000_Agent/skills/`（good-student 指的是後者）。P4b 把這三段搬進 `good-student/references/astro.md`、改掉那個指標，再把兩份一起封存。白瑜、唐綺陽的占星知識庫之後補切會用到，不能直接丟。
 
 舊名稱的處理：四顆轉檔 skill 的觸發語（「只要逐字稿」「把這份 PDF 轉成 Markdown 就好」「帶截圖的逐字稿」）全部併進 `to-md` 的 description。`/audio-to-md` 等舊斜線指令不留別名；`~/.claude/skills/` 的 symlink 同步增刪。
 
