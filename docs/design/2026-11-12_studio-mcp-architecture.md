@@ -280,7 +280,7 @@ claude mcp add --scope user studio -- <studio-mcp>/.venv-studio/bin/python -m st
 | 期 | 內容 | 執行體 | 驗收重點 | 預估 |
 | :--- | :--- | :--- | :--- | :--- |
 | P0 | 逐檔盤點表（每支腳本：家族、誰呼叫它、有無測試、搬不搬、進不進 MCP）；重複腳本清單；兩條文件管線差異表；全機器引用 good-students-note 路徑的地方（launchd、mars-cc 腳本、skill symlink、llm-node 上的批次） | in-process Explore | 表列檔數＝`find` 實數 | 1 小時 |
-| P1 | **搬家，不改行為**：建 `studio-mcp`（本地＋Forgejo 私有）；照盤點表複製 `scripts/`、`reels/`、`dict/`、`prompts/`、`shared-material/`、ADR、設計文件；重建兩個 venv；舊 repo 打 tag、加指路說明 | Claude sonnet | §4.7 的完成定義 | 3–4 小時 |
+| P1 | **搬家，不改行為**：建 `studio-mcp`（本地＋Forgejo 私有）；照盤點表複製 `scripts/`、`reels/`、`dict/`、`prompts/`、`shared-material/`、ADR、設計文件；重建兩個 venv；舊 repo 打 tag、加指路說明 | Claude sonnet | §4.7 的完成定義；逐支測試的通過與跳過數與舊 repo 相同（§14.3 第 2 項）；§14.3 第 3、4、5 項的引用已改 | 4–5 小時 |
 | P2 | `studio/` 骨架：config、runners、jobs、result、sessions（含封存根目錄與 `archived` 標示）；工具 `doctor`、`session_find`、`session_status`、`job_*`；`session adopt` 命令列；`.venv-studio`；註冊 | Claude sonnet | 用 stdio 起 server，列得出 6 個工具；`session_find("EP16")` 回封存的 session 並標 `archived`；殺掉 server 後 job 還活著 | 2–3 小時 |
 | P3 | 剪輯線 7 個工具。`cut.py` 加 `--json`、`--use`，雲端讀寫改走新增的 `remote.py`（rclone）；修 #1081；新增 `loudness.py`；**重寫 podcast-cut skill** | Claude sonnet | EP22 的 `cut_check` 摘要行與 `cut.py --check` 逐行相同；§6 每一個閘各有一個失敗案例測試；對封存 session 出片被拒；`cut_render` 全程沒有呼叫 rclone 的寫入；skill 過 §13.5 三項檢查 | 4–5 小時 |
 | P4 | server 的共用說明（`instructions` 欄位）定稿：job 怎麼等、錯誤碼怎麼處置、三條產線怎麼選、封存 session 的限制 | Claude sonnet | 新 session 不載任何 skill，只靠共用說明能完成「找 EP22 → 看狀態」 | 30 分鐘 |
@@ -425,3 +425,52 @@ astro-chunking 的去處（2026-11-12 實查）：通用的切卡方法（一概
 - `doc-to-md-installer/`、`doc-vlm-to-md-installer/`：不搬進新 repo（§11 第 6 項），留在舊 repo 隨它凍結。
 - 卡 #719（skill set 對外發布）：前提跟這四顆 skill 脫鉤，留言註明，不動狀態。
 
+## 14. P0 盤點結論（2026-11-12，卡 #1322）
+
+盤點原文：`docs/design/2026-11-12_studio-mcp-P0-inventory.md`（逐檔表 345 列，與 `git ls-files` 的數字對得上）。
+
+### 14.1 數字
+
+| 去留 | 列數 |
+| :--- | :--- |
+| 搬 | 256 |
+| 不搬 | 47 |
+| 待定（下表定案） | 42 |
+
+### 14.2 「待定」定案
+
+| 東西 | 定案 | 理由 |
+| :--- | :--- | :--- |
+| 沒有呼叫者的手動工具：`fillers_local`、`pause_rows`、`restore_punct`、`restore_punct_txt`、`frames/hardsub_ocr` | 搬 | 有近期手動使用紀錄（賴佩霞逐字稿補標點、xwx 硬字幕 OCR）；`pause_rows` 是卡 #1083 要接上的。P7 再判死碼 |
+| 圖像版筆記一組：`image_notes_session.py`、`md_to_a4_png.py`、`prompts/image_notes_*.md`、`.agent/`、`.gemini/` 的 note 指令 | 不搬 | 跟身份視角註解筆記同一個產品，124 個 session 沒有任何產物；依賴的 Playwright 也沒裝 |
+| `scripts/finalize_placement.py` | 不搬 | 只服務已出版的頁面，屬出版 |
+| `good-student-notes/scripts/groq_transcribe.py` | 單檔搬到 `scripts/asr_groq/`，`session.py` 第 59 行的常數跟著改 | skill 本身不搬，但 `session.py --asr groq` 還指著它。這是 P1「不改行為」唯一明列的例外。付費 API 這條路要不要拿掉，P5b 再定 |
+| `SRT/SRT_QA_QC_檢查清單.md`、`SRT/context.example.txt` | 搬 | 清理規則的人讀版與範本，體積小 |
+| astro-chunking（skill 與 `srt_clean.py`） | P1 原樣帶過去，P5b 抽三段後封存 | 中間這段時間 good-student 還指著它 |
+| doc-vlm-to-md 的 `gen_prompts.py`、`merge_all.py` | 不搬 | 一次性批次；`merge_all` 缺檔，現狀一跑就壞 |
+| doc-vlm-to-md 的 `ocr_mac.py`、`probe_layout.py` | 搬，P5a 一起評估 | 是管線 B 的能力，取捨前不丟 |
+| 舊設計稿、分軌評審報告、llm-node 事故筆記、`docs/reports/` | 搬 | 管線的維運知識，跟著程式走 |
+| `CLAUDE.md`、`AGENTS.md`、`GEMINI.md` | 新 repo 重寫一份 | 保留六條核心原則與 marker 契約；Web 工作室、上游、出版的段落不帶。兩個指路檔照舊各一行 |
+| `LICENSE`、`LICENSE-CONTENT`、`NOTICE` | 搬 | 搬過去的程式有上游作者以 MIT 釋出的部分，著作權聲明要留著 |
+
+### 14.3 盤點帶出的新事實（要改計畫的）
+
+| # | 發現 | 對計畫的影響 |
+| :--- | :--- | :--- |
+| 1 | `requirements-doc.txt` 只列 5 個套件，測試要用的 pytest、lxml 不在裡面 | P1 的 venv 一律照舊 venv 的 `pip freeze` 重建（119 與 12 個套件），不照 requirements。重建後把 requirements 補齊 |
+| 2 | `test_render_tracks.py` 靠真的 EP22 session，找不到就跳過 | P1 驗收改成比對**每一支測試的通過與跳過數**，不能只看「全過」。新 repo 用 `GSN_SESSIONS_DIR` 指向封存位置 |
+| 3 | `~/.claude/skills` 本身是指向 `mars-cc/000_Agent/skills` 的 symlink，7 顆 skill 的 symlink 住在那裡 | P1 改這 7 個 symlink 的目標；改的是 mars-cc，要另外 commit |
+| 4 | mars-cc 的 ADR 索引腳本會掃所有 repo。ADR 複製到新 repo 後，同一份 ADR 會出現兩次 | P1 讓 `build-adr-index.py` 跳過凍結的兩個舊 repo |
+| 5 | tang-podcast 專案的 `pipeline.py` 借用 good-students-note 的 `.venv-audio` 與 `transcribe_local.py` | P1 改指新 repo。舊 repo 不刪所以不會立刻壞，但要列進 P1 的改動清單 |
+| 6 | 管線 B 的指令寫 `python3`，實際只有 `~/.doc-vlm-to-md/venv` 跑得動；家目錄那份 `kb_prep.py` 是舊版，跟 repo 裡的不同 | P5a 多一題：管線 B 現在到底是哪一份在跑 |
+| 7 | 管線 A 有測試 3 支、有直排轉橫排、有去亂碼，但 sessions 裡沒有它的圖表產物；管線 B 沒有測試，但有掃描頁 OCR、EPUB 內嵌圖、語料倉同步，12 個 session 實際用過 | P5a 的起點：A 的程式品質較可驗，B 的能力較全、實際在用 |
+| 8 | `reel-build.mjs` 從 session **根目錄**讀 `words.json` 與講者字幕，不是 `_asset/` | P6 要先決定對封存 session 讀哪個位置，EP15 等價測試才比得起來 |
+| 9 | `hyperframes` 沒有全域安裝，ai-reels 也沒有 `package.json`，`npx hyperframes` 從哪裡來沒查清楚 | P6 開工第一步先驗證；`doctor` 要含這一項 |
+| 10 | good-students-note 的環境變數檔只有 `HF_TOKEN` 一個鍵（分講者要用） | P1 由總管複製這個檔到新 repo，不經 worker、不印值 |
+| 11 | 四支腳本寫死 tailnet IP | P7 改讀設定 |
+
+### 14.4 還沒查的
+
+- llm-node 機器上有沒有引用舊路徑的批次或排程。需要 ssh，P1 開工前由總管查。
+- shell rc、Alfred、Raycast 等家目錄設定有沒有寫死舊路徑。
+- 本機其他位置還有沒有 `doc_to_md.py` 的副本（全機搜尋跑太久，中途停了）。
