@@ -1,6 +1,6 @@
 # studio MCP — 架構與分期計畫（卡 #1267，併 #1175＋ai-reels）
 
-> 2026-11-12 · 狀態：**提案，等 MM 拍板 §11 剩下的五件事**（第 1、6 項已定）。本檔只有架構與規劃，沒有實作。
+> 2026-11-12 · 狀態：**提案，等 MM 拍板 §11 剩下的四件事**（第 1、6、7 項已定）。本檔只有架構與規劃，沒有實作。
 > 範圍（MM 2026-11-12）：#1267 ＋ #1175 ＋ ai-reels 的 HyperFrames 短影音線，整個重構。
 > 分工：Fable 做架構與規劃；實作由 worker 照 §8 工單做。
 > 2026-11-12 追加（MM）：skill 整組重新設計，跟 MCP 一起翻修，見 §13。
@@ -293,7 +293,7 @@ claude mcp add --scope user studio -- <studio-mcp>/.venv-studio/bin/python -m st
 
 ## 11. 請 MM 拍板
 
-每一項都有預設。回「好」就照預設走。第 1、6 項已定，剩 2、3、4、5、7。
+每一項都有預設。回「好」就照預設走。第 1、6、7 項已定，剩 2、3、4、5。
 
 | # | 問題 | 預設 | 另一個選項 |
 | :--- | :--- | :--- | :--- |
@@ -303,7 +303,7 @@ claude mcp add --scope user studio -- <studio-mcp>/.venv-studio/bin/python -m st
 | 4 | `cut_render` 推回 Drive | **預設不推**，要明示 `push=true` | 照 `cut.py` 現行預設會推 |
 | 5 | 卡 #1175 | **標為被 #1267 取代並 discard** | 留著當 P2 的卡 |
 | 6 | 給外部使用者的版本 | ✔ **已定（MM 2026-11-12）：不需要**。Windows 安裝包、Claude Desktop 沙箱用法、兩個 installer 目錄直接刪除（git 歷史留得到），不另外凍結 | — |
-| 7 | astro-chunking skill | **封存**。它是 good-student 的前身，已設成不自動觸發 | 留著 |
+| 7 | astro-chunking skill | ✔ **已定（MM 2026-11-12）：封存**。切卡方法已在 good-student；占星專用的三段先搬進 `good-student/references/astro.md` 再封存（§13.3） | — |
 
 拍板後接著做的事：寫 ADR（`ADR-<拍板日>-1267.md`）、開 P0–P6 八張卡、派 P0 與 P1。
 
@@ -359,6 +359,8 @@ claude mcp add --scope user studio -- <studio-mcp>/.venv-studio/bin/python -m st
 | `reel-cut`（新） | ai-reels README 的流程段 | `reel_prepare` → 讀逐字稿寫 `summary.json`（語氣、講者、貼圖規則）→ `reel_render` → 交 MM 過目 | 50 |
 
 本文合計約 490 行，是現在的四分之一。
+
+astro-chunking 的去處（2026-11-12 實查）：通用的切卡方法（一概念一檔、frontmatter 鎖死、驗收清單、派工守則）已經在 good-student。但 good-student 第 648 行仍把三段占星專用內容指回 astro-chunking：受控詞彙表、目錄結構、ASR 錯字對照；而且指的路徑 `mars-cc/000_Agent/skills/astro-chunking/` 已不存在。P4b 把這三段搬進 `good-student/references/astro.md`、修掉那個指標，再封存 astro-chunking。白瑜、唐綺陽的占星知識庫之後補切會用到，不能直接丟。
 
 舊名稱的處理：四顆轉檔 skill 的觸發語（「只要逐字稿」「把這份 PDF 轉成 Markdown 就好」「帶截圖的逐字稿」）全部併進 `to-md` 的 description。`/audio-to-md` 等舊斜線指令不留別名；`~/.claude/skills/` 的 symlink 同步增刪。
 
