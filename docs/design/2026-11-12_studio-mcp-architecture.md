@@ -521,7 +521,8 @@ P1 → P2 → P3 →（新一集實測）→ P4 → P5a → P5b → P7 →（MM 
 | TXT | 可以 | |
 | 直排書 | 不支援 | MM 2026-11-13 決定放棄。卡 #616 discard。`input_probe` 偵測到直排就回 `GATE_FAILED` |
 | SRT、VTT 字幕檔 | 部分 | 有清理程式，但 `session.py new` 不收這兩種副檔名，要補一個入口 |
-| Word、PowerPoint、網頁、Markdown | 不行 | 現有管線沒有 |
+| Word、PowerPoint、Excel、網頁 | 用到再做 | MM 2026-11-13：不排進必做。P5b 順手試一次，做法見 §18 |
+| Markdown | 不行 | 現有管線沒有 |
 | 網址（YouTube、文章連結） | 不行 | 要先自己下載成檔案 |
 | 純圖片資料夾 | 不行 | 圖片只能當音檔或影片 session 的附件 |
 
@@ -538,4 +539,12 @@ P5b 的驗收因此加一條：`input_probe` 對不支援的類型要明確回 `
 | doc-vlm-to-md 的鐵律 0-4「直排要先轉成橫排，版面要人工確認」 | 不帶進 `to-md` |
 | `scripts/doc/extract.py` 裡的直排轉橫排程式 | P1 照搬不動（搬家不改行為）。P5a 若留管線 A，P7 再移除這段與它的測試 |
 | 已經做完的直排書產物（大耕紫微系列等封存 session） | 不受影響，照樣封存 |
+
+## 18. Office 檔：用到再做（MM 2026-11-13）
+
+- **不是必做項**。沒有實際需求前不寫正式支援，不列入 P5b 的驗收。
+- **P5b 順手試一次**：本機已裝 `markitdown` 0.1.5，拿一個含表格的 Word 檔與一個含圖的簡報各轉一次，把結果記在卡 #1328。只記錄，不接進 `ingest`。
+- **圖的部分用現成的 VLM**：`markitdown` 抽不出來或抽出來沒有說明的圖，走影片線已經在用的 llm-node VLM 圖說，不另外找工具。
+- **備案**：MM 之前用 Gemini 處理的效果不錯。`markitdown` 試出來不夠好時，下一個試的是 Gemini（走 agy，不走付費 API key）。
+- OfficeCLI 是讓 agent 編輯 Office 檔的工具，跟「轉成 Markdown」是兩件事，不在這一案。
 
