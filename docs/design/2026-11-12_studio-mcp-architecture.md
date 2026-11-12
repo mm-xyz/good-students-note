@@ -1,6 +1,6 @@
 # studio MCP — 架構與分期計畫（卡 #1267，併 #1175＋ai-reels）
 
-> 2026-11-12 · 狀態：**提案，等 MM 拍板 §11 最後一件事**（第 3 項；其餘已定）。本檔只有架構與規劃，沒有實作。
+> 2026-11-12 · 狀態：**§11 七件事全部拍板（MM 2026-11-12）**，進入執行。決策摘要見 `docs/adr/ADR-2026-11-12-1267.md`。本檔只有架構與規劃，沒有實作。
 > 範圍（MM 2026-11-12）：#1267 ＋ #1175 ＋ ai-reels 的 HyperFrames 短影音線，整個重構。
 > 分工：Fable 做架構與規劃；實作由 worker 照 §8 工單做。
 > 2026-11-12 追加（MM）：skill 整組重新設計，跟 MCP 一起翻修，見 §13。
@@ -114,7 +114,16 @@ studio-mcp/                     新 repo，私有（Forgejo），不對外發布
 
 `scripts/` 的子目錄在搬家時不改名。理由：23 個檔靠相對位置找彼此與專案根目錄，測試也是。目錄重整排在最後一期，那時已有合約測試保護。
 
-**不搬、留在 good-students-note 的**：`web/`（上游網站與 Web 工作室）、`scripts/lang/`、`build_genai2026_day*.py`、出版部署（`publish_goodedunote.sh` 一組）、上游的講稿與 `SRT/`。逐檔的去留由 P0 盤點表定。
+**不搬、留在 good-students-note 的**：`web/`（上游網站與 Web 工作室）、`scripts/lang/`、`build_genai2026_day*.py`、出版部署（`publish_goodedunote.sh` 一組）、上游的講稿。逐檔的去留由 P0 盤點表定。
+
+**一定要搬、容易漏的**（MM 2026-11-12 點名）：
+
+| 東西 | 位置 | 說明 |
+| :--- | :--- | :--- |
+| 清理程式 | `SRT/qaqc_srt.py` | 轉錄後套字典改錯字、濾幻覺與亂碼，產 `cleaned.srt`。不在 `scripts/` 底下 |
+| 字彙辭典 | `dict/` 7 個檔 | 通用、bim、parenting、productivity 四份錯字表，加幻覺開頭詞與清理設定 |
+| 散在別處的字彙 | astro-chunking 的 ASR 錯字對照；11 個 session 的 `corrections.txt` | 當初該推回 `dict/` 但沒推。P5b 收成新的領域字典（占星、紫微、podcast），封存的 session 才不會把它們一起埋掉 |
+| good-student | skill 本體＋`build_canvas.py` | 搬進 `skills/good-student/`，P5b 改寫 |
 
 ### 4.3 回傳信封
 
@@ -174,12 +183,12 @@ claude mcp add --scope user studio -- <studio-mcp>/.venv-studio/bin/python -m st
 | 過去的 session | 124 個全部留在 `good-students-note/sessions/`，不搬、不改。`studio.local.toml` 的 `archive_roots` 指過去 |
 | 封存的 session 能做什麼 | `session_find`、`session_status` 找得到，標示 `archived`。可以當短影音線的輸入（`reel_prepare` 只讀）。**不能**初剪、出片、處理 marker，這些工具對封存 session 回 `GATE_FAILED` |
 | 要重剪舊集數 | 用命令列 `bin/studio session adopt <路徑>`：把該 session 整個搬進新的 `sessions/`（連同 `.drive_dir`）。不做成 MCP 工具，由 MM 或在 MM 指示下執行 |
-| 還在進行中的集數 | P0 列出「沒有定稿版本」的 podcast session 清單給 MM 勾，勾到的在 P1 一併 adopt。預設：只 adopt EP22 兩個 session（最後出片 2026-11-05） |
+| 還在進行中的集數 | 沒有。EP22 已上架（MM 2026-11-12），連同其餘 session 一起封存。下一集直接在新 repo 開 |
 | 舊 repo | 搬完後 good-students-note 的 README 加一段指向新 repo；`.claude/skills/` 清空；程式不刪，維持可跑，但不再修改 |
 | ai-reels | `scripts/`、`template/`、3 份 ADR 搬走；PoC 四版與 `runs/` 留在原 repo。原 repo 凍結 |
 | 直譯器 | `.venv-audio`、`.venv-doc` 在新 repo 重建（照 `requirements-*.txt`）。模型快取在家目錄，不必重抓 |
 
-搬家那一期（P1）的完成定義只有一條：**新 repo 裡 `scripts/tests/run_all.sh` 與 cutplan-editor 的 node 測試全過，數量與舊 repo 相同；對 adopt 過來的 EP22 跑 `cut.py --check`，輸出與在舊 repo 跑的逐行相同。** 這一期不加任何新功能。
+搬家那一期（P1）的完成定義只有一條：**新 repo 裡 `scripts/tests/run_all.sh` 與 cutplan-editor 的 node 測試全過，數量與舊 repo 相同；把封存的 EP22 session 複製一份到暫存目錄，新舊 repo 各對它跑 `cut.py --check --no-push`，輸出逐行相同。** 這一期不加任何新功能。
 
 ## 5. 工具清單（19 個）
 
@@ -270,8 +279,8 @@ claude mcp add --scope user studio -- <studio-mcp>/.venv-studio/bin/python -m st
 
 | 期 | 內容 | 執行體 | 驗收重點 | 預估 |
 | :--- | :--- | :--- | :--- | :--- |
-| P0 | 逐檔盤點表（每支腳本：家族、誰呼叫它、有無測試、搬不搬、進不進 MCP）；重複腳本清單；兩條文件管線差異表；沒有定稿的 podcast session 清單；全機器引用 good-students-note 路徑的地方（launchd、mars-cc 腳本、skill symlink、llm-node 上的批次） | in-process Explore | 表列檔數＝`find` 實數 | 1 小時 |
-| P1 | **搬家，不改行為**：建 `studio-mcp`（本地＋Forgejo 私有）；照盤點表複製 `scripts/`、`reels/`、`dict/`、`prompts/`、`shared-material/`、ADR、設計文件；重建兩個 venv；adopt 進行中的 session；舊 repo 打 tag、加指路說明 | Claude sonnet | §4.7 的完成定義 | 3–4 小時 |
+| P0 | 逐檔盤點表（每支腳本：家族、誰呼叫它、有無測試、搬不搬、進不進 MCP）；重複腳本清單；兩條文件管線差異表；全機器引用 good-students-note 路徑的地方（launchd、mars-cc 腳本、skill symlink、llm-node 上的批次） | in-process Explore | 表列檔數＝`find` 實數 | 1 小時 |
+| P1 | **搬家，不改行為**：建 `studio-mcp`（本地＋Forgejo 私有）；照盤點表複製 `scripts/`、`reels/`、`dict/`、`prompts/`、`shared-material/`、ADR、設計文件；重建兩個 venv；舊 repo 打 tag、加指路說明 | Claude sonnet | §4.7 的完成定義 | 3–4 小時 |
 | P2 | `studio/` 骨架：config、runners、jobs、result、sessions（含封存根目錄與 `archived` 標示）；工具 `doctor`、`session_find`、`session_status`、`job_*`；`session adopt` 命令列；`.venv-studio`；註冊 | Claude sonnet | 用 stdio 起 server，列得出 6 個工具；`session_find("EP16")` 回封存的 session 並標 `archived`；殺掉 server 後 job 還活著 | 2–3 小時 |
 | P3 | 剪輯線 7 個工具。`cut.py` 加 `--json`、`--use`，雲端讀寫改走新增的 `remote.py`（rclone）；修 #1081；新增 `loudness.py`；**重寫 podcast-cut skill** | Claude sonnet | EP22 的 `cut_check` 摘要行與 `cut.py --check` 逐行相同；§6 每一個閘各有一個失敗案例測試；對封存 session 出片被拒；`cut_render` 全程沒有呼叫 rclone 的寫入；skill 過 §13.5 三項檢查 | 4–5 小時 |
 | P4 | server 的共用說明（`instructions` 欄位）定稿：job 怎麼等、錯誤碼怎麼處置、三條產線怎麼選、封存 session 的限制 | Claude sonnet | 新 session 不載任何 skill，只靠共用說明能完成「找 EP22 → 看狀態」 | 30 分鐘 |
@@ -310,13 +319,13 @@ claude mcp add --scope user studio -- <studio-mcp>/.venv-studio/bin/python -m st
 
 ## 11. 請 MM 拍板
 
-每一項都有預設。回「好」就照預設走。第 1、2、4、5、6、7 項已定，只剩第 3 項。
+每一項都有預設。回「好」就照預設走。七項全部已定。
 
 | # | 問題 | 預設 | 另一個選項 |
 | :--- | :--- | :--- | :--- |
 | 1 | studio MCP 放哪個 repo | ✔ **已定（MM 2026-11-12）：自己的 repo `studio-mcp`** | — |
 | 2 | 管線程式要不要也搬進新 repo | ✔ **已定（MM 2026-11-12）：搬。過去的 session 封存**，做法見 §4.7 | — |
-| 3 | 搬過去的命令列（`cut.py`、`precut.py`、`session.py` 等約 20 支可直接執行的腳本） | **保留原樣，各加一個 `--json`**。你手動跑的指令只差在換 repo 目錄 | 收成單一入口 `studio <產線> <動作>`，舊腳本不能再直接跑。要重寫所有 ADR 與測試裡的指令 |
+| 3 | 搬過去的命令列 | ✔ **已定（MM 2026-11-12）：保留原樣，各加 `--json`**。MM 平常由 agent 經 MCP 呼叫，自己不打指令，所以選改動最小的做法 | — |
 | 4 | 出片後推回雲端 | ✔ **已定（MM 2026-11-12）：包一個 rclone 加目的路徑**。獨立成 `publish_version` 工具，見 §5 與下方說明 | — |
 | 5 | 卡 #1175 | ✔ **已定（MM 2026-11-12）：discard**，已執行 | — |
 | 6 | 給外部使用者的版本 | ✔ **已定（MM 2026-11-12）：不需要**。Windows 安裝包、Claude Desktop 沙箱用法、兩個 installer 目錄直接刪除（git 歷史留得到），不另外凍結 | — |
@@ -324,7 +333,7 @@ claude mcp add --scope user studio -- <studio-mcp>/.venv-studio/bin/python -m st
 
 **第 4 項的落地（rclone）**：本機已有 rclone 1.75 與 `gdrive:`、`pcloud:` 兩個遠端。目的地寫在 `studio.local.toml`（例：`podcast.remote = "gdrive:<節目資料夾>"`），換雲端只改這一行，卡 #1202（編輯器改接 pCloud）之後可以直接沿用。P3 把 `cut.py` 裡讀寫 Drive 掛載路徑的部分全部換成 `remote.py`：讀遠端 cutplan 用 `rclone copyto` 抓到暫存檔再比對，寫用 `rclone copy`。好處是不再經過 macOS 的資料夾權限，tmux 底下被擋的問題（Operation not permitted）跟著消失；`.drive_dir` 的配對改記遠端路徑。
 
-拍板後接著做的事：寫 ADR（`ADR-<拍板日>-1267.md`）、開 P0–P7 九張卡、派 P0。P1 要等 P0 的盤點表與你勾的進行中集數清單。
+接著做的事：開 P0–P7 九張卡、派 P0。P1 要等 P0 的盤點表。
 
 ## 12. 不做
 
@@ -343,13 +352,15 @@ claude mcp add --scope user studio -- <studio-mcp>/.venv-studio/bin/python -m st
 | :--- | :--- | :--- |
 | good-student | 649 | 前 300 行是轉檔操作細節（ASR、diarize、llm-node 指令），後半才是切卡的判斷與格式 |
 | doc-vlm-to-md | 401 | 自帶 17 支腳本，跟 `scripts/doc/` 是兩條平行的文件管線 |
-| good-student-notes | 201 | 上游留下的 `session.py` 包裝，跟 `ingest` 重疊 |
+| good-student-notes | 201 | 上游留下的 `session.py` 包裝，跟 `ingest` 重疊。它的「身份視角註解筆記」124 個 session 沒有任何一個產出過，不搬 |
 | audio-to-md | 198 | 一半篇幅是 Windows 與 Claude Desktop 的安裝說明（不對外發布後整段可刪） |
 | doc-to-md | 123 | 同上；`doc_to_md.py` 有 3 份副本 |
 | video-to-md | 98 | 內文還寫 LM Studio（已退役） |
 | podcast-cut | 98 | 指令與路徑佔大半 |
 | astro-chunking | 122 | good-student 的前身，已設成不自動觸發 |
 | 短影音線 | 0 | 沒有 skill，流程寫在 ai-reels 的 README |
+
+清理的實際使用情況（2026-11-12 實查）：109 個有逐字稿的 session 裡，104 個有 `cleaned.srt`（套字典的清理，保留時間軸），只有 11 個走到 `cleaned.md`（合併段落的全文）。知識線實際上是拿 `cleaned.srt` 直接切卡。`to-md` 的標準終點因此訂為 `cleaned.srt`，`cleaned.md` 是選配。
 
 合計 1,890 行。同一件事（怎麼轉錄、圖片閘門、session 長什麼樣）在多顆 skill 各寫一次。
 
@@ -373,7 +384,7 @@ claude mcp add --scope user studio -- <studio-mcp>/.venv-studio/bin/python -m st
 
 | 新 skill | 取代 | 本文內容 | 目標行數 |
 | :--- | :--- | :--- | :--- |
-| `to-md` | audio-to-md、video-to-md、doc-to-md、doc-vlm-to-md、good-student-notes | 任何輸入 → 乾淨 Markdown。順序：`input_probe` → `ingest` → 依序處理 marker。判斷點：圖片閘門、版面確認、校稿、要不要做立場筆記。`references/` 分 audio、video、figures、notes 四份 | 120 |
+| `to-md` | audio-to-md、video-to-md、doc-to-md、doc-vlm-to-md、good-student-notes | 任何輸入 → 乾淨 Markdown。順序：`input_probe` → `ingest` → 依序處理 marker。判斷點：圖片閘門、版面確認、選哪個領域字典、校稿。`references/` 分 audio、video、figures 三份 | 120 |
 | `good-student` | good-student（後半）、astro-chunking | 知識點切卡。啟動儀式、試切 5 張、卡片格式、RAG 契約、canvas、驗收清單、派工守則。Step 0 縮成一句：先走 `to-md`，`input_probe` 說有圖就不准跳過 | 250 |
 | `podcast-cut` | podcast-cut | 流程：`session_find` → `cut_check` → 提案或人審 → `cut_render` → `loudness_report` → `diff_clips`。判斷點：合軌或分軌、提案規則、響度判讀、何時走 Audacity、何時可以推 Drive。cutplan 標記速查 | 70 |
 | `reel-cut`（新） | ai-reels README 的流程段 | `reel_prepare` → 讀逐字稿寫 `summary.json`（語氣、講者、貼圖規則）→ `reel_render` → 交 MM 過目 | 50 |
