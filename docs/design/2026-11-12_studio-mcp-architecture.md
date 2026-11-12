@@ -1,8 +1,9 @@
 # studio MCP — 架構與分期計畫（卡 #1267，併 #1175＋ai-reels）
 
-> 2026-11-12 · 狀態：**提案，等 MM 拍板 §11 五件事**。本檔只有架構與規劃，沒有實作。
+> 2026-11-12 · 狀態：**提案，等 MM 拍板 §11 七件事**。本檔只有架構與規劃，沒有實作。
 > 範圍（MM 2026-11-12）：#1267 ＋ #1175 ＋ ai-reels 的 HyperFrames 短影音線，整個重構。
 > 分工：Fable 做架構與規劃；實作由 worker 照 §8 工單做。
+> 2026-11-12 追加（MM）：skill 整組重新設計，跟 MCP 一起翻修，見 §13。
 
 ## 0. 一頁結論
 
@@ -12,7 +13,8 @@
 4. **MCP server 不匯入任何管線程式**：一律開子行程，用該產線自己的直譯器跑。
 5. **長工作走 job**：轉錄、初剪、出片先回 job id，再查狀態。
 6. **會傷到 MM 人審的寫入預設關閉**：推回 Drive 要明示；兩份 cutplan 不同時，要明示用哪一份。
-7. 分 6 期。P1 骨架做完就能在 Claude Code 裡找 session；P2 做完剪輯線可用。
+7. **skill 從 8 顆收成 4 顆**（§13）：skill 只寫何時用、順序、判斷點；路徑與參數全部交給工具。每條產線的 skill 跟該線的工具同一期做。
+8. 分 6 期。P1 骨架做完就能在 Claude Code 裡找 session；P2 做完剪輯線可用。
 
 ## 1. 名詞
 
@@ -248,13 +250,14 @@ claude mcp add --scope user studio -- <repo>/.venv-studio/bin/python -m studio.m
 | :--- | :--- | :--- | :--- | :--- |
 | P0 | 逐檔盤點表（每支腳本：家族、誰呼叫它、有無測試、進不進 MCP）；重複腳本清單 | in-process Explore | 表列檔數＝`find` 實數 | 30 分鐘 |
 | P1 | `studio/` 骨架：config、runners、jobs、result、sessions；工具 `doctor`、`session_find`、`session_status`、`job_*`；`.venv-studio`；註冊；測試接進 `run_all.sh` | Claude sonnet | 用 stdio 起 server，列得出 6 個工具；`session_find("EP22")` 回兩個 session 且不自動挑；殺掉 server 後 job 還活著 | 2–3 小時 |
-| P2 | 剪輯線 6 個工具。`cut.py` 加 `--json`、`--use`；修 #1081；新增 `loudness.py` | Claude sonnet | EP22 的 `cut_check` 摘要行與 `cut.py --check` 逐行相同；§6 每一個閘各有一個失敗案例測試 | 3–4 小時 |
-| P3 | 重寫 podcast-cut skill：只留何時用、流程、判斷點；操作細節改指工具 | Claude sonnet | skill 內每個路徑 `ls` 通過；每個指令在現況能跑 `--help` | 1 小時 |
-| P4 | 知識線 4 個工具。`session.py new` 加 `--json`；新增 `markers.py`、`input_probe.py`；good-student 等 4 個 skill 改指工具 | Claude sonnet | 用一個 30 秒音檔與一個 3 頁 PDF 跑完 `ingest`；marker 字數不足時 `marker_done` 拒絕 | 3–4 小時 |
-| P5 | 短影音線 2 個工具。`reel-build.mjs` 加 `--json` | Claude sonnet | EP15 `runs/ep15` 重跑，產物與既有的 `config.used.json`、`captions.json` 相同 | 1–2 小時 |
+| P2 | 剪輯線 6 個工具。`cut.py` 加 `--json`、`--use`；修 #1081；新增 `loudness.py`；**重寫 podcast-cut skill** | Claude sonnet | EP22 的 `cut_check` 摘要行與 `cut.py --check` 逐行相同；§6 每一個閘各有一個失敗案例測試；skill 過 §13.5 三項檢查 | 4–5 小時 |
+| P3 | server 的共用說明（`instructions` 欄位）定稿：job 怎麼等、錯誤碼怎麼處置、三條產線怎麼選 | Claude sonnet | 新 session 不載任何 skill，只靠共用說明能完成「找 EP22 → 看狀態」 | 30 分鐘 |
+| P4a | 兩條文件管線的取捨（§13.4），寫成 ADR | Claude opus | 差異表每一列有實跑證據；結論是「留哪一條、另一條的獨有能力怎麼搬」 | 1–2 小時 |
+| P4b | 知識線 4 個工具。`session.py new` 加 `--json`；新增 `markers.py`、`input_probe.py`；**新寫 to-md skill、重寫 good-student skill**，舊 5 顆下架 | Claude sonnet | 用一個 30 秒音檔與一個 3 頁 PDF 跑完 `ingest`；marker 字數不足時 `marker_done` 拒絕；skill 過 §13.5 三項檢查 | 5–6 小時 |
+| P5 | 短影音線 2 個工具。`reel-build.mjs` 加 `--json`；**新寫 reel-cut skill** | Claude sonnet | EP15 `runs/ep15` 重跑，產物與既有的 `config.used.json`、`captions.json` 相同；skill 過 §13.5 三項檢查 | 2–3 小時 |
 | P6 | 清理：其餘寫死路徑改讀設定；`doc_to_md.py` 三份併一份；`render_cut.py` 拆檔另開卡評估 | Claude sonnet，機械部分 haiku | 全部測試通過；`grep` 寫死的家目錄路徑歸零（`scripts/lang/` 除外） | 2–3 小時 |
 
-依賴：P1 → P2 → P3；P1 → P4；P1 → P5。P2、P4、P5 互不相依，但 Pro 方案同時只撐 2 條線，所以一次派一期實作＋一期驗收。P6 最後。
+依賴：P1 → P2 → P3；P1 → P4a → P4b；P1 → P5。P2、P4、P5 互不相依，但 Pro 方案同時只撐 2 條線，所以一次派一期實作＋一期驗收。P6 最後。
 
 驗收一律由另一個 agent 做（agy，複雜判斷用 `claude-opus-5-5-high` 或 `gemini-4-argon-high`），工單要求注入失敗並對發現編號。
 
@@ -287,8 +290,10 @@ claude mcp add --scope user studio -- <repo>/.venv-studio/bin/python -m studio.m
 | 3 | 既有命令列 | **保留**，加 `--json`。MM 手動跑的習慣與 ADR 裡的指令都不變 | 邏輯搬進 `studio/`，舊命令列變空殼。風險高，收益是目錄好看 |
 | 4 | `cut_render` 推回 Drive | **預設不推**，要明示 `push=true` | 照 `cut.py` 現行預設會推 |
 | 5 | 卡 #1175 | **標為被 #1267 取代並 discard** | 留著當 P2 的卡 |
+| 6 | 給外部使用者的版本（Windows 安裝包、Claude Desktop 沙箱用法，卡 #719） | **搬出 `.claude/skills/`**，原樣凍結在 `dist/skills/`。你自己用的 skill 不再帶這些段落 | 繼續同一份 skill 兼顧兩種讀者 |
+| 7 | astro-chunking skill | **封存**。它是 good-student 的前身，已設成不自動觸發 | 留著 |
 
-拍板後接著做的事：寫 ADR（`ADR-<拍板日>-1267.md`）、開 P0–P6 七張卡、派 P0 與 P1。
+拍板後接著做的事：寫 ADR（`ADR-<拍板日>-1267.md`）、開 P0–P6 八張卡、派 P0 與 P1。
 
 ## 12. 不做
 
@@ -297,3 +302,78 @@ claude mcp add --scope user studio -- <repo>/.venv-studio/bin/python -m studio.m
 - 不開放 `finalize --apply`、`tidy --apply`。
 - 不自動寫 `summary.json`、不自動翻 cutplan 勾選。這些是判斷，留給 agent 與 MM。
 - 不在這一案拆 `render_cut.py`。
+
+## 13. Skill 整體翻修（2026-11-12 MM 追加）
+
+### 13.1 現況
+
+| skill | 行數 | 問題 |
+| :--- | :--- | :--- |
+| good-student | 649 | 前 300 行是轉檔操作細節（ASR、diarize、llm-node 指令），後半才是切卡的判斷與格式 |
+| doc-vlm-to-md | 401 | 自帶 17 支腳本，跟 `scripts/doc/` 是兩條平行的文件管線 |
+| good-student-notes | 201 | 上游留下的 `session.py` 包裝，跟 `ingest` 重疊 |
+| audio-to-md | 198 | 一半篇幅是 Windows 與 Claude Desktop 的安裝說明 |
+| doc-to-md | 123 | 同上；`doc_to_md.py` 有 3 份副本 |
+| video-to-md | 98 | 內文還寫 LM Studio（已退役） |
+| podcast-cut | 98 | 指令與路徑佔大半 |
+| astro-chunking | 122 | good-student 的前身，已設成不自動觸發 |
+| 短影音線 | 0 | 沒有 skill，流程寫在 ai-reels 的 README |
+
+合計 1,890 行。同一件事（怎麼轉錄、圖片閘門、session 長什麼樣）在多顆 skill 各寫一次。
+
+### 13.2 分工原則
+
+一句話：**工具管「怎麼做」，skill 管「何時做、先後順序、怎麼判斷」。**
+
+| 內容 | 放哪裡 |
+| :--- | :--- |
+| 路徑、參數、指令、安裝步驟 | 工具本身。skill 不寫 |
+| 單一工具的用途、參數、回傳 | 該工具的說明欄 |
+| 跨工具的共用規矩（job 怎麼等、錯誤碼處置、Drive 讀不到怎麼辦） | MCP server 的 `instructions` 欄位。連上 server 就自動載入，不佔 skill |
+| 何時觸發、步驟順序、人審關卡、品質標準、輸出格式 | skill 本文 |
+| 只有某種輸入才用到的長規則（看圖填空鐵律、卡片格式全文） | skill 的 `references/`，用到才讀 |
+| 程式擋得住的坑（章節數對不上、marker 沒清、講者沒定義） | 改成工具的閘與錯誤碼，從 skill 刪掉 |
+| 要靠判斷的坑（MM 說有怪聲先去量、提案只能翻勾選） | 留在 skill |
+
+檢查方式：skill 本文出現 `scripts/` 路徑或命令列旗標，就是缺陷。唯一例外是 cutplan 標記速查，那是內容格式，不是指令。
+
+### 13.3 新的 skill 組（8 → 4）
+
+| 新 skill | 取代 | 本文內容 | 目標行數 |
+| :--- | :--- | :--- | :--- |
+| `to-md` | audio-to-md、video-to-md、doc-to-md、doc-vlm-to-md、good-student-notes | 任何輸入 → 乾淨 Markdown。順序：`input_probe` → `ingest` → 依序處理 marker。判斷點：圖片閘門、版面確認、校稿、要不要做立場筆記。`references/` 分 audio、video、figures、notes 四份 | 120 |
+| `good-student` | good-student（後半）、astro-chunking | 知識點切卡。啟動儀式、試切 5 張、卡片格式、RAG 契約、canvas、驗收清單、派工守則。Step 0 縮成一句：先走 `to-md`，`input_probe` 說有圖就不准跳過 | 250 |
+| `podcast-cut` | podcast-cut | 流程：`session_find` → `cut_check` → 提案或人審 → `cut_render` → `loudness_report` → `diff_clips`。判斷點：合軌或分軌、提案規則、響度判讀、何時走 Audacity、何時可以推 Drive。cutplan 標記速查 | 70 |
+| `reel-cut`（新） | ai-reels README 的流程段 | `reel_prepare` → 讀逐字稿寫 `summary.json`（語氣、講者、貼圖規則）→ `reel_render` → 交 MM 過目 | 50 |
+
+本文合計約 490 行，是現在的四分之一。
+
+舊名稱的處理：四顆轉檔 skill 的觸發語（「只要逐字稿」「把這份 PDF 轉成 Markdown 就好」「帶截圖的逐字稿」）全部併進 `to-md` 的 description。`/audio-to-md` 等舊斜線指令不留別名；`~/.claude/skills/` 的 symlink 同步增刪。
+
+4 顆都住 `good-students-note/.claude/skills/`，跟工具同一個 repo、同一個 commit 改。
+
+### 13.4 兩條文件管線要先選一條
+
+現在有兩套做同一件事的程式：
+
+| | 由誰用 | 入口 |
+| :--- | :--- | :--- |
+| A | `session.py new <pdf>`（ADR 0008） | `scripts/doc/extract.py`、`scripts/doc/figures.py` |
+| B | doc-to-md、doc-vlm-to-md 兩顆 skill | skill 目錄裡的 `doc_to_md.py`、`kb_prep.py` 等 17 支 |
+
+`ingest` 只能包一條。我沒有實跑比較過，不在這裡下結論。P0 盤點要交出兩條的差異表（各自獨有的能力：直排轉橫排、EPUB 內嵌圖、OCR-first、語料倉同步、打包 zip），P4a 由 opus 定案並寫 ADR。這是整案裡唯一還沒有答案的設計問題。
+
+### 13.5 skill 的驗收（三項，每顆都要過）
+
+1. **搬遷對照表**：舊 skill 的每一段（以標題為單位）都對到一個去處：工具的閘、工具說明、共用說明、新 skill、references、或「刪除＋理由」。沒有對不到去處的段落。
+2. **機械檢查**：新 skill 本文 `grep` 不到 `scripts/`、`.venv`、`python3`；提到的每個工具名都在 server 的工具清單裡。
+3. **冷啟動實測**：開一個新 session，只給 skill 與 MCP，交辦該線的標準任務（剪輯線：EP22 只驗不剪；知識線：一個 3 頁 PDF 轉 Markdown；短影音線：EP15 準備到寫摘要之前）。全程沒有讀 `scripts/` 底下任何檔案才算過。
+
+第 3 項驗的是結果，不是文件寫得好不好看。
+
+### 13.6 連帶要改的地方
+
+- `good-students-note/CLAUDE.md` 的三軌分工表與 Quick Start：加上 studio MCP 這個入口。
+- `mars-cc` 裡提到舊 skill 名稱的地方（其他 skill、protocols、記憶索引）：P4b 的工單要求先 `grep` 列出，再逐一改。
+- `doc-to-md-installer/`、`doc-vlm-to-md-installer/`：照 §11 第 6 項處理。
+
