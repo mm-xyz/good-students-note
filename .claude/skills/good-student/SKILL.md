@@ -619,7 +619,7 @@ python3 .claude/skills/good-student/scripts/build_canvas.py <輸出目錄> \
 - 批量切卡派 luna MAX（codex 不可用時派 Claude sonnet）；不派 haiku（會照抄贅詞或腦補）。
 - 試切 5 張由主線自己做，不派工——gate 的意義是校準格式，派出去就校不到了。
 
-### 長工作一律用 orca-cli 派，不要用背景 shell（2026-09-07 MM 拍板）
+### 長工作一律用 Orca terminal 派（`/orchestrator` 的 references/orca-cli.md），不要用背景 shell（2026-09-07 MM 拍板）
 
 轉錄、批量切卡這種以「小時」計的工作，**不要**用 in-process 背景任務或 `setsid nohup … &`：
 
