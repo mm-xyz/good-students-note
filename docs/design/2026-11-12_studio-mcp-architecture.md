@@ -611,7 +611,7 @@ P5b 驗收加一條：給一個文章網址，agent 只靠 skill 把它變成 se
 
 ## 22. 派工前置：先確認訂閱方案；Gemini 改用 Hydrogen（MM 2026-11-13）
 
-這兩項是改 `mars-cc/000_Agent/protocols/model-dispatch.md` 的規則，屬於結構性變更，要走該檔 §5 的合併前檢查（worktree、死引用掃描、語意保全、跨 runtime 複驗）。排成 P1 之前的一步，卡另開。下面是要寫進去的內容。
+這兩項是改 `mars-cc/000_Agent/protocols/model-dispatch.md` 的規則，屬於結構性變更，要走該檔 §5 的合併前檢查（worktree、死引用掃描、語意保全、跨 runtime 複驗）。排成 P1 之前的一步，卡 #1334。下面是要寫進去的內容。
 
 ### 22.1 派工前確認方案
 
@@ -654,7 +654,7 @@ P5b 驗收加一條：給一個文章網址，agent 只靠 skill 把它變成 se
 | 期 | 卡 | 做什麼 | 要開發的 | 要測的 | 預估 | 狀態 |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
 | P0 | #1322 | 盤點 | — | 逐檔表 345 列對上 `git ls-files` | 已完成 | done |
-| 前置 | 待開 | 改派工制度（§22） | `model-dispatch.md` 兩處 | §5 合併前檢查五項 | 1 小時 | 未開始 |
+| 前置 | #1334 | 改派工制度（§22） | `model-dispatch.md` 兩處 | §5 合併前檢查五項 | 1 小時 | 未開始 |
 | 前置 | — | 查 llm-node 上有沒有引用舊路徑的排程 | — | ssh 查一次 | 15 分鐘 | 未開始 |
 | P1 | #1323 | 搬家，不改行為 | 建 `studio-mcp`；複製 256 個檔加 2 支字幕腳本；重建兩個 venv；改 mars-cc 三處引用；舊 repo 打 tag | 逐支測試的通過與跳過數與舊 repo 相同；封存 EP22 的複本 `cut.py --check` 新舊逐行相同 | 4–5 小時 | backlog |
 | P2 | #1324 | 轉接頭骨架 | `studio/` 的 config、runners、jobs、result、sessions；6 個共用工具；`session adopt`；註冊 | stdio 列得出 6 個工具；封存 session 標 `archived`；殺 server 後 job 還活著；每個錯誤碼一個失敗案例 | 2–3 小時 | backlog |
