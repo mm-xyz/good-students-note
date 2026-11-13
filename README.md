@@ -1,5 +1,9 @@
 # The Physics of Insight
 
+> **2026-11-13：管線程式已搬到 `studio-mcp`（卡 #1323）。**
+> `scripts/audio`、`scripts/doc`、`scripts/frames`、`session.py`、`SRT/qaqc_srt.py`、`dict/`、7 顆 skill 之後只在 `~/GithubRepo_mm-xyz/studio-mcp` 修改；這裡的同名檔停在 tag `pre-studio-split`，維持可跑但不再更新。
+> 仍留在本 repo 的：`web/`、出版腳本、`scripts/lang/`、`sessions/`（過去的 session，封存只讀）。
+
 **兩件事共存的專案**:
 1. **好學生筆記工具** — 音訊/影片 → 逐字稿 → 合併校稿 → 專有名詞補充 → 立場置入的好學生筆記。CLI pipeline + Web Studio 雙軌。**本 README 下半部是工具的執行用法。**
 2. **Physics of Insight 視覺網頁** — 結合 Jack Butcher (Visualize Value) 設計風格與松尾研 LLM 課程學習心得的互動網頁,本專案的「前身作」,保留在 `/web/index.html` 主站。
