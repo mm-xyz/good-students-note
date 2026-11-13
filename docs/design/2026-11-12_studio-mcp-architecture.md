@@ -608,3 +608,87 @@ P5b 驗收加一條：給一個文章網址，agent 只靠 skill 把它變成 se
 
 排期：併進 P5b，預估多 2 小時。`ingest` 的影片選項加 `probe_region`（預設開）。
 
+
+## 22. 派工前置：先確認訂閱方案；Gemini 改用 Hydrogen（MM 2026-11-13）
+
+這兩項是改 `mars-cc/000_Agent/protocols/model-dispatch.md` 的規則，屬於結構性變更，要走該檔 §5 的合併前檢查（worktree、死引用掃描、語意保全、跨 runtime 複驗）。排成 P1 之前的一步，卡另開。下面是要寫進去的內容。
+
+### 22.1 派工前確認方案
+
+現行寫法是「Claude Pro 方案同時只撐 2 條線」，數字寫死。改成每一批派工前實查：
+
+| 項目 | 內容 |
+| :--- | :--- |
+| 指令 | `claude auth status`，讀輸出的 `subscriptionType` |
+| 何時查 | 每一批派工的第一張工單之前查一次，結果寫進該批的卡片留言 |
+| 併發上限 | `pro` → 2 條線；`max` → 4 條線（起始值）。一張卡的實作與驗收各算一條 |
+| 上限怎麼校正 | 一批裡有 worker 撞到用量上限，下一批就減 1，並把實測值寫回制度檔。沒撞到連續三批，可以加 1，上限 6 |
+| 查不到或指令失敗 | 當成 `pro`，用 2 條線 |
+
+**2026-11-13 實查**：`claude auth status` 目前回 `subscriptionType: pro`，`~/.claude.json` 的方案欄位也還是 pro。MM 說已切到 Max，所以這台機器的登入資訊還沒更新。開工前請 MM 在 Claude Code 裡重新登入一次，再查到 `max` 才用新的上限。這也說明為什麼要實查而不是寫死。
+
+`max` 對應 4 條線是我訂的起始值，沒有實測依據。
+
+### 22.2 agy 的模型改用 Hydrogen
+
+`agy models` 2026-11-13 實查有 `gemini-4-hydrogen-low`、`-medium`、`-high`、`-xhigh` 四個；`gemini-4-hydrogen-high` 的 headless 呼叫實測可用（約 4 秒回覆）。
+
+| 用途 | 現行 | 改成 |
+| :--- | :--- | :--- |
+| 一般任務 | `gemini-3.8-flash-high` | `gemini-4-hydrogen-medium` |
+| 深推理、多源交叉驗證、複雜驗收 | `gemini-4-argon-high` | `gemini-4-hydrogen-high` |
+| 規則檔與結構性變更的驗收 | `claude-opus-5-5-high` 或 `gemini-4-argon-high` | `claude-opus-5-5-high` 或 `gemini-4-hydrogen-xhigh` |
+| 額度用完（429）時的退路 | 降 `gemini-3.8-flash-high` | Hydrogen 429 → 退 `gemini-4-argon-high` → 再退 `gemini-3.8-flash-high`，回報寫「降級驗收」 |
+| 規格清楚、可機械核對的驗收 | `gemini-3.8-flash-high` | 不變（便宜的留給便宜的事） |
+
+還沒測的：Hydrogen 的額度多大、互動版（要自己讀 repo 跑指令）穩不穩。第一次用互動版時先派一個小任務試跑，結果寫回制度檔。
+
+### 22.3 對本案的影響
+
+查到 `max` 之後，§8 的「一次派一期實作＋一期驗收」放寬成：P3、P5a 可以在 P2 驗收通過後同時開工，各配一條驗收線，共 4 條。P1、P2 仍然依序，因為後面每一期都踩在它們上面。
+
+## 23. 總表（2026-11-13 定版）
+
+### 23.1 各期摘要
+
+| 期 | 卡 | 做什麼 | 要開發的 | 要測的 | 預估 | 狀態 |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| P0 | #1322 | 盤點 | — | 逐檔表 345 列對上 `git ls-files` | 已完成 | done |
+| 前置 | 待開 | 改派工制度（§22） | `model-dispatch.md` 兩處 | §5 合併前檢查五項 | 1 小時 | 未開始 |
+| 前置 | — | 查 llm-node 上有沒有引用舊路徑的排程 | — | ssh 查一次 | 15 分鐘 | 未開始 |
+| P1 | #1323 | 搬家，不改行為 | 建 `studio-mcp`；複製 256 個檔加 2 支字幕腳本；重建兩個 venv；改 mars-cc 三處引用；舊 repo 打 tag | 逐支測試的通過與跳過數與舊 repo 相同；封存 EP22 的複本 `cut.py --check` 新舊逐行相同 | 4–5 小時 | backlog |
+| P2 | #1324 | 轉接頭骨架 | `studio/` 的 config、runners、jobs、result、sessions；6 個共用工具；`session adopt`；註冊 | stdio 列得出 6 個工具；封存 session 標 `archived`；殺 server 後 job 還活著；每個錯誤碼一個失敗案例 | 2–3 小時 | backlog |
+| P3 | #1325 | 剪輯線 | 7 個工具；`cut.py` 加 `--json`、`--use`；`remote.py`（rclone）；`loudness.py`；修 #1081；重寫 podcast-cut skill | 新舊輸出逐行相同；每個安全閘一個失敗案例；出片全程不寫雲端；skill 三項檢查 | 4–5 小時 | backlog |
+| 實測 | #1325 | 新一集走完整流程 | — | 整集剪完，agent 沒讀 `scripts/`、沒手打指令 | 12-06 前備妥，12-25 前後上架 | — |
+| P4 | #1326 | server 共用說明 | `instructions` 欄位 | 不載 skill 也能找 session、看狀態 | 30 分鐘 | backlog |
+| P5a | #1327 | 兩條文件管線選一條 | ADR | 差異表每列有實跑證據；查清管線 B 實際跑的是哪一份 | 1–2 小時 | backlog |
+| P5b | #1328 | 知識線 | 4 個工具；`markers.py`、`input_probe.py`、`probe_region.py`；YouTube 字幕路線；`to-md`、`good-student` 兩顆 skill；占星三段搬進 references；領域字典 | 30 秒音檔、3 頁 PDF、有字幕的 YouTube 各跑一次；marker 字數不足被拒；3 支影片校正講義區門檻；不支援的類型明確拒絕；順手試 `markitdown` | 8–10 小時 | backlog |
+| P7 | #1330 | 清理 | 寫死路徑改讀設定；`doc_to_md.py` 併一份；移除直排程式；死碼判定 | 全部測試通過；寫死的家目錄路徑歸零 | 2–3 小時 | backlog |
+| P6 | #1329 | 短影音線（延後） | 2 個工具；reel-cut skill | 封存 EP15 重跑結果相同 | 2–3 小時 | 等 MM 決定 |
+| 另案 | #1331 | 通用開網頁 skill | Orca 瀏覽器讀內文 | 三種頁面各一實測 | 待估 | backlog |
+
+合計（不含 P6 與 #1331）：實作約 22–29 小時，每期另加一次驗收。
+
+### 23.2 來源媒體與可做的事
+
+| 來源 | 轉成文字 | 清理 | 切知識卡 | 剪輯 | 做短影音 | 哪一期 |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| 音檔 | 可以 | 可以 | 可以 | 可以（podcast） | 延後 | P3、P5b |
+| 影片檔 | 可以，含畫面文字與圖說 | 可以 | 可以 | 不行 | 不行 | P5b |
+| 影片檔的講義畫面 | 抽 20 幀判斷固定講義區後擷取 | — | 圖進卡片 | — | — | P5b 新增 |
+| YouTube 網址 | 字幕優先，不夠好才下載轉錄 | 可以 | 可以 | 不行 | 不行 | P5b 新增 |
+| PDF（文字層） | 可以，含圖表頁 | 可以 | 可以 | — | — | P5b |
+| PDF（掃描頁） | 視 P5a 選哪條管線 | 同左 | 同左 | — | — | P5a 後 |
+| EPUB | 可以；內嵌圖視 P5a | 可以 | 可以 | — | — | P5b |
+| TXT | 可以 | 可以 | 可以 | — | — | P5b |
+| SRT、VTT 字幕檔 | 要補一個入口 | 可以 | 可以 | — | — | P5b |
+| 文章網址 | 走通用開網頁 skill | 可以 | 可以 | — | — | #1331 |
+| Word、PowerPoint、Excel、網頁檔 | 用到再做；P5b 順手試一次 | — | — | — | — | 未排 |
+| 直排書 | 放棄 | — | — | — | — | — |
+| 純圖片資料夾、Markdown | 不行 | — | — | — | — | 未排 |
+| 過去的 session（封存） | 只讀 | 不行 | 可讀來切卡 | 不行，要先 adopt | 可當輸入 | P2 |
+
+### 23.3 工具與 skill 數量
+
+- MCP 工具：先做 17 個（共用 6、知識線 4、剪輯線 7）；短影音 2 個延後。
+- skill：先做 3 顆（`to-md`、`good-student`、`podcast-cut`）；`reel-cut` 延後；通用開網頁 skill 另案。
